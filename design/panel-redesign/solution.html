@@ -47,7 +47,8 @@
   .group-label span { color: var(--ink-4); font-weight: 400; }
   .task-row { display: block; width: 100%; padding: 9px 10px; border: 0; border-radius: 8px; background: transparent; text-align: left; }
   .task-row:hover { background: var(--hover); }
-  .task-row[aria-selected='true'] { background: var(--bg-soft); box-shadow: inset 2px 0 0 var(--ink-1); }
+  .task-row[aria-selected='true'] { background: var(--bg-soft); box-shadow: inset 0 0 0 1px var(--line-3); }
+  .task-row[aria-selected='true'] .task-title { font-weight: 600; }
   .task-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-1); font: 500 13px/20px var(--font); }
   .task-meta { display: flex; align-items: center; gap: 6px; margin-top: 3px; color: var(--ink-3); font: 400 11px/17px var(--font); }
   .task-meta .badge { height: 18px; font-size: 10px; line-height: 18px; padding: 0 6px; }
@@ -68,9 +69,9 @@
   .meta-line { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 10px; color: var(--ink-3); font: 400 11px/18px var(--mono); }
   .meta-line b { color: var(--ink-2); font-weight: 500; }
   .actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0 4px; }
-  .question { margin-top: 18px; padding: 15px 16px; border: 1px solid color-mix(in srgb, var(--amber) 22%, var(--line-2)); border-left: 3px solid var(--amber); border-radius: 12px; background: var(--amber-soft); }
+  .question { margin-top: 18px; padding: 15px 16px; border: 1px solid color-mix(in srgb, var(--amber) 18%, var(--line-3)); border-radius: 12px; background: color-mix(in srgb, var(--amber-soft) 45%, #fff); box-shadow: 0 1px 2px rgba(15, 17, 21, 0.03); }
   .question .q-kicker { display: flex; align-items: center; gap: 6px; color: var(--amber-label); font: 500 11px/18px var(--font); }
-  .question.blocked { background: var(--red-soft); border-color: color-mix(in srgb, var(--red) 18%, var(--line-2)); border-left-color: var(--red); }
+  .question.blocked { background: color-mix(in srgb, var(--red-soft) 38%, #fff); border-color: color-mix(in srgb, var(--red) 14%, var(--line-3)); }
   .question.blocked .q-kicker { color: var(--red); }
   .question p { margin-top: 4px; color: var(--ink-1); font: 400 14px/22px var(--font); }
   .question .answer { margin-top: 12px; padding-top: 12px; border-top: 1px solid color-mix(in srgb, var(--amber) 20%, transparent); }
@@ -432,7 +433,7 @@
 
         ${question ? (ticket.stage === 'waiting' ? `
           <section class="question" aria-label="等待你的回复">
-            <div class="q-kicker">${S.icon('message', 'icon-sm')} 等待你回复</div>
+            <div class="q-kicker"><span class="dot dot-amber"></span> 等待你回复</div>
             <p>${S.esc(ticket.question)}</p>
             ${sent ? `<div class="answered">${S.icon('checkCircle', 'icon-sm')} 已回复 · 工单会继续执行</div>` : `
               <div class="answer">
@@ -443,7 +444,7 @@
               </div>`}
           </section>` : `
           <section class="question blocked" aria-label="验证未通过">
-            <div class="q-kicker">${S.icon('alert', 'icon-sm')} 验证未通过</div>
+            <div class="q-kicker"><span class="dot dot-red"></span> 验证未通过</div>
             <p>${S.esc(ticket.question)}</p>
             <div class="row" style="margin-top:12px"><button class="btn btn-outline" data-action="toast" data-text="重试在原型中不可用">${S.icon('refresh', 'icon-sm')} 重试</button>
               <button class="btn btn-ghost" data-action="toast" data-text="失败输出在原型中不可用">查看失败输出</button>
