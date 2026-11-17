@@ -941,3 +941,16 @@ describe('the Executor\'s parts', () => {
     expect(JSON.parse(ready.text)).toMatchObject({ kind: 'worker_report', ticket: { ticket_id: 't1' }, trigger_id: 'tr1', state: 'ready', answer_to: 'tr9', summary: 'Done' })
   })
 })
+
+it('routes subscribed Feishu topic recovery through the manager before local intake in managed mode', async () => {
+  const message = feishu('99', 'recovered follow-up')
+  h.runtime.machine.managed = { repositoryId: 'repository-a', url: 'http://127.0.0.1:39999', token: 'local-test-token' }
+  const fetcher = vi.fn(async (_url: string, _init?: RequestInit) => Response.json({ result: 'duplicate' }))
+  vi.stubGlobal('fetch', fetcher)
+  try {
+    await expect(h.runtime.context({ kind: 'feishu', health: ['feishu', 'history'] }).receive(message)).resolves.toBe('duplicate')
+    expect(fetcher).toHaveBeenCalledOnce()
+    expect(fetcher.mock.calls[0]?.[0]).toBe('http://127.0.0.1:39999/orchestrator/internal/repository-a/receive')
+    expect(h.runtime.store.triggers.get(message.id)).toBeUndefined()
+  } finally { delete h.runtime.machine.managed; vi.unstubAllGlobals() }
+})

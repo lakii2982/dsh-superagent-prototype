@@ -137,9 +137,10 @@ export function apply(ctx: Context): void {
     const source = sourceContext(ctx.orchestrator, feishuKind)
     const running = !ctx.orchestrator.managed ? runFeishu(source, controller.signal) : source.ready.then(async () => {
       if (!source.configured()) return
+      source.report('feishu', { state: 'ready', detail: 'Events delivered by the shared manager' })
       // Only the manager consumes events and group history; instances retain their subscribed-topic recovery.
       while (!controller.signal.aborted) {
-        try { await pollThreads(source, controller.signal) }
+        try { await pollThreads(source, controller.signal); source.report('history', { state: 'ready', detail: 'Subscribed topics checked' }) }
         catch (error) { source.report('history', { state: 'error', detail: String(error) }) }
         await pause(60_000, controller.signal)
       }
