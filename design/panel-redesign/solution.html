@@ -1,0 +1,776 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Superagent · 整合方案</title>
+<link rel="stylesheet" href="assets/base.css" />
+<style>
+  body { height: 100vh; overflow: hidden; }
+  .shell { display: grid; grid-template-columns: 196px 360px minmax(0, 1fr); height: 100vh; }
+  .shell.is-settings { grid-template-columns: 196px minmax(0, 1fr); }
+  /* nav */
+  .nav { display: flex; flex-direction: column; gap: 2px; padding: 14px 10px 10px; background: var(--bg-subtle); border-right: 1px solid var(--line-2); min-height: 0; }
+  .brand { display: flex; align-items: center; gap: 9px; padding: 2px 8px 14px; font: 600 14px/20px var(--font); }
+  .mark { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 7px; background: var(--ink-1); color: #fff; font: 600 12px/1 var(--font); }
+  .repo-switch { display: flex; flex-direction: column; gap: 1px; width: 100%; padding: 7px 8px; border: 0; border-radius: 8px; background: transparent; text-align: left; color: var(--ink-3); }
+  .repo-switch:hover { background: var(--hover); }
+  .repo-switch b { font: 500 12px/18px var(--font); color: var(--ink-1); }
+  .repo-switch span { font: 400 11px/16px var(--mono); }
+  .nav-items { display: flex; flex-direction: column; gap: 2px; margin-top: 14px; }
+  .nav-item { display: flex; align-items: center; gap: 9px; width: 100%; height: 32px; padding: 0 9px; border: 0; border-radius: 8px; background: transparent; color: var(--ink-2); font: 400 13px/20px var(--font); text-align: left; }
+  .nav-item .icon { width: 16px; height: 16px; color: var(--ink-3); }
+  .nav-item:hover { background: var(--hover); color: var(--ink-1); }
+  .nav-item:hover .icon { color: var(--ink-2); }
+  .nav-item[aria-current='page'] { background: var(--bg-muted); color: var(--ink-1); font-weight: 500; }
+  .nav-item[aria-current='page'] .icon { color: var(--ink-1); }
+  .nav-item .count { margin-left: auto; color: var(--ink-3); font: 400 12px/18px var(--font); font-variant-numeric: tabular-nums; }
+  .nav-item[aria-current='page'] .count { color: var(--ink-2); }
+  .nav-foot { margin-top: auto; display: flex; flex-direction: column; gap: 10px; padding-top: 14px; }
+  .health { display: flex; align-items: flex-start; gap: 8px; padding: 8px; border-radius: 8px; background: var(--amber-soft); color: var(--ink-2); font: 400 12px/18px var(--font); }
+  .health .dot { margin-top: 6px; }
+  .health b { display: block; color: var(--ink-1); font-weight: 500; }
+  .health button { padding: 0; border: 0; background: none; color: var(--blue); font: 500 12px/18px var(--font); }
+  .user { display: flex; align-items: center; gap: 8px; padding: 2px 8px; color: var(--ink-2); font: 400 12px/18px var(--font); }
+  /* queue */
+  .queue { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--line-2); background: var(--bg); }
+  .queue-head { padding: 18px 16px 10px; border-bottom: 1px solid var(--line-1); }
+  .queue-head .row { justify-content: space-between; align-items: baseline; }
+  .queue-head h1 { font: 600 16px/24px var(--font); }
+  .search { display: flex; align-items: center; gap: 8px; width: 100%; height: 32px; margin: 12px 0 10px; padding: 0 9px; border: 1px solid var(--line-3); border-radius: 8px; background: var(--bg); color: var(--ink-3); font: 400 13px/20px var(--font); text-align: left; }
+  .search:hover { border-color: var(--line-4); }
+  .search kbd { margin-left: auto; }
+  .filters { display: flex; gap: 2px; }
+  .filters .chip { height: 26px; padding: 0 8px; }
+  .queue-body { padding: 8px 8px 24px; }
+  .group-label { display: flex; align-items: center; gap: 6px; padding: 14px 8px 5px; color: var(--ink-3); font: 600 11px/16px var(--font); letter-spacing: .02em; }
+  .group-label span { color: var(--ink-4); font-weight: 400; }
+  .task-row { display: block; width: 100%; padding: 9px 10px; border: 0; border-radius: 8px; background: transparent; text-align: left; }
+  .task-row:hover { background: var(--hover); }
+  .task-row[aria-selected='true'] { background: var(--bg-soft); box-shadow: inset 2px 0 0 var(--ink-1); }
+  .task-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-1); font: 500 13px/20px var(--font); }
+  .task-meta { display: flex; align-items: center; gap: 6px; margin-top: 3px; color: var(--ink-3); font: 400 11px/17px var(--font); }
+  .task-meta .badge { height: 18px; font-size: 10px; line-height: 18px; padding: 0 6px; }
+  .task-snippet { margin-top: 4px; color: var(--ink-3); font: 400 12px/18px var(--font); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .problem-row { display: flex; gap: 8px; width: 100%; margin: 4px 0 6px; padding: 9px 10px; border: 1px solid color-mix(in srgb, var(--amber) 24%, #fff); border-radius: 8px; background: var(--amber-soft); text-align: left; }
+  .problem-row .dot { margin-top: 6px; }
+  .problem-row b { display: block; font: 500 12px/18px var(--font); }
+  .problem-row span { display: block; margin-top: 1px; color: var(--ink-2); font: 400 12px/18px var(--font); }
+  /* detail */
+  .detail { min-width: 0; overflow: auto; background: var(--bg); }
+  .detail-inner { max-width: 760px; margin: 0 auto; padding: 24px 36px 72px; }
+  .crumb { display: flex; align-items: center; gap: 6px; color: var(--ink-3); font: 400 12px/18px var(--font); }
+  .crumb .badge { height: 18px; font-size: 10px; padding: 0 6px; line-height: 18px; }
+  .title-row { display: flex; align-items: flex-start; gap: 16px; margin-top: 8px; }
+  .title-row h2 { flex: 1; font: 600 20px/28px var(--font); letter-spacing: -.01em; }
+  .meta { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 8px; color: var(--ink-3); font: 400 12px/18px var(--font); }
+  .meta .src { display: inline-flex; align-items: center; gap: 4px; color: var(--ink-2); }
+  .meta-line { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 10px; color: var(--ink-3); font: 400 11px/18px var(--mono); }
+  .meta-line b { color: var(--ink-2); font-weight: 500; }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0 4px; }
+  .question { margin-top: 18px; padding: 15px 16px; border: 1px solid color-mix(in srgb, var(--amber) 22%, var(--line-2)); border-left: 3px solid var(--amber); border-radius: 12px; background: var(--amber-soft); }
+  .question .q-kicker { display: flex; align-items: center; gap: 6px; color: var(--amber-label); font: 500 11px/18px var(--font); }
+  .question.blocked { background: var(--red-soft); border-color: color-mix(in srgb, var(--red) 18%, var(--line-2)); border-left-color: var(--red); }
+  .question.blocked .q-kicker { color: var(--red); }
+  .question p { margin-top: 4px; color: var(--ink-1); font: 400 14px/22px var(--font); }
+  .question .answer { margin-top: 12px; padding-top: 12px; border-top: 1px solid color-mix(in srgb, var(--amber) 20%, transparent); }
+  .question textarea { min-height: 64px; }
+  .question .row { margin-top: 8px; }
+  .answered { display: flex; align-items: center; gap: 6px; margin-top: 10px; color: var(--ink-2); font: 400 13px/20px var(--font); }
+  .block { margin-top: 26px; }
+  .block > h3 { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; color: var(--ink-2); font: 600 13px/20px var(--font); }
+  .block > p { color: var(--ink-2); font: 400 14px/23px var(--font); }
+  .events { position: relative; padding-left: 18px; }
+  .events::before { content: ''; position: absolute; left: 4px; top: 8px; bottom: 10px; width: 1px; background: var(--line-2); }
+  .event { position: relative; padding: 0 0 15px; }
+  .event::before { content: ''; position: absolute; left: -18px; top: 6px; width: 9px; height: 9px; border-radius: 50%; background: var(--bg); border: 2px solid var(--line-4); }
+  .event[data-kind='question']::before { border-color: var(--amber); }
+  .event[data-kind='report']::before, .event[data-kind='progress']::before { border-color: var(--ink-2); }
+  .event[data-kind='decision']::before { border-color: var(--blue); }
+  .event-head { display: flex; align-items: baseline; gap: 8px; }
+  .event-head b { font: 500 12px/18px var(--font); color: var(--ink-1); }
+  .event-head time { color: var(--ink-3); font: 400 11px/17px var(--mono); }
+  .event p { margin-top: 2px; color: var(--ink-2); font: 400 13px/21px var(--font); }
+  .event .meta { margin-top: 2px; font-size: 11px; }
+  details.exec { margin-top: 26px; border-top: 1px solid var(--line-2); padding-top: 14px; }
+  details.exec summary { display: flex; align-items: center; gap: 6px; cursor: pointer; color: var(--ink-2); font: 500 13px/20px var(--font); list-style: none; }
+  details.exec summary::-webkit-details-marker { display: none; }
+  details.exec summary .icon { transition: transform var(--dur) var(--ease); }
+  details.exec[open] summary .icon { transform: rotate(90deg); }
+  .kv { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 6px 14px; margin-top: 12px; font: 400 12px/18px var(--font); }
+  .kv dt { color: var(--ink-3); }
+  .kv dd { margin: 0; color: var(--ink-2); overflow-wrap: anywhere; }
+  .kv dd.mono { font-size: 11px; }
+  .danger-zone { margin-top: 30px; padding-top: 14px; border-top: 1px solid var(--line-2); }
+  /* flow */
+  .thread-row { display: block; width: 100%; padding: 10px; border: 0; border-radius: 8px; background: transparent; text-align: left; }
+  .thread-row:hover { background: var(--hover); }
+  .thread-row[aria-selected='true'] { background: var(--bg-soft); box-shadow: inset 2px 0 0 var(--ink-1); }
+  .thread-title { display: block; color: var(--ink-1); font: 500 13px/20px var(--font); }
+  .thread-meta { display: flex; align-items: center; gap: 6px; margin-top: 3px; color: var(--ink-3); font: 400 11px/17px var(--font); }
+  .dropped { margin-top: 8px; padding: 10px 12px; border: 1px solid var(--line-2); border-radius: 10px; background: var(--bg-subtle); }
+  .dropped + .dropped { margin-top: 6px; }
+  .dropped b { font: 500 12px/18px var(--font); color: var(--ink-2); }
+  .dropped span { display: block; color: var(--ink-3); font: 400 12px/18px var(--font); }
+  /* settings */
+  .settings { max-width: 880px; margin: 0 auto; padding: 28px 36px 92px; }
+  .settings-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+  .settings-head h2 { font: 600 20px/28px var(--font); }
+  .settings-head p { margin-top: 4px; color: var(--ink-2); font: 400 13px/21px var(--font); }
+  .setup { margin-top: 20px; padding: 16px; border: 1px solid var(--line-3); border-radius: 14px; }
+  .setup-head { display: flex; align-items: center; justify-content: space-between; }
+  .setup-head h3 { font: 600 14px/22px var(--font); }
+  .setup-step { display: flex; gap: 10px; padding: 11px 0; border-top: 1px solid var(--line-1); }
+  .setup-step:first-of-type { margin-top: 10px; }
+  .setup-step .icon { margin-top: 2px; }
+  .setup-step b { display: block; font: 500 13px/20px var(--font); }
+  .setup-step span { display: block; color: var(--ink-3); font: 400 12px/18px var(--font); }
+  .setting-group { margin-top: 28px; }
+  .setting-group > h3 { margin-bottom: 8px; color: var(--ink-2); font: 600 13px/20px var(--font); }
+  .setting-box { border: 1px solid var(--line-3); border-radius: 14px; overflow: hidden; }
+  .setting-row { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 16px; padding: 14px 16px; border-bottom: 1px solid var(--line-1); }
+  .setting-row:last-child { border-bottom: 0; }
+  .setting-row > dt, .setting-row > .label { color: var(--ink-2); font: 400 13px/20px var(--font); }
+  .setting-row > dd, .setting-row > .value { margin: 0; color: var(--ink-1); font: 400 13px/20px var(--font); min-width: 0; }
+  .setting-row .hint { display: block; margin-top: 2px; color: var(--ink-3); font: 400 12px/18px var(--font); }
+  .source-state { display: inline-flex; align-items: center; gap: 5px; }
+  .savebar { position: sticky; bottom: 0; display: flex; align-items: center; gap: 12px; margin: 24px -36px 0; padding: 12px 36px; border-top: 1px solid var(--line-2); background: color-mix(in srgb, var(--bg) 92%, transparent); backdrop-filter: blur(12px); }
+  .savebar span { color: var(--ink-2); font: 400 12px/18px var(--font); }
+  .savebar .spacer { flex: 1; }
+  .savebar.is-clean { display: none; }
+  /* palette */
+  .palette-mask { position: fixed; inset: 0; z-index: 80; display: flex; align-items: flex-start; justify-content: center; padding-top: 14vh; background: var(--mask); }
+  .palette { width: 560px; max-width: calc(100vw - 32px); border: 1px solid var(--line-2); border-radius: 14px; background: rgba(252, 253, 254, .96); box-shadow: var(--shadow-3); backdrop-filter: blur(18px); overflow: hidden; }
+  .palette-input { display: flex; align-items: center; gap: 8px; padding: 0 14px; border-bottom: 1px solid var(--line-2); }
+  .palette-input input { flex: 1; height: 48px; border: 0; outline: 0; background: transparent; font: 400 14px/22px var(--font); }
+  .palette-results { max-height: 360px; overflow: auto; padding: 6px; }
+  .palette-group { padding: 8px 8px 4px; color: var(--ink-3); font: 600 11px/16px var(--font); }
+  .palette-item { display: flex; align-items: center; gap: 10px; width: 100%; height: 36px; padding: 0 8px; border: 0; border-radius: 8px; background: transparent; color: var(--ink-1); font: 400 13px/20px var(--font); text-align: left; }
+  .palette-item .icon { color: var(--ink-3); }
+  .palette-item.is-active { background: var(--hover); }
+  .palette-item .hint { margin-left: auto; color: var(--ink-3); font-size: 11px; }
+  .palette-empty { padding: 28px 12px; text-align: center; color: var(--ink-3); font: 400 13px/20px var(--font); }
+  /* toast */
+  #toast { position: fixed; left: 50%; bottom: 22px; z-index: 100; transform: translate(-50%, 8px); display: flex; align-items: center; gap: 8px; max-width: 420px; padding: 8px 12px; border-radius: 8px; background: rgb(53 54 56); color: #fff; font: 400 13px/20px var(--font); box-shadow: var(--shadow-2); opacity: 0; pointer-events: none; transition: opacity var(--dur) var(--ease), transform var(--dur) var(--ease); }
+  #toast.is-open { opacity: 1; transform: translate(-50%, 0); }
+  @media (max-width: 1180px) {
+    .shell { grid-template-columns: 176px 330px minmax(0, 1fr); }
+    .detail-inner { padding: 22px 24px 64px; }
+    .settings { padding: 24px 24px 92px; }
+    .savebar { margin-inline: -24px; padding-inline: 24px; }
+  }
+
+  /* ===== integrated solution: V1 queue split + V3 visual language ===== */
+  .shell { grid-template-columns: 64px 340px minmax(0, 1fr); }
+  .shell.is-settings { grid-template-columns: 64px minmax(0, 1fr); }
+  .rail { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 14px 0 12px; border-right: 1px solid var(--line-2); background: var(--bg-subtle); min-height: 0; }
+  .rail .mark { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; margin-bottom: 14px; border-radius: 9px; background: var(--ink-1); color: #fff; font: 600 13px/1 var(--font); }
+  .rail-btn { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; width: 48px; height: 48px; border: 0; border-radius: 10px; background: transparent; color: var(--ink-3); font: 400 9px/12px var(--font); }
+  .rail-btn .icon { width: 19px; height: 19px; }
+  .rail-btn:hover { background: var(--hover); color: var(--ink-1); }
+  .rail-btn[aria-current='page'] { background: var(--ink-1); color: #fff; }
+  .rail-count { position: absolute; top: 3px; right: 4px; display: inline-flex; align-items: center; justify-content: center; min-width: 14px; height: 14px; padding: 0 3px; border-radius: 999px; background: var(--amber); color: #fff; font: 500 9px/14px var(--font); }
+  .rail-foot { margin-top: auto; display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .rail-health { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; border: 0; border-radius: 9px; background: var(--amber-soft); color: var(--amber-label); }
+  .rail-health:hover { background: var(--amber); color: #fff; }
+  .rail-avatar { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; border-radius: 50%; background: var(--bg-muted); color: var(--ink-2); font: 600 11px/1 var(--font); }
+  .repo-line { display: flex; align-items: center; gap: 5px; width: 100%; margin-bottom: 10px; padding: 0; border: 0; background: none; color: var(--ink-3); font: 400 11px/16px var(--font); text-align: left; overflow: hidden; white-space: nowrap; }
+  .repo-line b { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--ink-2); font-weight: 500; }
+  .queue-head { padding: 16px 16px 10px; }
+  .queue-head h1 { font: 600 20px/28px var(--font); letter-spacing: -.012em; }
+  .queue-head .row { align-items: baseline; }
+  .search { margin: 12px 0 10px; height: 32px; border-radius: 8px; background: var(--bg); }
+  .queue-body { padding: 8px 10px 24px; }
+  .group-label { padding: 14px 8px 6px; color: var(--ink-3); font: 600 11px/16px var(--font); }
+  .task-row { padding: 11px 12px; border-radius: 9px; }
+  .task-title { font: 500 13px/20px var(--font); }
+  .task-snippet { font: 400 12px/18px var(--font); }
+  .problem-row { border-radius: 10px; }
+  .detail-inner { max-width: 800px; padding: 32px 48px 80px; }
+  .crumb { font: 400 12px/18px var(--font); }
+  .title-row { margin-top: 10px; }
+  .title-row h2 { font: 600 22px/30px var(--font); letter-spacing: -.015em; }
+  .meta { gap: 4px 10px; font: 400 12px/18px var(--font); }
+  .meta-line { font: 400 11px/18px var(--mono); }
+  .question { margin-top: 20px; padding: 20px; border-radius: 16px; }
+  .question p { font: 400 14px/23px var(--font); }
+  .question textarea { min-height: 68px; background: rgba(255, 255, 255, .7); }
+  .block { margin-top: 28px; }
+  .block > h3 { font: 600 12px/18px var(--font); color: var(--ink-2); }
+  .block > p { font: 400 14px/23px var(--font); }
+  .events { padding-left: 16px; }
+  .event { padding-bottom: 16px; }
+  .event-head b { font: 500 12px/18px var(--font); }
+  .event p { font: 400 13px/21px var(--font); }
+  .actions { margin-top: 20px; }
+  .settings { max-width: 900px; padding: 32px 48px 96px; }
+  .settings-head h2 { font: 600 22px/30px var(--font); letter-spacing: -.015em; }
+  .settings-head p { font: 400 13px/21px var(--font); }
+  .setup-card { margin-top: 20px; padding: 18px 20px; border: 1px solid var(--line-3); border-radius: 16px; }
+  .setup-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+  .setup-top h2 { font: 600 14px/22px var(--font); }
+  .setup-top p { margin-top: 2px; color: var(--ink-3); font: 400 12px/18px var(--font); }
+  .progress { width: 120px; height: 4px; margin-top: 8px; border-radius: 999px; background: var(--bg-muted); overflow: hidden; }
+  .progress span { display: block; width: 75%; height: 100%; border-radius: 999px; background: var(--ink-1); }
+  .setup-step { display: flex; gap: 10px; padding: 11px 0; border-top: 1px solid var(--line-1); }
+  .setup-step:first-of-type { margin-top: 12px; }
+  .setup-step b { display: block; font: 500 13px/20px var(--font); }
+  .setup-step span { display: block; color: var(--ink-3); font: 400 12px/18px var(--font); }
+  .settings .section-label { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 28px 0 8px; }
+  .settings .section-label h2 { color: var(--ink-2); font: 600 13px/20px var(--font); }
+  .settings .section-label span { color: var(--ink-3); font: 400 12px/18px var(--font); }
+  .setting-card { padding: 2px 20px; border: 1px solid var(--line-3); border-radius: 16px; }
+  .setting-card .setting-row { display: grid; grid-template-columns: 170px minmax(0, 1fr); gap: 16px; padding: 14px 0; border-bottom: 1px solid var(--line-1); }
+  .setting-card .setting-row:last-child { border-bottom: 0; }
+  .setting-card .label { color: var(--ink-2); font: 400 13px/20px var(--font); }
+  .setting-card .value { min-width: 0; color: var(--ink-1); font: 400 13px/20px var(--font); }
+  .setting-card .hint { display: block; margin-top: 2px; color: var(--ink-3); font: 400 12px/18px var(--font); }
+  .setting-card .input, .setting-card .select { max-width: 340px; }
+  .savebar { margin: 24px -48px 0; padding: 12px 48px; }
+  .palette { border-radius: 14px; background: rgba(252, 253, 254, .96); box-shadow: var(--shadow-3); backdrop-filter: blur(18px); }
+  .palette-input input { height: 48px; }
+  .palette-item { height: 36px; border-radius: 8px; }
+  @media (max-width: 1180px) {
+    .shell { grid-template-columns: 64px 310px minmax(0, 1fr); }
+    .shell.is-settings { grid-template-columns: 64px minmax(0, 1fr); }
+    .detail-inner { padding: 28px 32px 72px; }
+    .settings { padding: 28px 32px 88px; }
+    .savebar { margin-inline: -32px; padding-inline: 32px; }
+  }
+
+</style>
+</head>
+<body>
+<div class="shell" id="app"></div>
+<div id="toast" role="status" aria-live="polite"></div>
+<script src="assets/data.js"></script>
+<script>
+(() => {
+  const S = window.SA
+  const params = new URLSearchParams(location.search)
+  const state = {
+    view: ['home', 'ticket', 'flow', 'settings'].includes(params.get('view')) ? params.get('view') : 'home',
+    ticket: params.get('ticket') || 't-1042',
+    thread: params.get('thread') || (S.threads[0] && S.threads[0].key),
+    filter: 'needs',
+    flowFilter: 'all',
+    palette: params.get('palette') === '1',
+    query: '',
+    paletteIndex: 0,
+    sent: new Set(),
+    reply: '',
+    saved: true,
+    openExec: true,
+  }
+  const app = document.getElementById('app')
+  const toastEl = document.getElementById('toast')
+  let toastTimer
+  const toast = (text) => {
+    toastEl.textContent = text
+    toastEl.classList.add('is-open')
+    clearTimeout(toastTimer)
+    toastTimer = setTimeout(() => toastEl.classList.remove('is-open'), 2400)
+  }
+  const src = (source) => S.sourceMeta[source] || S.sourceMeta.github
+  const srcIcon = (source) => S.icon(src(source).icon, 'icon-sm')
+  const badge = (stage, label) => {
+    const meta = S.stateMeta[stage] || S.stateMeta.queued
+    return '<span class="badge ' + meta.badge + '">' + S.esc(label || meta.label) + '</span>'
+  }
+  const ticketOf = (id) => S.tickets[id]
+  const selectedTicket = () => ticketOf(state.ticket) || ticketOf('t-1042')
+  const activeThread = () => S.threads.find((thread) => thread.key === state.thread) || S.threads[0]
+  const allTickets = () => [...S.needs, ...S.running]
+  const navItems = [
+    { view: 'home', label: '今日', icon: 'inbox', count: S.needs.length },
+    { view: 'ticket', label: '工单', icon: 'file', count: allTickets().length },
+    { view: 'flow', label: '流水', icon: 'activity', count: 0 },
+    { view: 'settings', label: '设置', icon: 'sliders', count: 0 },
+  ]
+  const titleOf = () => (state.view === 'home' ? '今日' : state.view === 'ticket' ? '工单' : state.view === 'flow' ? '流水' : '设置')
+
+  function updateUrl() {
+    const url = new URL(location.href)
+    url.searchParams.set('view', state.view)
+    if (state.view === 'ticket') url.searchParams.set('ticket', state.ticket)
+    else url.searchParams.delete('ticket')
+    if (state.view === 'flow' && state.thread) url.searchParams.set('thread', state.thread)
+    else url.searchParams.delete('thread')
+    if (state.palette) url.searchParams.set('palette', '1')
+    else url.searchParams.delete('palette')
+    history.replaceState(null, '', url)
+  }
+
+  function nav() {
+    return `
+      <aside class="rail">
+        <span class="mark">S</span>
+        ${navItems.map((item) => `
+          <button class="rail-btn" data-action="nav" data-view="${item.view}" ${state.view === item.view ? 'aria-current="page"' : ''} aria-label="${item.label}" title="${item.label}">
+            ${S.icon(item.icon)}<span>${item.label}</span>${item.count ? `<span class="rail-count">${item.count}</span>` : ''}
+          </button>`).join('')}
+        <div class="rail-foot">
+          <button class="rail-health" data-action="toast" data-text="飞书重连在原型中不可用" title="飞书连接中断" aria-label="飞书连接中断">${S.icon('wifiOff', 'icon-sm')}</button>
+          <span class="rail-avatar" title="林舟">林</span>
+        </div>
+      </aside>`
+  }
+
+  function taskRow(ticket) {
+    const needs = S.needs.some((item) => item.id === ticket.id)
+    const running = S.running.some((item) => item.id === ticket.id)
+    const stage = ticket.stage
+    const selected = state.ticket === ticket.id && (state.view === 'home' || state.view === 'ticket')
+    return `
+      <button class="task-row" data-action="select" data-id="${ticket.id}" aria-selected="${selected}">
+        <span class="task-title">${S.esc(ticket.title)}</span>
+        <span class="task-meta">
+          ${badge(stage, ticket.stageLabel)}<span>${srcIcon(ticket.source)} ${src(ticket.source).label}</span><span>·</span><span>${S.esc(needs ? ticket.age : running ? ticket.elapsed : ticket.at)}</span>
+        </span>
+        ${needs && ticket.question ? `<span class="task-snippet">${S.esc(ticket.question)}</span>` : running ? `<span class="task-snippet">${S.esc(ticket.progress)}</span>` : ''}
+      </button>`
+  }
+
+  function queue() {
+    if (state.view === 'settings') return ''
+    const head = `
+      <header class="queue-head">
+        <button class="repo-line" data-action="toast" data-text="分支切换在原型中不可用"><span class="dot dot-green"></span><b>${S.esc(S.repo.owner)}/${S.esc(S.repo.name)}</b><span class="ellipsis">· ${S.esc(S.repo.branch)}</span></button>
+        <div class="row"><h1>${titleOf()}</h1><span class="t-caption">11 月 17 日 · 星期二</span></div>
+        <button class="search" data-action="palette-open">${S.icon('search')}<span>搜索工单、线程或页面</span><kbd class="kbd">⌘K</kbd></button>
+        ${state.view === 'flow' ? flowFilters() : state.view === 'home' || state.view === 'ticket' ? ticketFilters() : ''}
+      </header>`
+    let body = ''
+    if (state.view === 'home') {
+      if (state.filter === 'needs' || state.filter === 'all') {
+        body += `<div class="group-label">需要你 <span>${S.needs.length}</span></div>`
+        body += S.needs.map((ticket) => taskRow(ticket)).join('')
+      }
+      if (state.filter === 'running' || state.filter === 'all') {
+        body += `<div class="group-label">进行中 <span>${S.running.length}</span></div>`
+        body += S.running.map((ticket) => taskRow(ticket)).join('')
+      }
+      if (state.filter === 'all') {
+        body += `<div class="group-label">最近结束 <span>${S.recent.length}</span></div>`
+        body += S.recent.map((ticket) => `
+          <button class="task-row" data-action="toast" data-text="已结束的工作在原型中只读">
+            <span class="task-title">${S.esc(ticket.title)}</span>
+            <span class="task-meta">${badge(ticket.outcomeKind, ticket.outcome)}<span>${srcIcon(ticket.source)} ${src(ticket.source).label}</span><span>·</span><span>${S.esc(ticket.at)}</span></span>
+          </button>`).join('')
+      }
+    } else if (state.view === 'ticket') {
+      body += `<div class="group-label">需要你 <span>${S.needs.length}</span></div>`
+      body += S.needs.map(taskRow).join('')
+      body += `<div class="group-label">执行中 <span>${S.running.length}</span></div>`
+      body += S.running.map(taskRow).join('')
+      body += `<div class="group-label">近期结束 <span>${S.recent.length}</span></div>`
+      body += S.recent.map((ticket) => `
+        <button class="task-row" data-action="toast" data-text="已结束的工作在原型中只读">
+          <span class="task-title">${S.esc(ticket.title)}</span>
+          <span class="task-meta">${badge(ticket.outcomeKind, ticket.outcome)}<span>${S.esc(ticket.at)}</span></span>
+        </button>`).join('')
+    } else if (state.view === 'flow') {
+      body += `<div class="problem-row" data-action="nav" data-view="settings" role="button" tabindex="0">
+        <span class="dot dot-amber"></span><div><b>飞书连接中断</b><span>15:42 起无法接收群消息；GitHub 正常</span></div>
+      </div>`
+      const threads = state.flowFilter === 'all' ? S.threads : S.threads.filter((thread) => thread.state === state.flowFilter)
+      body += `<div class="group-label">Threads <span>${threads.length}</span></div>`
+      body += threads.map((thread) => `
+        <button class="thread-row" data-action="thread" data-key="${S.esc(thread.key)}" aria-selected="${activeThread() && activeThread().key === thread.key}">
+          <span class="thread-title">${S.esc(thread.title)}</span>
+          <span class="thread-meta">${srcIcon(thread.source)} ${src(thread.source).label}<span>·</span>${S.esc(thread.stateLabel)}<span>·</span>${S.esc(thread.updated)}</span>
+        </button>`).join('')
+    }
+    return `<section class="queue">${head}<div class="queue-body scroll">${body}</div></section>`
+  }
+
+  function ticketFilters() {
+    return `<div class="filters" role="group" aria-label="工单筛选">
+      ${[['needs', '需要你', S.needs.length], ['running', '进行中', S.running.length], ['all', '全部', allTickets().length + S.recent.length]].map(([id, label, count]) => `
+        <button class="chip" data-action="filter" data-filter="${id}" aria-pressed="${state.filter === id}">${label}<span class="count">${count}</span></button>`).join('')}
+    </div>`
+  }
+
+  function flowFilters() {
+    const options = [['all', '全部', S.threads.length], ['accepted', '已接单', S.threads.filter((t) => t.state === 'accepted').length], ['evaluating', '评估中', S.threads.filter((t) => t.state === 'evaluating').length], ['filtered', '已过滤', S.threads.filter((t) => t.state === 'filtered').length]]
+    return `<div class="filters" role="group" aria-label="流水筛选">${options.map(([id, label, count]) => `
+      <button class="chip" data-action="flow-filter" data-filter="${id}" aria-pressed="${state.flowFilter === id}">${label}<span class="count">${count}</span></button>`).join('')}</div>`
+  }
+
+  function events(ticket) {
+    return ticket.events.map((event) => `
+      <div class="event" data-kind="${event.kind}">
+        <div class="event-head"><b>${S.esc(event.actor)}</b><time>${S.esc(event.at)}</time></div>
+        <p>${S.esc(event.text)}</p>
+        ${event.meta ? `<div class="meta">${S.esc(event.meta)}</div>` : ''}
+      </div>`).join('')
+  }
+
+  function detail(ticket) {
+    const isNeed = S.needs.some((item) => item.id === ticket.id)
+    const isRunning = S.running.some((item) => item.id === ticket.id)
+    const sent = state.sent.has(ticket.id)
+    const question = isNeed && ticket.question
+    return `
+      <article class="detail-inner">
+        <div class="crumb">工单 #${ticket.number || ticket.id.replace('t-', '')} <span>/</span> ${badge(ticket.stage, ticket.stageLabel)}</div>
+        <div class="title-row">
+          <h2>${S.esc(ticket.title)}</h2>
+          <button class="btn btn-icon btn-ghost" data-action="toast" data-text="更多操作在原型中不可用" aria-label="更多操作">${S.icon('more')}</button>
+        </div>
+        <div class="meta">
+          <span class="src">${srcIcon(ticket.source)} ${src(ticket.source).label}</span>
+          <span>·</span><span>${S.esc(ticket.requester)}</span>
+          <span>·</span><span>${S.esc(isRunning ? ticket.elapsed : ticket.age || ticket.updated)}</span>
+          ${ticket.thread ? `<span>·</span><span class="ellipsis" style="max-width:320px">${S.esc(ticket.thread)}</span>` : ''}
+        </div>
+        <div class="meta-line">
+          <span><b>分支</b> ${S.esc(ticket.branch || '—')}</span>
+          <span><b>模型</b> ${S.esc(ticket.model || '—')}</span>
+          <span><b>策略</b> ${S.esc(ticket.policy || '—')}</span>
+        </div>
+
+        ${question ? (ticket.stage === 'waiting' ? `
+          <section class="question" aria-label="等待你的回复">
+            <div class="q-kicker">${S.icon('message', 'icon-sm')} 等待你回复</div>
+            <p>${S.esc(ticket.question)}</p>
+            ${sent ? `<div class="answered">${S.icon('checkCircle', 'icon-sm')} 已回复 · 工单会继续执行</div>` : `
+              <div class="answer">
+                <textarea class="textarea" id="reply" placeholder="写下你的决定，回复到原线程…">${S.esc(state.reply)}</textarea>
+                <div class="row"><button class="btn btn-primary" data-action="send" ${state.reply.trim() ? '' : 'disabled'}>${S.icon('send', 'icon-sm')} 发送回复</button>
+                  <button class="btn btn-ghost" data-action="toast" data-text="打开原工单在原型中不可用">打开工单</button>
+                  <span class="spacer"></span><span class="t-caption">将回复到原飞书线程</span></div>
+              </div>`}
+          </section>` : `
+          <section class="question blocked" aria-label="验证未通过">
+            <div class="q-kicker">${S.icon('alert', 'icon-sm')} 验证未通过</div>
+            <p>${S.esc(ticket.question)}</p>
+            <div class="row" style="margin-top:12px"><button class="btn btn-outline" data-action="toast" data-text="重试在原型中不可用">${S.icon('refresh', 'icon-sm')} 重试</button>
+              <button class="btn btn-ghost" data-action="toast" data-text="失败输出在原型中不可用">查看失败输出</button>
+              <span class="spacer"></span><span class="t-caption">连续 2 次失败 · 38 分钟前</span></div>
+          </section>`) : ''}
+
+        ${isRunning ? `
+          <div class="actions">
+            <button class="btn btn-primary" data-action="toast" data-text="打开会话在原型中不可用">打开会话</button>
+            <button class="btn btn-outline" data-action="toast" data-text="查看进度在原型中不可用">查看进度</button>
+            <button class="btn btn-danger" data-action="stop">停止工单</button>
+          </div>` : ''}
+
+        <section class="block">
+          <h3>发生了什么</h3>
+          <p>${S.esc(ticket.summary || ticket.scope)}</p>
+        </section>
+
+        <section class="block">
+          <h3>时间线</h3>
+          <div class="events">${events(ticket)}${sent ? `<div class="event" data-kind="question"><div class="event-head"><b>你</b><time>刚刚</time></div><p>${S.esc(state.sentReply || '已发送回复。')}</p></div>` : ''}</div>
+        </section>
+
+        <details class="exec" ${state.openExec ? 'open' : ''}>
+          <summary>${S.icon('chevronRight', 'icon-sm')} 执行信息</summary>
+          <dl class="kv">
+            <dt>会话</dt><dd>${S.esc(ticket.session || '—')}</dd>
+            <dt>目录</dt><dd class="mono">${S.esc(ticket.directory || '—')}</dd>
+            <dt>分支</dt><dd class="mono">${S.esc(ticket.branch || '—')}</dd>
+            <dt>Pull request</dt><dd>${ticket.pr ? `<button class="link-btn" data-action="toast" data-text="打开 PR 在原型中不可用">#${ticket.pr}</button>` : '—'}</dd>
+            <dt>策略</dt><dd>${S.esc(ticket.policy || '—')}</dd>
+            <dt>执行模型</dt><dd>${S.esc(ticket.model || '—')}</dd>
+          </dl>
+        </details>
+
+        <div class="danger-zone">
+          <button class="btn btn-outline btn-danger" data-action="stop">停止工单</button>
+          <span class="t-caption" style="margin-left:8px">停止会结束执行会话，不会撤销已推送的提交。</span>
+        </div>
+      </article>`
+  }
+
+  function flowDetail(thread) {
+    if (!thread) return '<div class="empty">选择一个线程查看详情</div>'
+    const ticket = thread.ticket ? ticketOf(thread.ticket) : null
+    const decision = S.decisions.find((item) => item.thread && (thread.title.startsWith(item.thread) || item.thread.startsWith(thread.title.slice(0, 8))))
+    return `
+      <article class="detail-inner">
+        <div class="crumb">Thread <span>/</span> ${S.esc(thread.stateLabel)}</div>
+        <div class="title-row"><h2>${S.esc(thread.title)}</h2>
+          <button class="btn btn-icon btn-ghost" data-action="toast" data-text="更多操作在原型中不可用" aria-label="更多操作">${S.icon('more')}</button></div>
+        <div class="meta"><span class="src">${srcIcon(thread.source)} ${src(thread.source).label}</span><span>·</span><span>${S.esc(thread.actor)}</span><span>·</span><span>${S.esc(thread.updated)}</span></div>
+        <div class="meta-line"><span><b>触发</b> ${thread.triggers} 次</span><span><b>状态</b> ${S.esc(thread.stateLabel)}</span></div>
+
+        ${ticket ? `<section class="block"><h3>关联工单</h3>
+          <button class="thread-row" data-action="select" data-id="${ticket.id}" style="margin-left:-10px;width:calc(100% + 20px)">
+            <span class="thread-title">${S.esc(ticket.title)}</span>
+            <span class="thread-meta">${badge(ticket.stage, ticket.stageLabel)}<span>·</span>${S.esc(ticket.branch || '')}</span>
+          </button></section>` : ''}
+
+        ${decision ? `<section class="block"><h3>决定</h3>
+          <p><span class="badge ${decision.verdict === 'accept' ? 'badge-green' : 'badge'}">${decision.verdict === 'accept' ? '接受' : '过滤'}</span>
+          <span style="margin-left:8px">${S.esc(decision.reason)}</span></p>
+          <p class="t-caption" style="margin-top:4px">${S.esc(decision.rule)} · ${S.esc(decision.at)}</p></section>` : ''}
+
+        <section class="block"><h3>线程</h3>
+          <div class="events">
+            <div class="event"><div class="event-head"><b>${S.esc(thread.actor)}</b><time>${S.esc(thread.updated)}</time></div>
+              <p>${S.esc(thread.reason || '触发已进入评估；按来源与成员规则处理。')}</p></div>
+            <div class="event" data-kind="decision"><div class="event-head"><b>Eval</b><time>${S.esc(thread.updated)}</time></div>
+              <p>${S.esc(thread.stateLabel)}${thread.ticket ? '，已创建工单。' : '，没有创建工单。'}</p></div>
+          </div>
+        </section>
+
+        <section class="block"><h3>丢弃的消息</h3>
+          ${S.dropped.map((item) => `<div class="dropped"><b>${srcIcon(item.source)} ${src(item.source).label} · ${S.esc(item.at)}</b><span>${S.esc(item.preview)}</span><span>${S.esc(item.reason)}</span></div>`).join('')}
+        </section>
+      </article>`
+  }
+
+  function settings() {
+    const row = (label, value, hint) => `<div class="setting-row"><div class="label">${label}</div><div class="value">${value}${hint ? `<span class="hint">${hint}</span>` : ''}</div></div>`
+    const models = ['claude-sonnet-4.5', 'claude-opus-4.1', 'gpt-5-codex'].map((model) => `<option value="${model}" ${model === S.settings.executor.model ? 'selected' : ''}>${model}</option>`).join('')
+    return `
+      <div class="settings">
+        <div class="settings-head"><div><h2>设置</h2><p>来源、仓库、准入与执行。修改后底部出现保存条，保存后从下一次执行起生效。</p></div>
+          <button class="btn btn-outline" data-action="toast" data-text="配置历史在原型中不可用">${S.icon('clock', 'icon-sm')} 历史</button></div>
+
+        <section class="setup-card" aria-label="首次配置">
+          <div class="setup-top"><div><h2>首次配置</h2><p>3 / 4 完成 · 飞书需要重新连接</p></div><div class="progress"><span></span></div></div>
+          ${S.settings.setup.map((step) => `<div class="setup-step">
+            ${step.state === 'done' ? '<span class="dot dot-green" style="margin-top:7px"></span>' : '<span class="dot dot-amber" style="margin-top:7px"></span>'}
+            <div><b>${S.esc(step.title)}</b><span>${S.esc(step.detail)}</span></div>
+            <span class="spacer"></span>
+            ${step.state === 'warn' ? '<button class="btn btn-outline btn-sm" data-action="toast" data-text="飞书重连在原型中不可用">重新连接</button>' : '<span class="badge badge-green">完成</span>'}
+          </div>`).join('')}
+        </section>
+
+        <div class="section-label"><h2>来源与账号</h2><span>${S.sources.length} 个来源</span></div>
+        <div class="setting-card">${S.sources.map((source) => row(
+          `${srcIcon(source.id)} ${S.esc(source.name)}`,
+          `<div class="row"><b>${S.esc(source.account)}</b><span class="badge ${source.state === 'ok' ? 'badge-green' : 'badge-amber'}">${source.state === 'ok' ? '正常' : '连接中断'}</span><span class="spacer"></span><button class="link-btn" data-action="toast" data-text="来源管理在原型中不可用">管理</button></div>`,
+          `${S.esc(source.detail)} · 最后同步 ${S.esc(source.last)}`
+        )).join('')}</div>
+
+        <div class="section-label"><h2>仓库与接入</h2></div>
+        <div class="setting-card">
+          ${row('仓库', `<div class="row"><b>${S.esc(S.repo.owner)}/${S.esc(S.repo.name)}</b><span class="badge badge-green">运行中</span><span class="spacer"></span><button class="link-btn" data-action="toast" data-text="打开工作空间在原型中不可用">打开工作空间</button></div>`, `${S.esc(S.repo.branch)} · ${S.esc(S.repo.head)} · 当前仓库串行执行`)}
+          ${row('飞书群绑定', '<div class="row"><b>SuperAgent 群</b><span class="badge">→ 当前仓库</span><span class="spacer"></span><button class="link-btn" data-action="toast" data-text="群绑定在原型中不可用">管理</button></div>', '群成员 2 人 · 允许接单成员 2 人')}
+          ${row('添加仓库', `<button class="btn btn-outline btn-sm" data-action="toast" data-text="添加仓库在原型中不可用">${S.icon('plus', 'icon-sm')} 添加本地仓库</button>`, '最多同时运行 3 个仓库')}
+        </div>
+
+        <div class="section-label"><h2>准入</h2></div>
+        <div class="setting-card">
+          ${row('策略版本', `${S.settings.policy.version} · ${S.esc(S.settings.policy.mode)}`, '飞书允许成员，或消息点名了助手')}
+          ${row('评估超时', S.esc(S.settings.policy.timeout), '超时后出现在「需要你」中')}
+          ${row('允许成员', '林舟、沈迟', '2 名成员 · 可在群绑定中同步')}
+        </div>
+
+        <div class="section-label"><h2>执行</h2></div>
+        <div class="setting-card">
+          ${row('执行模型', `<select class="select" id="model-input" aria-label="执行模型">${models}</select>`)}
+          ${row('并发', `<input class="input" id="concurrency-input" type="number" min="1" max="6" value="${S.settings.executor.concurrency}" aria-label="并发" />`, '当前 2 个执行中，1 个排队')}
+          ${row('执行目录', `<input class="input mono" id="directory-input" value="${S.esc(S.settings.executor.directory)}" aria-label="执行目录" />`)}
+          ${row('准备命令', `<input class="input mono" id="prepare-input" value="${S.esc(S.settings.executor.prepare)}" aria-label="准备命令" />`)}
+          ${row('暂停处理', '<button class="switch" role="switch" aria-checked="false" aria-label="暂停处理" data-action="toast" data-text="暂停处理在原型中不可用"></button>', '暂停后不会开始新工单，正在运行的会话不受影响。')}
+        </div>
+
+        <div class="section-label"><h2>部署</h2></div>
+        <div class="setting-card">
+          ${row('状态目录', `<span class="mono">${S.esc(S.settings.deployment.state)}</span>`)}
+          ${row('运行时', `Node ${S.esc(S.settings.deployment.node)} · DSH ${S.esc(S.settings.deployment.dsh)}`)}
+          ${row('限制', S.esc(S.settings.deployment.limits))}
+        </div>
+
+        <div class="savebar ${state.saved ? 'is-clean' : ''}"><span>有未保存的修改</span><span class="spacer"></span><button class="btn btn-ghost" data-action="discard">放弃</button><button class="btn btn-primary" data-action="save">保存</button></div>
+      </div>`
+  }
+
+  function paletteResults() {
+    const q = state.query.trim().toLowerCase()
+    const pages = [
+      { kind: '页面', icon: 'inbox', label: '今日', hint: '工单 2', action: { type: 'nav', view: 'home' } },
+      { kind: '页面', icon: 'file', label: '工单', hint: '4 条进行中', action: { type: 'nav', view: 'ticket' } },
+      { kind: '页面', icon: 'activity', label: '流水', hint: '5 个线程', action: { type: 'nav', view: 'flow' } },
+      { kind: '页面', icon: 'sliders', label: '设置', hint: '', action: { type: 'nav', view: 'settings' } },
+    ]
+    const tickets = allTickets().map((ticket) => ({ kind: '工单', icon: 'file', label: ticket.title, hint: '#' + (ticket.number || ticket.id.replace('t-', '')), action: { type: 'select', id: ticket.id } }))
+    const actions = [{ kind: '动作', icon: 'pause', label: '暂停处理', hint: '执行器', action: { type: 'toast', text: '暂停处理在原型中不可用' } }]
+    const all = [...pages, ...tickets, ...actions]
+    return q ? all.filter((item) => item.label.toLowerCase().includes(q)) : all
+  }
+
+  function palette() {
+    if (!state.palette) return ''
+    const groups = ['页面', '工单', '动作']
+    const results = paletteResults()
+    let index = 0
+    const body = groups.map((group) => {
+      const items = results.filter((item) => item.kind === group)
+      if (!items.length) return ''
+      return `<div class="palette-group">${group}</div>` + items.map((item) => {
+        const itemIndex = index++
+        return `<button class="palette-item ${itemIndex === state.paletteIndex ? 'is-active' : ''}" data-action="palette-run" data-index="${itemIndex}">
+          ${S.icon(item.icon)}<span>${S.esc(item.label)}</span><span class="hint">${S.esc(item.hint || '')}</span></button>`
+      }).join('')
+    }).join('')
+    return `
+      <div class="palette-mask" data-action="palette-close">
+        <div class="palette" role="dialog" aria-modal="true" aria-label="命令面板" data-stop>
+          <div class="palette-input">${S.icon('search')}<input id="palette-input" value="${S.esc(state.query)}" placeholder="搜索工单、线程或页面…" aria-label="搜索" autocomplete="off" /> <kbd class="kbd">esc</kbd></div>
+          <div class="palette-results">${body || '<div class="palette-empty">没有匹配的结果</div>'}</div>
+          <div style="display:flex;gap:12px;padding:8px 14px;border-top:1px solid var(--line-2);color:var(--ink-3);font:400 11px/16px var(--font)"><span>↑↓ 选择</span><span>↵ 打开</span><span class="spacer"></span><span>${results.length} 个结果</span></div>
+        </div>
+      </div>`
+  }
+
+  function detailPane() {
+    if (state.view === 'settings') return `<main class="detail">${settings()}</main>`
+    if (state.view === 'flow') return `<main class="detail">${flowDetail(activeThread())}</main>`
+    return `<main class="detail">${detail(selectedTicket())}</main>`
+  }
+
+  function render() {
+    app.className = "shell" + (state.view === "settings" ? " is-settings" : "")
+    app.innerHTML = nav() + queue() + detailPane() + palette()
+    bind()
+  }
+
+  function selectTicket(id) {
+    state.ticket = id
+    state.reply = ''
+    state.view = state.view === 'flow' ? 'ticket' : state.view
+    updateUrl()
+    render()
+    const textarea = document.getElementById('reply')
+    if (textarea) textarea.focus()
+  }
+
+  function bind() {
+    app.querySelectorAll('[data-action]').forEach((el) => {
+      el.addEventListener('click', (event) => {
+        if (el.dataset.stop !== undefined && event.target.closest('.palette')) { /* keep palette clicks */ }
+        const action = el.dataset.action
+        if (action === 'nav') {
+          state.view = el.dataset.view
+          state.filter = 'needs'
+          state.palette = false
+          updateUrl(); render(); return
+        }
+        if (action === 'select') { event.stopPropagation(); selectTicket(el.dataset.id); return }
+        if (action === 'thread') { state.thread = el.dataset.key; updateUrl(); render(); return }
+        if (action === 'filter') { state.filter = el.dataset.filter; render(); return }
+        if (action === 'flow-filter') { state.flowFilter = el.dataset.filter; render(); return }
+        if (action === 'palette-open') { state.palette = true; state.paletteIndex = 0; state.query = ''; updateUrl(); render(); setTimeout(() => document.getElementById('palette-input')?.focus(), 0); return }
+        if (action === 'palette-close') { if (event.target.closest('.palette')) return; state.palette = false; updateUrl(); render(); return }
+        if (action === 'palette-run') {
+          const item = paletteResults()[Number(el.dataset.index)]
+          state.palette = false
+          if (!item) return
+          if (item.action.type === 'nav') state.view = item.action.view
+          if (item.action.type === 'select') { state.view = 'ticket'; state.ticket = item.action.id }
+          updateUrl(); render()
+          if (item.action.type === 'toast') toast(item.action.text)
+          return
+        }
+        if (action === 'send') {
+          if (!state.reply.trim()) return
+          state.sent.add(state.ticket); state.sentReply = state.reply.trim(); state.reply = ''
+          render(); toast('回复已发送'); return
+        }
+        if (action === 'save') { state.saved = true; render(); toast('设置已保存'); return }
+        if (action === 'discard') { state.saved = true; render(); return }
+        if (action === 'stop') { toast('原型中不会真的停止工单'); return }
+        if (action === 'toast') { toast(el.dataset.text || '原型中不可用'); return }
+      })
+    })
+    const textarea = document.getElementById('reply')
+    if (textarea) textarea.addEventListener('input', (event) => {
+      state.reply = event.target.value
+      const button = app.querySelector('[data-action="send"]')
+      if (button) button.disabled = !state.reply.trim()
+    })
+    ;['model-input', 'concurrency-input', 'directory-input', 'prepare-input'].forEach((id) => {
+      const input = document.getElementById(id)
+      if (input) {
+        const dirty = () => {
+          state.saved = false
+          const bar = document.querySelector('.savebar')
+          if (bar) bar.classList.remove('is-clean')
+        }
+        input.addEventListener('input', dirty)
+        input.addEventListener('change', dirty)
+      }
+    })
+    const paletteInput = document.getElementById('palette-input')
+    if (paletteInput) {
+      paletteInput.addEventListener('input', (event) => {
+        state.query = event.target.value
+        state.paletteIndex = 0
+        // Re-render only the result list so the input keeps focus.
+        const results = paletteResults()
+        const groups = ['页面', '工单', '动作']
+        let index = 0
+        const body = groups.map((group) => {
+          const items = results.filter((item) => item.kind === group)
+          if (!items.length) return ''
+          return `<div class="palette-group">${group}</div>` + items.map((item) => {
+            const itemIndex = index++
+            return `<button class="palette-item ${itemIndex === state.paletteIndex ? 'is-active' : ''}" data-action="palette-run" data-index="${itemIndex}">${S.icon(item.icon)}<span>${S.esc(item.label)}</span><span class="hint">${S.esc(item.hint || '')}</span></button>`
+          }).join('')
+        }).join('')
+        const list = app.querySelector('.palette-results')
+        if (list) {
+          list.innerHTML = body || '<div class="palette-empty">没有匹配的结果</div>'
+          bindPaletteItems()
+        }
+      })
+    }
+    bindPaletteItems()
+  }
+
+  function bindPaletteItems() {
+    app.querySelectorAll('[data-action="palette-run"]').forEach((el) => {
+      el.addEventListener('click', () => {
+        const item = paletteResults()[Number(el.dataset.index)]
+        state.palette = false
+        if (!item) { render(); return }
+        if (item.action.type === 'nav') state.view = item.action.view
+        if (item.action.type === 'select') { state.view = 'ticket'; state.ticket = item.action.id }
+        updateUrl(); render()
+        if (item.action.type === 'toast') toast(item.action.text)
+      })
+    })
+  }
+
+  document.addEventListener('keydown', (event) => {
+    const tag = (event.target && event.target.tagName) || ''
+    const typing = tag === 'INPUT' || tag === 'TEXTAREA'
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+      event.preventDefault(); state.palette = true; state.query = ''; state.paletteIndex = 0; updateUrl(); render(); setTimeout(() => document.getElementById('palette-input')?.focus(), 0); return
+    }
+    if (state.palette) {
+      const results = paletteResults()
+      if (event.key === 'Escape') { state.palette = false; updateUrl(); render(); return }
+      if (event.key === 'ArrowDown') { event.preventDefault(); state.paletteIndex = Math.min(results.length - 1, state.paletteIndex + 1); render(); setTimeout(() => document.getElementById('palette-input')?.focus(), 0); return }
+      if (event.key === 'ArrowUp') { event.preventDefault(); state.paletteIndex = Math.max(0, state.paletteIndex - 1); render(); setTimeout(() => document.getElementById('palette-input')?.focus(), 0); return }
+      if (event.key === 'Enter') { event.preventDefault(); const item = results[state.paletteIndex]; if (!item) return; state.palette = false; if (item.action.type === 'nav') state.view = item.action.view; if (item.action.type === 'select') { state.view = 'ticket'; state.ticket = item.action.id } updateUrl(); render(); if (item.action.type === 'toast') toast(item.action.text); return }
+      return
+    }
+    if (typing || state.view === 'settings' || state.view === 'flow') return
+    const rows = [...document.querySelectorAll('.queue-body .task-row')].filter((row) => row.dataset.id)
+    if (!rows.length) return
+    if (event.key === 'j' || event.key === 'k') {
+      event.preventDefault()
+      const current = rows.findIndex((row) => row.getAttribute('aria-selected') === 'true')
+      const next = Math.max(0, Math.min(rows.length - 1, current + (event.key === 'j' ? 1 : -1)))
+      if (rows[next]) selectTicket(rows[next].dataset.id)
+    }
+    if (event.key === 'Enter') {
+      const textarea = document.getElementById('reply')
+      if (textarea) { event.preventDefault(); textarea.focus() }
+    }
+  })
+
+  render()
+})()
+</script>
+</body>
+</html>

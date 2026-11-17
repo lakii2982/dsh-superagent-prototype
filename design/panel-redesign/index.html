@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Superagent 面板重设计 · 三版原型评审</title>
+<title>Superagent 插件界面 · 整合方案与探索稿</title>
 <link rel="stylesheet" href="assets/base.css" />
 <style>
   body { background: var(--bg); }
@@ -63,6 +63,9 @@
   .limits p { font: 400 13px/22px var(--font); color: var(--ink-2); }
   .foot { display: flex; justify-content: space-between; gap: 24px; padding-top: 32px; font: 400 12px/20px var(--font); color: var(--ink-3); }
   .foot code { font-family: var(--mono); font-size: 11px; }
+
+  .explore-label { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-top: 8px; padding: 48px 0 0; border-top: 1px solid var(--line-2); font: 600 18px/26px var(--font); }
+
   @media (max-width: 1120px) {
     .page { padding: 40px 24px 64px; }
     .shot-frame { width: 720px; height: 450px; max-width: 100%; }
@@ -82,13 +85,13 @@
   <header class="hero">
     <div>
       <div class="eyebrow">Superagent · 设计评审</div>
-      <h1>三版插件界面原型</h1>
-      <p>按 DeepSeek Harness 的设计语言重做面板的布局与交互。三版使用同一份模拟数据、覆盖同一组页面，差异在信息组织、导航方式和人机动作的重心。它们都可以直接点击。</p>
+      <h1>插件界面 · 整合方案</h1>
+      <p>把 V1 的队列分栏与命令面板、V3 的设置与视觉语言整合成一个完整工作台。下面先给最终方案，再保留三版方向探索用于对照；全部使用同一份模拟数据，都可以直接点击。</p>
       <div class="facts">
         <span class="fact"><span class="dot dot-green"></span>DSH light palette</span>
         <span class="fact">1440 × 900</span>
         <span class="fact">零依赖 · 可交互</span>
-        <span class="fact">4 个入口 · 4 类页面</span>
+        <span class="fact">整合方案 + 3 版探索稿</span>
         <span class="fact">模拟数据</span>
       </div>
     </div>
@@ -99,6 +102,37 @@
     </div>
   </header>
 
+
+  <article class="concept" id="solution">
+    <div class="concept-head">
+      <div>
+        <div class="concept-index">00 / Integrated</div>
+        <h2>整合方案</h2>
+        <p class="concept-tagline">V1 的队列分栏与命令面板，加上 V3 的设置与视觉语言；一个可以日常使用的完整工作台。</p>
+      </div>
+      <div class="concept-links">
+        <a class="btn btn-primary" href="solution.html?view=home" target="_blank" rel="noopener">打开方案</a>
+        <a class="btn btn-outline" href="solution.html?palette=1" target="_blank" rel="noopener">命令面板</a>
+        <a class="btn btn-ghost" href="solution.html?view=settings" target="_blank" rel="noopener">设置</a>
+      </div>
+    </div>
+    <div class="shot">
+      <div class="shot-frame">
+        <div class="shot-inner">
+          <iframe src="solution.html?view=home" title="整合方案预览" loading="lazy" tabindex="-1" aria-hidden="true"></iframe>
+        </div>
+      </div>
+      <a class="shot-link" href="solution.html?view=home" target="_blank" rel="noopener" aria-label="打开整合方案"></a>
+    </div>
+    <div class="shot-caption"><span>默认打开今日队列，右侧是当前这件事的完整上下文</span><span><code>solution.html?view=home</code> · 缩放 69%</span></div>
+    <div class="concept-notes">
+      <div class="note"><h3>来自 V1</h3><p>三栏队列分栏与行内处理；<code>⌘K</code> 命令面板保留为全局入口。</p><small>j / k 移动 · Enter 打开 · ⌘K 搜索</small></div>
+      <div class="note"><h3>来自 V3</h3><p>设置页的四步清单、分组卡片与保存条；黑色的当前导航、16px 卡片、克制的留白。</p><small>设置隐藏队列，占满内容区</small></div>
+      <div class="note"><h3>整合后的取舍</h3><p>队列占 340px，右侧详情更宽；导航收成 64px 图标栏，仓库上下文回到队列顶部。</p><small>1440 宽下优先级最高的是队列与详情</small></div>
+    </div>
+  </article>
+
+  <div class="explore-label"><span>方向探索</span><span class="t-caption">整合前的三版，保留用于对照</span></div>
   <article class="concept" id="v1">
     <div class="concept-head">
       <div>
@@ -187,8 +221,8 @@
   </article>
 
   <section class="section">
-    <div class="section-head"><h2>三版共同覆盖</h2><span class="badge">同一份数据</span></div>
-    <p class="section-desc">为了避免把差异误判成信息缺失，三版都覆盖同一组页面与状态；任一版都可以从导航进入这些页面。</p>
+    <div class="section-head"><h2>覆盖范围</h2><span class="badge">同一份数据</span></div>
+    <p class="section-desc">整合方案与三版探索稿覆盖同一组页面与状态；整合方案从左侧导航进入这些页面，三版探索稿保留完整视图用于对照。</p>
     <div class="cols" style="margin-top: 24px;">
       <div>
         <h3 class="t-section" style="margin-bottom: 10px;">四类页面</h3>
@@ -222,9 +256,9 @@
   <section class="section">
     <div class="section-head"><h2>评审请回答</h2><span class="t-caption">需要你的判断，不是偏好投票</span></div>
     <div class="questions">
-      <div class="question"><div class="num">Q1</div><h3>主方向选哪一版？</h3><p>可以把一版的骨架和另一版的细节组合，例如 V1 的队列 + V3 的问题卡。请指出你希望保留的那一部分。</p></div>
-      <div class="question"><div class="num">Q2</div><h3>六个页签是否收敛为四个？</h3><p>三版都假设可以合并来源 / 触发 / 评估。如果这些页面各自有必须保留的独立入口，请说明。</p></div>
-      <div class="question"><div class="num">Q3</div><h3>默认密度取哪一档？</h3><p>你更常在面板里「快速处理」（偏 V1），还是「读清楚再处理」（偏 V3）？这会决定首屏信息量。</p></div>
+      <div class="question"><div class="num">Q1</div><h3>这个整合方向能作为最终方案吗？</h3><p>队列来自 V1，视觉与设置来自 V3。如果有打断整体感的地方，请指出是哪一块。</p></div>
+      <div class="question"><div class="num">Q2</div><h3>六个页签是否收敛为四个？</h3><p>整合方案用「今日 / 工单 / 流水 / 设置」四个入口。如果来源、触发、评估各自需要独立入口，请说明。</p></div>
+      <div class="question"><div class="num">Q3</div><h3>还有哪些 Codex 细节需要对齐？</h3><p>密度、圆角、字体、动效或导航形态——指出你希望更接近 Codex 的具体一处即可。</p></div>
     </div>
   </section>
 
