@@ -247,15 +247,22 @@ export class Manager {
           this.starting.add(repository.id)
           try {
             await provision(repository, this.machine.stateDir, this.origin, this.store.get<string>('bot-cli')!, this.store.chats(repository.id))
-            await startInstance(repository, this.machine.stateDir)
-            // Wait for authenticated health before releasing the startup reservation.
-            for (let attempt = 0; attempt < 30; attempt++) {
-              if (this.closed) throw new Error('Manager stopped during repository startup')
-              const status = await instanceHealth(repository).catch(() => undefined)
-              if (status) { this.instances.set(repository.id, { online: true, configured: status.configured }); break }
-              await new Promise(resolve => setTimeout(resolve, 1000))
-            }
-            if (!this.instances.get(repository.id)?.online) throw new Error('Repository did not start; inspect its dedicated log')
+            const child = await startInstance(repository, this.machine.stateDir)
+            try {
+              // Wait for authenticated readiness before releasing the startup reservation.
+              let ready = false
+              for (let attempt = 0; attempt < 30; attempt++) {
+                if (this.closed) throw new Error('Manager stopped during repository startup')
+                if (child.exitCode !== null || child.signalCode !== null) throw new Error('Repository exited during startup; inspect its dedicated log')
+                const status = await instanceHealth(repository).catch(() => undefined)
+                if (status?.state === 'error') throw new Error('Repository initialization failed; inspect its dedicated log')
+                if (status && (status.state === 'ready' || status.state === undefined)) {
+                  this.instances.set(repository.id, { online: true, configured: status.configured }); ready = true; break
+                }
+                await new Promise(resolve => setTimeout(resolve, 1000))
+              }
+              if (!ready) throw new Error('Repository did not start; inspect its dedicated log')
+            } catch (error) { if (child.exitCode === null) child.kill('SIGTERM'); throw error }
           } finally { this.starting.delete(repository.id) }
         } else if (action[2] === 'stop') {
           const status = await instanceHealth(repository); process.kill(status.pid, 'SIGTERM')

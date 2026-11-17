@@ -40,7 +40,7 @@
 
 ## 执行与会话
 
-- 每个仓库独立 profile、进程、状态目录和本地连接凭据。
+- 每个仓库独立 DSH_HOME、profile、进程、状态目录和本地连接凭据；会话与工作空间不与管理入口共用存储。
 - 每个工单保留自己的持久会话，在真实仓库根目录执行，共用对应 DSH 工作空间。
 - 同目录工单串行，人工追问不会获得额外修改名额。后台命令仍运行时继续占用目录。
 - 已有用户修改会阻止新工单开始，不自动 stash、reset 或清理。
@@ -65,7 +65,8 @@
 管理数据库：`<stateDir>/manager.sqlite`。
 仓库数据库：`<stateDir>/repositories/<repositoryId>/orchestrator.sqlite`。
 实例启动日志：`<stateDir>/logs/<repositoryId>.log`。
-生成的 DSH profile：`$DSH_HOME/profiles/superagent-<id前八位>`。
+生成的 DSH profile：`<stateDir>/repositories/<repositoryId>/dsh-home/profiles/superagent-<id前八位>`。
+模型凭据文件可复用操作者现有配置；会话及工作空间存储严格分开。
 
 管理入口重启不会主动停止仓库实例，会通过独立凭据重新发现它们。仓库实例只在用户点击启动时启动；不提供自动开机启动。
 

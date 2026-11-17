@@ -1,7 +1,7 @@
 /** Creates dedicated DSH profiles and controls only authenticated repository instances. */
-import { execFile, spawn } from 'node:child_process'
+import { execFile, spawn, type ChildProcess } from 'node:child_process'
 import { promisify } from 'node:util'
-import { access, chmod, mkdir, readFile, writeFile, open } from 'node:fs/promises'
+import { access, chmod, mkdir, readFile, writeFile, open, symlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { Store } from '../app/store.ts'
@@ -10,6 +10,8 @@ import { packageRoot } from '../infra/paths.ts'
 import type { Repository } from './store.ts'
 
 const exec = promisify(execFile)
+export const instanceHome = (directory: string, repositoryId: string): string => join(directory, 'repositories', repositoryId, 'dsh-home')
+const instanceEnvironment = (repository: Repository, directory: string) => ({ ...process.env, DSH_HOME: instanceHome(directory, repository.id) })
 export async function instanceRequest(repository: Repository, path: string, body?: unknown, method = body === undefined ? 'GET' : 'POST'): Promise<unknown> {
   const response = await fetch(`http://127.0.0.1:${repository.port}/orchestrator/instance/${path}`, {
     method, headers: { authorization: `Bearer ${repository.token}`, 'content-type': 'application/json' },
@@ -19,13 +21,21 @@ export async function instanceRequest(repository: Repository, path: string, body
   if (!response.ok) throw new Error(result.error ?? `Repository instance returned ${response.status}`)
   return result
 }
-export async function instanceHealth(repository: Repository): Promise<{ pid: number; configured: boolean }> {
-  const health = await instanceRequest(repository, 'health') as { repositoryId: string; pid: number; configured: boolean }
+export async function instanceHealth(repository: Repository): Promise<{ pid: number; configured: boolean; state?: string }> {
+  const health = await instanceRequest(repository, 'health') as { repositoryId: string; pid: number; configured: boolean; state?: string }
   if (health.repositoryId !== repository.id || !Number.isInteger(health.pid) || health.pid < 1) throw new Error('Unexpected repository instance')
   return health
 }
 export async function provision(repository: Repository, directory: string, managerOrigin: string, botCli: string, chats: string[]): Promise<void> {
-  const profileDirectory = join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'profiles', repository.profile)
+  const home = instanceHome(directory, repository.id), env = instanceEnvironment(repository, directory)
+  const profileDirectory = join(home, 'profiles', repository.profile)
+  await mkdir(home, { recursive: true, mode: 0o700 })
+  // Reuse the operator's model credentials, but never the shared session or workspace stores.
+  const sharedCredentials = join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), '.credentials.yaml')
+  if (await access(sharedCredentials).then(() => true, () => false)) {
+    const destination = join(home, '.credentials.yaml')
+    if (!await access(destination).then(() => true, () => false)) await symlink(sharedCredentials, destination)
+  }
   const stateDir = join(directory, 'repositories', repository.id)
   const profileExists = await access(profileDirectory).then(() => true, () => false)
   const marker = join(profileDirectory, '.superagent-repository')
@@ -36,10 +46,10 @@ export async function provision(repository: Repository, directory: string, manag
   }
   // A generated profile belongs only to this repository; never overwrite the operator's profile.
   if (!profileExists) {
-    await exec('dsh', [repository.profile, '--from-default-profile', 'web', '--dump-config'], { timeout: 60_000, maxBuffer: 4 << 20 })
+    await exec('dsh', [repository.profile, '--from-default-profile', 'web', '--dump-config'], { env, timeout: 60_000, maxBuffer: 4 << 20 })
     await writeFile(marker, repository.id, { mode: 0o600 })
   }
-  await exec('dsh', ['plugin', '--profile', repository.profile, 'add', `link:${packageRoot()}`], { timeout: 60_000, maxBuffer: 4 << 20 })
+  await exec('dsh', ['plugin', '--profile', repository.profile, 'add', `link:${packageRoot()}`], { env, timeout: 60_000, maxBuffer: 4 << 20 })
   const rows = [
     { id: 'webserver', config: { host: '127.0.0.1', port: repository.port } },
     { id: 'dsh-superagent', config: { stateDir, mode: 'standalone', managed: { repositoryId: repository.id, url: managerOrigin, token: repository.token } } },
@@ -48,9 +58,12 @@ export async function provision(repository: Repository, directory: string, manag
   // JSON is valid YAML. DSH's patch file accepts the same row sequence as the documented YAML example.
   await writeFile(join(profileDirectory, 'cordis.patch.yml'), JSON.stringify(rows, null, 2), { mode: 0o600 })
   await chmod(join(profileDirectory, 'cordis.patch.yml'), 0o600)
-  const store = new Store(join(stateDir, 'orchestrator.sqlite'), () => {})
+  const database = join(stateDir, 'orchestrator.sqlite')
+  const existingState = await access(database).then(() => true, () => false)
+  const store = new Store(database, () => {})
   try {
-    store.saveSettings(SettingsSchema.parse({ executor: { workspaceMode: 'current', repositoryPath: repository.directory, maxWorkers: 1 },
+    if (existingState && store.tickets.list().length) throw new Error('Existing work needs an explicit session migration before enabling isolated DSH storage')
+    if (!existingState) store.saveSettings(SettingsSchema.parse({ executor: { workspaceMode: 'current', repositoryPath: repository.directory, maxWorkers: 1 },
       sources: { github: { enabled: true, config: { repository: repository.remote, cli: repository.githubCli } },
         feishu: { enabled: true, config: { cli: botCli, chats: chats.map(chatId => ({ chatId, listen: 'mentions' })), directMessages: false, otherChats: 'none' } } },
       policy: { sources: { github: { allowed: repository.allowedGithub.map(id => ({ id })) }, feishu: { allowed: repository.allowedFeishu.map(id => ({ id })) } } },
@@ -58,13 +71,14 @@ export async function provision(repository: Repository, directory: string, manag
   } finally { store.close() }
   await writeFile(join(profileDirectory, '.superagent-ready'), repository.id, { mode: 0o600 })
 }
-export async function startInstance(repository: Repository, directory: string): Promise<void> {
+export async function startInstance(repository: Repository, directory: string): Promise<ChildProcess> {
   const logs = join(directory, 'logs'); await mkdir(logs, { recursive: true, mode: 0o700 })
   const log = await open(join(logs, `${repository.id}.log`), 'a', 0o600)
   try {
-    const child = spawn('dsh', ['--profile', repository.profile, '--no-open'], { detached: true, stdio: ['ignore', log.fd, log.fd] })
+    const child = spawn('dsh', ['--profile', repository.profile, '--no-open'], { detached: true, env: instanceEnvironment(repository, directory), stdio: ['ignore', log.fd, log.fd] })
     await new Promise<void>((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject) })
     child.unref()
+    return child
   } finally { await log.close() }
 }
 

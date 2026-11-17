@@ -240,9 +240,9 @@ export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
         const bridge = runtime.machine.managed
         if (!bridge || !authorized(req.headers.authorization, bridge.token)) { json(res, 403, { error: 'Instance authorization required' }); return }
         try {
-          await runtime.ready
           const path = url.pathname.slice('/orchestrator/instance/'.length)
-          if (path === 'health' && req.method === 'GET') { json(res, 200, { repositoryId: bridge.repositoryId, pid: process.pid, configured: runtime.configured() }); return }
+          if (path === 'health' && req.method === 'GET') { json(res, 200, { repositoryId: bridge.repositoryId, pid: process.pid, configured: runtime.configured(), state: runtime.health.runtime?.state }); return }
+          await runtime.ready
           if (path === 'receive' && req.method === 'POST') {
             if (!runtime.configured()) throw new RouteError(400, 'Repository setup is incomplete')
             const request = z.object({ repositoryId: z.string(), trigger: FeishuTriggerSchema }).parse(await readBody(req, 1048576))
