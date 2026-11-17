@@ -1,16 +1,16 @@
 /** Root panel shell: header with global search and glossary, top-level navigation tabs, and active route view. */
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
-import type { SearchView } from './api.ts'
-import { Button, Dot, Icon, Input, Modal, SegmentedTabs } from './controls.tsx'
+import { usePoll, type SearchView } from './api.ts'
+import { Button, Dot, Icon, Input, Modal, SegmentedTabs, type IconName } from './controls.tsx'
 import type { DeploymentForm } from './deployment.tsx'
 import { EvalStatus } from './eval.tsx'
 import { ExecutionStatus } from './execution.tsx'
 import { ticketMark } from './marks.ts'
 import { GLOSSARY, GLOSSARY_VALUES, en, zh, type DshSuperagentKey } from './locales.ts'
 import { OverviewPage } from './overview.tsx'
+import { RepositoryPage } from './repository.tsx'
 import { PanelProvider, usePanel, usePanelData } from './provider.tsx'
-import { HOME, TABS, initialLocation, lastSettingsGroup, remember, routeLabel, settingsRoute, type Location, type Route,
-  type Tab } from './route.ts'
+import { HOME, TABS, initialLocation, lastSettingsGroup, remember, routeLabel, settingsRoute, type Location, type Route, type Tab } from './route.ts'
 import { SettingsPage } from './settings.tsx'
 import { SourceStatus } from './source.tsx'
 import { actorName, errorText, reasonLabel, valueLabel, type T, readableMarkers } from './text.ts'
@@ -141,8 +141,6 @@ function Header({ masterId }: { masterId: string | undefined }) {
 function Pages({ route, openTab, deploymentForm }: { route: Route; openTab: (tab: Tab) => void; deploymentForm: DeploymentForm }) {
   const { t } = usePanel()
   const { state, error, reload } = usePanelData()
-  // Keep the active tab scrolled into view on narrow screens when routes change via links.
-  useEffect(() => { document.getElementById(`dt-tab-${route.page}`)?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' }) }, [route.page])
   const waiting = error ? <p className="dt-error" role="alert">{error.message}</p> : <p className="dt-hint">{t('loading')}</p>
   const page = (() => {
     switch (route.page) {
@@ -156,16 +154,51 @@ function Pages({ route, openTab, deploymentForm }: { route: Route; openTab: (tab
         : state ? <ExecutionStatus filter={route.query?.filter ?? 'open'} state={state} reload={reload} /> : waiting
       case 'settings': return state ? <SettingsPage key={state.masterId} group={route.query.group} query={route.query} state={state}
         deploymentForm={deploymentForm} /> : waiting
+      case 'repository': return <RepositoryPage />
     }
   })()
   return <div className="dt-page">
     <div className="dt-column">
       <Header masterId={state?.masterId} />
       {error && state && <p className="dt-error" role="status">{error.message}</p>}
-      <SegmentedTabs className="dt-tabs" label={t('pagesLabel')} value={route.page} onChange={openTab}
+      <SegmentedTabs className="dt-tabs" label={t('pagesLabel')} value={route.page === 'repository' ? 'overview' : route.page} onChange={openTab}
         items={TABS.map(value => ({ value, label: t(`tab.${value}`), id: `dt-tab-${value}`, panelId: 'dt-page' }))} />
       <main id="dt-page" role="tabpanel" aria-labelledby={`dt-tab-${route.page}`} className="dt-main">{page}</main>
     </div>
+  </div>
+}
+
+
+/** Global shell: a compact left navigation and the selected page. */
+function Nav({ route }: { route: Route }) {
+  const { t, call, navigate } = usePanel()
+  const { state } = usePanelData()
+  const { data: overview } = usePoll(() => call('GET overview'), [])
+  const active = route.page === 'overview' ? 'inbox'
+    : route.page === 'execution' ? 'tasks'
+      : route.page === 'settings' ? (route.query.group === 'prompts' ? 'prompts' : 'health')
+        : 'repository'
+  const items: { id: string; label: string; icon: IconName; route: Route; count?: number }[] = [
+    { id: 'inbox', label: t('nav.inbox'), icon: 'inbox', route: { page: 'overview' }, count: overview?.person.length },
+    { id: 'repository', label: t('nav.repository'), icon: 'hash', route: { page: 'repository' } },
+    { id: 'tasks', label: t('nav.tasks'), icon: 'queue', route: { page: 'execution' }, count: state?.load.running },
+    { id: 'prompts', label: t('nav.prompts'), icon: 'review', route: settingsRoute('prompts') },
+    { id: 'health', label: t('nav.health'), icon: 'settings', route: settingsRoute('deployment') },
+  ]
+  return <nav className="dt-shell-nav" aria-label={t('pagesLabel')}>
+    <div className="dt-global-nav-brand"><span className="dt-global-nav-mark">S</span><span>Superagent</span></div>
+    {items.map(item => <button key={item.id} type="button" className="dt-global-nav-item" aria-current={active === item.id ? 'page' : undefined}
+      onClick={() => navigate(item.route)}>
+      <Icon name={item.icon} size={16} /><span>{item.label}</span>
+      {item.count ? <span className="dt-global-nav-count">{item.count}</span> : null}
+    </button>)}
+  </nav>
+}
+
+function Shell({ route, openTab, deploymentForm }: { route: Route; openTab: (tab: Tab) => void; deploymentForm: DeploymentForm }) {
+  return <div className="dt-shell">
+    <Nav route={route} />
+    <div className="dt-shell-content"><Pages route={route} openTab={openTab} deploymentForm={deploymentForm} /></div>
   </div>
 }
 
@@ -183,6 +216,6 @@ export function App({ t, openSession, deploymentForm }: AppProps) {
   const openTab = useCallback((tab: Tab) => move(current => ({ stack: [], route: tab === 'settings'
     ? settingsRoute(lastSettingsGroup(current)) : { page: tab, id: undefined } })), [move])
   return <PanelProvider t={t} openSession={openSession} navigate={navigate} back={back} backLabel={routeLabel(t, location.stack.at(-1) ?? HOME)}>
-    <Pages route={location.route} openTab={openTab} deploymentForm={deploymentForm} />
+    <Shell route={location.route} openTab={openTab} deploymentForm={deploymentForm} />
   </PanelProvider>
 }
