@@ -1,6 +1,7 @@
 /** Block-scoped settings validation, optimistic concurrency saves, processing pause control, and source policy synchronization. */
 import type { Context } from '@deepseek-ai/cordis'
 import { z } from 'zod'
+import { verifyRepository } from '../infra/repository.ts'
 import { UserError, type EngineForSettings } from '../core/index.ts'
 import { EvalConfigSchema, ExecutorConfigSchema, PolicyConfigSchema, SettingsSchema, policyEffects, policyVersion } from '../policy.ts'
 import type { Settings as SettingsValue, SettingsBlock, SettingsOrigin, SettingsSave } from '../policy.ts'
@@ -21,7 +22,7 @@ import { KV } from '../kv.ts'
 export class SettingsConflict extends Error {}
 const now = (): string => new Date().toISOString()
 /** Executor settings that control shell execution paths, prepare commands, and command shims. */
-const environment = ({ executor }: SettingsValue) => JSON.stringify([executor.directory, executor.prepare, executor.blockedCommands])
+const environment = ({ executor }: SettingsValue) => JSON.stringify([executor.directory, executor.prepare, executor.blockedCommands, executor.workspaceMode, executor.repositoryPath])
 
 /** Schema parser, settings merger, and non-panel origin guard for one settings block kind. */
 interface Block {
@@ -164,6 +165,13 @@ export class Settings {
       catch (error) { throw new UserError('modelUnavailable', { block, error: error instanceof Error ? error.message : String(error) }) }
     }
     rules.guard?.(current, candidate, origin)
+    if ((current.executor.repositoryPath !== candidate.executor.repositoryPath || current.executor.workspaceMode !== candidate.executor.workspaceMode)
+      && store.tickets.open().some(ticket => ticket.execution?.workspaceMode === 'current')) {
+      throw new SettingsConflict('Finish or stop open checkout tickets before changing their workspace configuration.')
+    }
+    if ((block === 'executor' || block === 'source:github') && candidate.executor.workspaceMode === 'current') {
+      candidate.executor.repositoryPath = await verifyRepository(candidate.executor.repositoryPath, String(candidate.sources.github?.config.repository ?? ''), this.host.context.subprocess, this.host.lifetime)
+    }
     if (setupChanged(current, candidate)) await this.host.setup.checkAccounts(block, candidate)
     if (stale()) throw new SettingsConflict('Settings changed during the checks. Reload before saving.')
     // Re-read current settings after async checks in case unrelated blocks were saved concurrently.

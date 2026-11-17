@@ -2,6 +2,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { authorized, FeishuTriggerSchema } from '../manager/protocol.ts'
 import { z } from 'zod'
 import { THREAD_FILTERS, TICKET_FILTERS, type Api, type ApiResponse, type RouteParams } from './api.ts'
 import { sourceSkills } from './context.ts'
@@ -29,6 +30,7 @@ import { decisionList, search, threadDetail, threadList } from './views/threads.
 import { executorLoad, ticketDetail, ticketList } from './views/tickets.ts'
 
 export interface HttpHost {
+  ingestManaged?(trigger: import('../core/index.ts').Trigger): unknown
   readonly store: Store
   /** Feishu message links resolved since startup, used by search to match AppLink URLs. */
   readonly sourceLinks: Pick<TextCache, 'entries'>
@@ -233,6 +235,25 @@ export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
   const disposers = [
     ctx.webServer.register({ kind: 'prefix', path: '/orchestrator', handler: async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://localhost')
+      if (url.pathname === '/orchestrator/mode') { json(res, 200, { mode: 'standalone' }); return }
+      if (url.pathname.startsWith('/orchestrator/instance/')) {
+        const bridge = runtime.machine.managed
+        if (!bridge || !authorized(req.headers.authorization, bridge.token)) { json(res, 403, { error: 'Instance authorization required' }); return }
+        try {
+          await runtime.ready
+          const path = url.pathname.slice('/orchestrator/instance/'.length)
+          if (path === 'health' && req.method === 'GET') { json(res, 200, { repositoryId: bridge.repositoryId, pid: process.pid, configured: runtime.configured() }); return }
+          if (path === 'receive' && req.method === 'POST') {
+            if (!runtime.configured()) throw new RouteError(400, 'Repository setup is incomplete')
+            const request = z.object({ repositoryId: z.string(), trigger: FeishuTriggerSchema }).parse(await readBody(req, 1048576))
+            if (request.repositoryId !== bridge.repositoryId) throw new RouteError(400, 'Repository mismatch')
+            json(res, 200, { result: runtime.ingestManaged?.(request.trigger) }); return
+          }
+          const route = match(table, req.method ?? 'GET', path.split('/'))
+          if (!route) throw new RouteError(404, 'Unknown instance operation')
+          json(res, 200, await route.run({ params: route.params as never, query: Object.fromEntries(url.searchParams), body: maxBytes => readBody(req, maxBytes) })); return
+        } catch (error) { json(res, ...failure(error)); return }
+      }
       if (!url.pathname.startsWith('/orchestrator/api/')) { res.writeHead(404); res.end(); return }
       if (!sameOrigin(req, ctx.webServer.port)) { json(res, 403, { error: 'Same-origin management request required' }); return }
       try {

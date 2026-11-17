@@ -355,6 +355,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/executor/background.ts` | A worker's background work in DeepSeek Harness, the shell jobs its Session owns (`ctx.jobs`) and its subagents (`ctx.subagents`): `runningJobs`, `untilQuiet`, `killJobs`, `collectJobs`, `stopSubagents`, `stopBackground`, `until`, and `cancelled`, the workers whose turn a stop of their subagents cancelled |
 | `src/infra/commands.ts` | `Commands`, the CLI transport: `run`; `api` and `pages`, limited to the configured repository and validated; `lark` as the bot; `git`. `CliError` carries the code a command's output reports, such as a GitHub HTTP status, and a command that prints nothing fails with how it ended, never with its arguments; `validItems` skips and counts the malformed items of a list |
 | `src/infra/environment.ts` | The agent's process environment: command shims, the git configuration and credential helper, `runAsWorker`, and the checks of the environment and of a Ticket's directory |
+| `src/infra/repository.ts` | Validates checkout roots, remote identity, unfinished Git operations and existing changes without modifying files |
 | `src/infra/paths.ts` | The package's root, where packaged files are |
 | `src/infra/text.ts` | Word counts and the chat message limit, `fill` and `sameName` |
 | `src/infra/health.ts` | The `HealthBoard`, every part's health entry, each claimed by its one writer |
@@ -398,6 +399,12 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/client/client.css`, `css.d.ts` | The panel's stylesheet, loaded as text |
 
 `src/sources/github.ts` and `src/sources/feishu.ts` are also the entries of the two Source plugins, built by `tsdown.config.ts` and exported in `package.json` as `./github-watch` and `./feishu-watch`. The bundle's `cordis.patch.yml` inserts the three plugins, with Feishu disabled.
+
+| `src/client/manager.tsx` | Multi-repository management, deterministic Feishu routing and isolated execution |
+| `src/manager/protocol.ts` | Multi-repository management, deterministic Feishu routing and isolated execution |
+| `src/manager/store.ts` | Multi-repository management, deterministic Feishu routing and isolated execution |
+| `src/manager/instances.ts` | Multi-repository management, deterministic Feishu routing and isolated execution |
+| `src/manager/runtime.ts` | Multi-repository management, deterministic Feishu routing and isolated execution |
 
 ## Tests
 
@@ -447,6 +454,13 @@ Some generic modules still refer directly to GitHub or Feishu:
 
 `tests/fixtures/` holds what several tests share: `host.ts`, a simulated DeepSeek Harness host; `panel-server.ts` and `panel.tsx`, the fake management API and the panel around a page; `deployment.ts`, a resolved deployment; `git.ts`, the environment of every git the tests start, which names no repository; and `async.ts`.
 
+| `tests/repository.spec.ts` | Checkout identity and shared-workspace slot protection |
+| `tests/manager-store.spec.ts` | Multi-repository routing, durable replay, binding changes and local protocol guards |
+
+| `tests/manager-runtime.spec.ts` | Real loopback bridge authentication, delivery recovery and reply scope using a fake bot |
+
+| `tests/bot-facade.spec.ts` | Bot-only command forwarding without modifying personal authentication |
+
 ## Persistence
 
 One SQLite file, `<stateDir>/orchestrator.sqlite`, which only the Store opens.
@@ -484,6 +498,7 @@ Read caches use bounded in-memory `TextCache` instances and are lost on restart.
 Nothing deletes old records yet, so these grow without bound: the `trigger`, `disposition` and `decision` rows; ended Tickets and their Threads; the outbox's receipts; and in `kv`, every saved settings revision and prompt version, the prompt revisions each Session worked under, and the Sources' records per Thread and per Issue or pull request.
 
 `SCHEMA_VERSION` only increases. A database of a newer version refuses to start; `src/app/migration.ts` upgrades a database of the pre-release schema 10 once, at start, and refuses an older one.
+
 
 ## Model-facing interfaces
 

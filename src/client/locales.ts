@@ -6,6 +6,15 @@ import { SETUP_PROBLEMS } from '../setup.ts'
 import { HEALTH_TEXT } from '../sources/host.ts'
 
 const TEXT = {
+  'change.workspaceMode': ['工作方式：{from} → {to}', 'Workspace mode: {from} → {to}'],
+  'change.repositoryPath': ['仓库路径：{from} → {to}', 'Repository path: {from} → {to}'],
+  workspaceMode: ['工作方式', 'Workspace mode'],
+  workspaceModeHint: ['当前仓库中的工单串行执行；独立目录模式保留原有准备命令。', 'Current checkout tickets run serially; isolated directories use the existing prepare command.'],
+  workspaceIsolated: ['独立目录', 'Isolated directories'],
+  workspaceCurrent: ['当前仓库', 'Current checkout'],
+  repositoryPath: ['本地仓库路径', 'Local repository path'],
+  repositoryPathHint: ['选择监听仓库的本地根目录；保存时检查远端。', 'Use the local root of the watched repository; its remote is checked on save.'],
+  workspaceSerial: ['实际并发为 1，人工追问也会排队。新工单遇到已有修改会等待你处理，不会自动清理文件。', 'Effective concurrency is 1, including human follow-ups. Existing changes block a new ticket without changing files.'],
   // Shared
   title: ['Superagent', 'Superagent'],
   close: ['关闭', 'Close'],

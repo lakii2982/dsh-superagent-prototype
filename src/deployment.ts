@@ -1,4 +1,5 @@
 /** Plugin configuration and startup verification for repository access and agent CLI identities. */
+import { managerUrl } from './manager/protocol.ts'
 import { LIMITS } from './limits.ts'
 import { accessSync, constants, statSync } from 'node:fs'
 import { delimiter, isAbsolute, join } from 'node:path'
@@ -10,9 +11,12 @@ import { runAsWorker, sameDirectory, withoutDirectory, workerBin } from './infra
 import { SetupError } from './setup.ts'
 
 const reason = (error: unknown): string => error instanceof Error ? error.message : String(error)
+const ManagedConfig: s<{ repositoryId: string; url: string; token: string } | null> = s.union([s.object({ repositoryId: s.string().required(), url: s.string().required(), token: s.string().required() }), s.const(null)]).default(null)
 const absolute = (description: string) => s.string().pattern(/^\//).description(`${description} Absolute path.`)
 /** Plugin configuration of the dsh-superagent entry. Volatile fields apply without a restart because dsh-superagent reads them on each use; changing `stateDir` remounts the plugin. */
 export const Config = s.object({
+  mode: s.union(['standalone', 'manager']).default('standalone'),
+  managed: ManagedConfig.description('Internal repository bridge; configured by the manager.'),
   stateDir: absolute('Directory for the database, locks, worker shims, the agent\'s git configuration and, by default, the ticket directories.').required(),
   promptMaxChars: s.number().min(LIMITS.promptMaxChars.min).max(LIMITS.promptMaxChars.max).step(1).default(100000)
     .description('Largest saved prompt configuration, in characters.').volatile(),
@@ -23,6 +27,7 @@ export const Config = s.object({
 })
 export type DeploymentConfig = ReturnType<typeof Config>
 export interface Machine {
+  managed?: { repositoryId: string; url: string; token: string }
   stateDir: string
   promptMaxChars: Volatile<number>
   admissionContextMaxPages: Volatile<number>
@@ -38,8 +43,9 @@ const MOVED: Record<string, string> = {
 export function machineOf(config: DeploymentConfig): Machine {
   const unknown = Object.keys(config).filter(key => !(key in (Config.dict ?? {})))
   if (unknown.length) throw new Error(`dsh-superagent configuration has keys it does not use: ${unknown.map(key => MOVED[key] ? `${key} (now ${MOVED[key]})` : key).join(', ')}; docs/006-deployment.md lists the keys`)
-  const { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs } = config
-  return { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs }
+  const { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs, managed } = config
+  if (managed) managed.url = managerUrl(managed.url)
+  return { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs, ...(managed ? { managed } : {}) }
 }
 
 export const GithubAccountsSchema = z.object({

@@ -101,6 +101,14 @@ export class Commands {
    * @throws CliError with Feishu's error code on failure (rewriting 232011 when the bot is not in the chat).
    */
   async lark<T>(args: string[], cwd?: string): Promise<T> {
+    if (this.deployment.managed) {
+      const { url, token, repositoryId } = this.deployment.managed
+      const response = await fetch(`${url}/orchestrator/internal/${repositoryId}/lark`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ args, ...(cwd ? { cwd } : {}) }), signal: AbortSignal.any([this.signal, AbortSignal.timeout(TIMEOUT_MS)]) })
+      const result = await response.json() as { data?: T; error?: string; code?: number }
+      if (!response.ok) throw new CliError(result.error ?? 'Feishu bridge unavailable', result.code)
+      return result.data as T
+    }
     const bot = this.deployment.feishu
     if (!bot) throw new Error('The Feishu Source has no working bot CLI')
     const output = await this.run(bot.cli, [...args, '--as', 'bot', '--format', 'json'], cwd)

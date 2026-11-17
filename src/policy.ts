@@ -91,10 +91,14 @@ const CommandNameSchema = z.string().regex(/^[A-Za-z0-9._-]+$/).refine(name => n
 export const ExecutorConfigSchema = z.object({
   model: RoleModelSchema.nullable().default(null),
   maxWorkers: z.number().int().min(LIMITS.maxWorkers.min).max(LIMITS.maxWorkers.max).default(3),
+  workspaceMode: z.enum(['isolated', 'current']).default('isolated'),
+  repositoryPath: z.string().trim().refine(path => path === '' || path.startsWith('/'), 'An absolute repository path').default(''),
   directory: z.string().trim().refine(path => path === '' || path.startsWith('/'), 'An absolute path, or empty for <stateDir>/work').default(''),
   prepare: z.string().max(LIMITS.prepareCommand).default(''),
   blockedCommands: z.array(CommandNameSchema).default([]),
-}).strict()
+}).strict().superRefine((value, ctx) => {
+  if (value.workspaceMode === 'current' && !value.repositoryPath) ctx.addIssue({ code: 'custom', path: ['repositoryPath'], message: 'Choose a local repository for current workspace mode' })
+})
 export const SourceInstanceSchema = z.object({ enabled: z.boolean().default(true), config: z.record(z.string(), z.unknown()).default({}) }).strict()
 export const SettingsSchema = z.object({
   paused: z.boolean().default(false),

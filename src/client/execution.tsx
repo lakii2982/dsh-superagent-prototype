@@ -3,7 +3,7 @@ import { useRef, useState } from 'react'
 import { TICKET_FILTERS, type TicketFilter } from '../app/api.ts'
 import { LIMITS } from '../limits.ts'
 import { usePoll, type SettingsView, type SourceView, type StateView } from './api.ts'
-import { DisclosureRow, Icon, InfoTip, Input, Pill } from './controls.tsx'
+import { DisclosureRow, Icon, InfoTip, Input, Pill, SegmentedControl } from './controls.tsx'
 import { SaveBar } from './draft.tsx'
 import { usePanel } from './provider.tsx'
 import { TicketLine } from './rows.tsx'
@@ -103,16 +103,24 @@ export function ExecutionSettings() {
         </div>
         <div className="dt-form dt-block">
           <h2 className="dt-block-title">{t('term.environment')}<InfoTip text={t('environmentIntro')} /></h2>
-          <Field label={t('executionDirectory')} hint={t('executionDirectoryHint')} note={value.directory ? undefined
+          <Field label={t('workspaceMode')} hint={t('workspaceModeHint')}>
+            <SegmentedControl label={t('workspaceMode')} options={[{ value: 'isolated', label: t('workspaceIsolated') }, { value: 'current', label: t('workspaceCurrent') }]}
+              value={value.workspaceMode} onChange={workspaceMode => edit({ workspaceMode })} />
+          </Field>
+          {value.workspaceMode === 'current' && <Field label={t('repositoryPath')} hint={t('repositoryPathHint')}>
+            <Input value={value.repositoryPath} required pattern="/.*" onChange={event => edit({ repositoryPath: event.target.value })} />
+          </Field>}
+          {value.workspaceMode === 'current' && <Hint>{t('workspaceSerial')}</Hint>}
+          {value.workspaceMode === 'isolated' && <Field label={t('executionDirectory')} hint={t('executionDirectoryHint')} note={value.directory ? undefined
             : t('executionDirectoryDefault', { root: environment.root })}>
             <Input className="dt-mono" value={value.directory} placeholder={t('executionDirectoryEmpty')} spellCheck={false} pattern="/.*"
               onChange={event => edit({ directory: event.target.value })} />
-          </Field>
-          <Field label={t('prepareCommand')} hint={t('prepareCommandHint')}>
+          </Field>}
+          {value.workspaceMode === 'isolated' && <Field label={t('prepareCommand')} hint={t('prepareCommandHint')}>
             <textarea ref={prepare} className="dt-textarea dt-mono" rows={3} maxLength={LIMITS.prepareCommand} spellCheck={false}
               placeholder={t('prepareCommandEmpty')} value={value.prepare}
               onChange={event => edit({ prepare: event.target.value })} />
-          </Field>
+          </Field>}
           <EnvironmentVariables groups={environment.variables} sources={sources} onPick={insert} />
           <Field label={t('blockedCommands')} hint={t('blockedCommandsHint')}>
             <Input className="dt-mono" value={value.blockedCommands} placeholder={t('blockedCommandsNone')} spellCheck={false}
