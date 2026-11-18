@@ -43,10 +43,10 @@
 
 ## 5. 验证方式
 
-- 自动化：`pnpm check`（类型检查 + 全量测试 + 构建）。本迭代收尾时 **67 个测试文件 / 1294 例全部通过**（构建 ESM 857.16 kB），其中新增或重写的用例覆盖逐话题顺序、群停用隔离、就绪维度、worktree 并行与排队、准备续接与现场保留、委派生命周期与权限边界、宿主交付的各步对账、超范围审批、清理前远端核对、回执事实与运行详情。
+- 自动化：`pnpm check`（类型检查 + 全量测试 + 构建）。本迭代收尾时 **67 个测试文件 / 1295 例全部通过**（构建 ESM 857.16 kB），其中新增或重写的用例覆盖逐话题顺序、群停用隔离、就绪维度、worktree 并行与排队、准备续接与现场保留、委派生命周期与权限边界、宿主交付的各步对账、超范围审批、清理前远端核对、回执事实与运行详情。
 - 定向回归：`pnpm vitest run tests/manager-*.spec.ts tests/worktree.spec.ts tests/runtime-concurrency.spec.ts tests/repository.spec.ts tests/migration.spec.ts tests/settings.spec.ts`。
 - 回归：`pnpm test`（宿主继承环境下同样全绿；`pnpm check` 在 DSH 进程内也可直接运行）。
-- 交付链路的测试层次：`git ls-remote` 与 worktree 清理跑在真实临时 git 仓库与本地 bare 远程上（`tests/worktree.spec.ts`）；`orchestrator_delivery` 的 `ls-remote`/push/`gh pr list|create` 走注入的 `Commands` 替身（`tests/delivery-tool.spec.ts`），**没有真实 GitHub 远端**，所以「推送与建 PR 在真实仓库上成立」仍需 §8 的联调。
+- 交付链路的测试层次：`orchestrator_delivery` 的 push 有一次真实 git 端到端（`tests/delivery-tool.spec.ts`「pushes a real commit to a real remote once the checked head matches」：真实临时仓库 + 本地 bare 远程，`ls-remote`→`fetch`→`push`→记录 applied 均由真 git 完成）；worktree 清理的 `ls-remote` 核对同样跑在真实仓库上（`tests/worktree.spec.ts`）。`gh pr list|create` 仍走注入的 `Commands` 替身，**没有真实 GitHub 远端**，所以「推送与建 PR 在真实 GitHub 仓库上成立」仍需 §8 的联调。
 - 真实 CLI 实测（阶段 C，手工一次性执行，不在自动化里跑网络）：临时 git 仓库内用委派器起 `claude`（写权限）与 `codex`（只读）。`claude` 返回 `session_id` 与 `DONE`，`changes.status` 为 `?? agent-proof.txt`，注记投递给当前 Assignment；`codex` 经系统代理（`scutil --proxy` → `127.0.0.1:10902`）返回 `pong` 并记录 `thread_id`。两者均 `done`，说明命令拼装、输出解析、改动采集与代理透传在真实二进制上成立。
 - 真实验收（阶段 E）：两个独立测试仓库、两个测试群，保存工单、PR、重叠运行时间与恢复证据。
 
@@ -62,9 +62,9 @@
 | 阶段 C · 本地 Agent | 完成 | `0c97e9b` | `tests/agents.spec.ts`（假 CLI 子进程）；真实 `claude`/`codex` 各一次端到端实测；全量 `pnpm check` 通过 |
 | 阶段 D · GitHub 交付与面板 | 完成（面板部分） | `9bcf8a6`、`dca1055` | `tests/views.spec.ts` 与 `tests/panel-execution.spec.tsx` 新增；回执事实、列表仓库/Agent/PR、运行详情；全量 `pnpm check` 通过 |
 | 阶段 C 收口 · 默认 Agent、停止收束、权限边界 | 完成 | `02eac98` | `tests/agents.spec.ts` 25 例（顽抗进程不释放名额、默认 Agent、环境白名单与私有 HOME、超范围检测）、`tests/settings.spec.ts`、`tests/manager-{runtime,instances}.spec.ts` 的就绪 agent 维度 |
-| 阶段 D 收口 · 宿主交付与检查证据 | 完成 | `02eac98` | `tests/delivery-tool.spec.ts` 9 例（计划、远端 head 移动拒绝、幂等 PR、未知结果恢复、overrun 阻断）、`tests/views.spec.ts`、`tests/model-surface.spec.ts` |
+| 阶段 D 收口 · 宿主交付与检查证据 | 完成 | `02eac98` | `tests/delivery-tool.spec.ts` 10 例（计划、远端 head 移动拒绝、真实 git 推送、幂等 PR、未知结果恢复、overrun 阻断）、`tests/views.spec.ts`、`tests/model-surface.spec.ts` |
 | 阶段 B/D 缺口 · 超范围审批与清理前核对 | 完成 | `02eac98` | `tests/http.spec.ts` 6 例（批准/子集/未知路径/无 overrun/整仓）、`tests/runtime-concurrency.spec.ts`（stopAll 未确认保留 `stopping`）、`tests/worktree.spec.ts` 8 例（远端移动拒绝、已删允许） |
-| 阶段 E · 兼容与验收 | 进行中 | — | 全量检查已绿（67 文件 / 1294 例、构建 857.16 kB）；验收矩阵自动化证据见 §7；真实双仓双群联调待凭据（§8） |
+| 阶段 E · 兼容与验收 | 进行中 | — | 全量检查已绿（67 文件 / 1295 例、构建 857.16 kB）；验收矩阵自动化证据见 §7；真实双仓双群联调待凭据（§8） |
 
 更新本表时同时写明对应提交 SHA 与测试汇总行，避免只有结论没有证据。
 
@@ -102,6 +102,6 @@
 已知限制（本轮有意保留，均不影响验收矩阵的自动化部分）：
 
 - 真实双仓双群联调尚未执行：本仓库没有可用的 GitHub 测试仓库凭据与两个已授权飞书测试群，因此验收矩阵里「真实 PR、真实回执」一列仍为空；`.artifacts/acceptance/` 未落盘。
-- 交付链路的推送与建 PR 只用注入的 `Commands` 替身验证过；`git ls-remote` 的真实调用只在 worktree 清理路径上覆盖（本地 bare 远程）。真实 GitHub 上的 `gh pr create`、分支保护与 PR 复用行为需在联调时复核。
+- 推送已用真实 git 对本地 bare 远程验证（含远端 head 移动时拒绝）；但 `gh pr create`、真实 GitHub 上的分支保护与 PR 复用仍只是替身证据，需在联调时复核。
 - `claude` 的文件读取边界仍是进程约定（私有 `HOME` + 凭据剥离 + `plan`/`acceptEdits` 权限模式 + 可约束性探测），没有 OS 级沙箱包裹；`codex` 走自身 `--sandbox workspace-write`。因此「外部 Agent 无法读取其他工单目录」目前以环境隔离与探测为主，严格的读隔离留待后续用沙箱工具包一层。
 - 未知范围的工单按整仓计入写入名额（`ticket.scope` 为空即整仓）；尚未提供「先只读调查再声明范围」的独立前置阶段，Worker 需在首次写入前自行声明 `scope`。

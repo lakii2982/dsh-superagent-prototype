@@ -1,4 +1,5 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
@@ -6,7 +7,7 @@ import { Store } from '../src/app/store.ts'
 import { deliveryTools, type DeliveryToolsHost } from '../src/app/tools/delivery.ts'
 import { SettingsSchema } from '../src/policy.ts'
 import { KV, type DeliveryPlan } from '../src/kv.ts'
-import type { Commands } from '../src/infra/commands.ts'
+import { Commands } from '../src/infra/commands.ts'
 import type { SourceContext } from '../src/sources/host.ts'
 import type { Deployment } from '../src/deployment.ts'
 import type { Ticket } from '../src/core/index.ts'
@@ -189,4 +190,32 @@ it('returns the same applied result when the push already landed, instead of tre
   expect(result).toMatchObject({ ok: true, action: 'push', already: true, branch_sha: local })
   expect(calls.git.some(args => args[0] === 'push')).toBe(false)
   expect(savedPlan()!.result).toMatchObject({ outcome: 'applied', branchSha: local })
+})
+
+it('pushes a real commit to a real remote once the checked head matches', async () => {
+  // The other cases stub Commands; this one runs git itself against a bare remote in the temporary directory, so the
+  // ls-remote, fetch, push and recorded result are proved against real git rather than an injected answer.
+  const remote = join(directory, 'remote.git'), work = join(directory, 'work')
+  const environment = { GIT_CONFIG_GLOBAL: join(directory, 'gitconfig'), GIT_CONFIG_SYSTEM: '/dev/null', GIT_TERMINAL_PROMPT: '0' }
+  const git = (...args: string[]) => execFileSync('git', ['-c', 'user.name=agent', '-c', 'user.email=agent@users.noreply.github.com', ...args],
+    { cwd: work, env: { ...process.env, ...environment }, stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim()
+  execFileSync('git', ['init', '--bare', remote], { stdio: 'ignore' })
+  execFileSync('git', ['clone', remote, work], { stdio: 'ignore' })
+  writeFileSync(join(work, 'README.md'), '# base\n')
+  git('add', 'README.md'); git('commit', '-m', 'base'); git('branch', '-M', 'main'); git('push', 'origin', 'main')
+  git('checkout', '-b', 'agent/t1'); writeFileSync(join(work, 'fix.ts'), 'export const fix = 1\n')
+  git('add', 'fix.ts'); git('commit', '-m', 'fix'); git('push', 'origin', 'agent/t1')
+  const checked = git('rev-parse', 'HEAD')
+  writeFileSync(join(work, 'later.ts'), 'export const later = 2\n')
+  git('add', 'later.ts'); git('commit', '-m', 'later')
+  const head = git('rev-parse', 'HEAD')
+  const commands = new Commands(deployment, environment, new AbortController().signal)
+  const host = { store, commands, github: { deployment: deployment(), commands } as unknown as SourceContext }
+  const ticket = ticketOf({ execution: { name: 't1', directory: work, assignment: 'a1', repository: 'acme/widgets',
+    worktree: { path: work, branch: 'agent/t1', baseRef: 'main', baseSha: checked, repositoryId: 'acme/widgets' } } })
+  store.tickets.save(ticket)
+  const result = await call(host, { action: 'push', expected: checked }, ticket)
+  expect(result).toMatchObject({ ok: true, action: 'push', branch: 'agent/t1', branch_sha: head, remote_head: head, forced: false })
+  expect(git('ls-remote', 'origin', 'refs/heads/agent/t1')).toContain(head)
+  expect(savedPlan()!.result).toMatchObject({ outcome: 'applied', branchSha: head })
 })
