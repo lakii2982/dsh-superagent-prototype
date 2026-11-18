@@ -232,14 +232,16 @@ From an allowed GitHub account, open an Issue or post a comment containing `@<ag
 
 ## Upgrade
 
-1. Wait until no Executor is in the middle of a turn.
-2. Back up `<stateDir>/orchestrator.sqlite`.
+1. Wait until no Executor is in the middle of a turn, then stop the service so no consumer shares the bot event stream.
+2. Back up `<stateDir>/orchestrator.sqlite`, `<stateDir>/manager.sqlite` (repository bindings, routes and the undelivered inbox), the repository state under the execution directory (`repositories/` mirrors and the `worktrees/` registration), and the DSH session directories.
 3. Run `git pull && pnpm install && pnpm build`.
 4. Run `scripts/dsh-superagent restart` and inspect its status.
 
+Rolling back keeps what already happened: received events, undelivered receipts and opened pull requests stay; mirrors and worktree branches remain on disk, so a Ticket resumes from its recorded `execution.worktree` instead of cloning again; undelivered receipts replay from the outbox; a pull request is reconciled through `orchestrator_delivery`'s `recover` rather than created again. A database migrated by a newer version stays unreadable to an older one, so restoring the pre-upgrade backup is part of the rollback.
+
 A restart ends running Assignments and starts replacements with recovery notes. Team text and overridden prompt parts are retained; parts without overrides follow the new defaults. Review parts marked **Default updated** after upgrading.
 
-A database migrated by a newer version cannot be opened by an older one. Rollback therefore requires the pre-upgrade backup. After upgrading DeepSeek Harness itself, restart the running instance so the panel loads matching artifacts.
+After upgrading DeepSeek Harness itself, restart the running instance so the panel loads matching artifacts.
 
 ### Agent presets
 
@@ -249,7 +251,13 @@ The worker and router presets move shell commands to the background after 5 seco
 
 Repositories can opt into `worktree` mode, which gives each Ticket its own checkout under `<executionDirectory>/worktrees/<repository>/<ticket>` on a `dsh-superagent/<ticket>` branch, cut from a refreshed mirror. The person's own checkout is never stashed, reset or cleaned, and Tickets that still use `current` or `isolated` keep their directory. Worktree mode needs a configured GitHub repository (`owner/name`); Tickets of one repository that declare overlapping write scopes queue before writing, and a Ticket that has not declared a scope stays read-only until it does.
 
-Workers may also hand a Ticket to a local `claude` or `codex` CLI (`orchestrator_agent`). Both must be installed on the `PATH` of the `dsh-superagent` process and signed in as the user beforehand: the child process receives no DSH credentials (the base environment strips credential-shaped variables and `DSH_*`, and only explicit proxy variables are added). If the CLIs do not read the system proxy — for example QuickQ on macOS, where `scutil --proxy` reports `127.0.0.1:10902` — export `HTTPS_PROXY`, `HTTP_PROXY` and `ALL_PROXY` in the shell that starts the service, otherwise `codex exec` reports `Reconnecting...` until it times out.
+Workers may also hand a Ticket to a local `claude` or `codex` CLI (`orchestrator_agent`). Both must be installed on the `PATH` of the `dsh-superagent` process and signed in as the user beforehand, and the instance reports which of them can be constrained (`/health` `agent`), which the panel shows as the agent dimension of the repository's readiness. A repository can name its default agent (`executor.agent`) so a worker delegates without choosing one, while a single run may still name the other.
+
+Each run gets its own private `HOME` (mode 0700) and a whitelist environment: only `PATH`, that `HOME`, `TMPDIR`, locale variables, and the proxy variables described below reach the CLI. Credential-shaped variables, `DSH_*`, and the delivery and bot tokens are dropped, and the CLIs are started with their own sandbox flags (`codex --sandbox read-only|workspace-write`, `claude` permission modes `plan`/`acceptEdits`) inside the Ticket directory. The probe refuses an agent when the host cannot establish a boundary at all, so an unconstrained CLI shows as unavailable instead of silently running with the operator's access. If the CLIs do not read the system proxy — for example QuickQ on macOS, where `scutil --proxy` reports `127.0.0.1:10902` — export `HTTPS_PROXY`, `HTTP_PROXY` and `ALL_PROXY` in the shell that starts the service, otherwise `codex exec` reports `Reconnecting...` until it times out.
+
+Stopping a Ticket stops its agent runs before the write slot is released. When a run does not confirm its exit, the slot stays held and the task page shows the stop as in progress with the runs still alive; a restart retries the stop before the next Ticket of that repository may write.
+
+Delivery goes through the host: `orchestrator_delivery` records the plan before writing, checks the remote head before pushing (refusing when another writer moved it), opens or reuses exactly one pull request, and recovers an unknown result by querying the repository instead of repeating the action. A write run that changes paths outside the Ticket's declared scope records an overrun; push and pull-request steps are blocked, and the panel shows the paths with an approval action that adds them to the Ticket scope. Removing a managed worktree verifies the remote branch first and keeps the site when the remote moved or the checkout is dirty.
 
 Upgrading with Tickets in worktree mode keeps their worktrees: interrupted preparations are re-verified instead of cloned again, and running Assignments end with a recovery note as usual. Rollback leaves the branches and PRs those Tickets created in place, keeps undelivered receipts queued, and restores the queue from the pre-upgrade backup.
 

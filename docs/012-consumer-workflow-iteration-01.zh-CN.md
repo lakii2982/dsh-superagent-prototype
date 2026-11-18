@@ -13,10 +13,10 @@
 
 | 阶段 | 本轮目标 | 不在本轮 |
 | --- | --- | --- |
-| A · 固定路由与就绪 | 逐话题投递顺序、撤销每仓库队首阻塞、群停用隔离、就绪维度拆分、离线恢复投原仓 | 面板交互重做 |
-| B · 托管 worktree | `worktree` 工作模式、准备/续接/清理、执行元数据、范围占用与同仓库排队 | 超范围申请审批流、跨工作区 diff 对账 |
-| C · 本地 Agent | `orchestrator_agent` 委派工具、运行记录、续接与停止、失败分类与修复提示、真实差异回传 | 面板上切换执行者、按用量自动降级 |
-| D · GitHub 交付与面板 | 回执四类事实拆分、统一列表的仓库/Agent/PR、运行详情（worktree、基准提交、改动概要、检查证据位、Agent 会话） | 面板内切换执行者、跨仓 PR 批量对账、推送前远端 head 的额外核对（沿用 `delivery.md` 的 `--force-with-lease` 与「被拒即停」） |
+| A · 固定路由与就绪 | 逐话题投递顺序、撤销每仓库队首阻塞、群停用隔离、就绪维度拆分（含执行 Agent 可用）、离线恢复投原仓 | 面板交互重做 |
+| B · 托管 worktree | `worktree` 工作模式、准备/续接/清理、执行元数据、范围占用与同仓库排队、超范围扩大审批、清理前远端核对 | 跨工作区 diff 的批量自动对账 |
+| C · 本地 Agent | `orchestrator_agent` 委派工具、运行记录、续接与停止、失败分类与修复提示、真实差异回传、仓库默认执行 Agent、停止未确认保留写入名额、凭据剥离与每运行私有 HOME、Agent 可约束性探测 | 面板内切换执行者（单任务显式选择已支持）、按用量自动降级 |
+| D · GitHub 交付与面板 | 回执事实拆分、统一列表的仓库/Agent/PR、运行详情（worktree、基准提交、改动概要、检查证据、Agent 会话）、宿主执行的交付（计划、推送前远端 head 核对、幂等 PR、未知结果查询恢复） | 跨仓 PR 批量对账、真实 GitHub 推送与 PR 的端到端验证（见 §8） |
 | E · 兼容与验收 | `pnpm check` 全绿、验收矩阵的自动化证据、升级与回退说明 | 真实双仓双群联调（需两组 GitHub 测试仓库与两个已授权飞书测试群，见 §8） |
 
 ## 3. 提交拆分
@@ -29,6 +29,8 @@
 6. `feat(panel): show code, pull request and channel receipt as separate delivery facts` — 阶段 D 的回执事实。
 7. `feat(panel): show the repository, agent, pull request and run details` — 阶段 D 的列表与运行详情。
 8. `docs: record the delivery panel, the acceptance evidence and the upgrade notes` — 本文与部署文档。
+9. `02eac98` `feat(executor): close the delegation, delivery and scope gaps of the workflow spec` — 缺口收口：停止收束保留名额、默认执行 Agent、权限边界与可约束性探测、就绪 agent 维度、超范围检测、宿主交付工具（计划/推送/PR/恢复）、检查证据、超范围审批、清理前远端核对。
+10. `docs: record the gap-closing iteration and its evidence` — 本文 §2、§5–§8 与部署文档的升级说明。
 
 每步以 `pnpm typecheck` + 相关测试文件通过为准；整机 `pnpm check` 在阶段 E 收口。
 
@@ -41,9 +43,10 @@
 
 ## 5. 验证方式
 
-- 自动化：`pnpm check`（类型检查 + 全量测试 + 构建）。本迭代收尾时 66 个测试文件 / 1269 例全部通过，其中新增或重写的用例覆盖逐话题顺序、群停用隔离、就绪维度、worktree 并行与排队、准备续接与现场保留、委派生命周期、回执四类事实与运行详情。
+- 自动化：`pnpm check`（类型检查 + 全量测试 + 构建）。本迭代收尾时 **67 个测试文件 / 1294 例全部通过**（构建 ESM 857.16 kB），其中新增或重写的用例覆盖逐话题顺序、群停用隔离、就绪维度、worktree 并行与排队、准备续接与现场保留、委派生命周期与权限边界、宿主交付的各步对账、超范围审批、清理前远端核对、回执事实与运行详情。
 - 定向回归：`pnpm vitest run tests/manager-*.spec.ts tests/worktree.spec.ts tests/runtime-concurrency.spec.ts tests/repository.spec.ts tests/migration.spec.ts tests/settings.spec.ts`。
 - 回归：`pnpm test`（宿主继承环境下同样全绿；`pnpm check` 在 DSH 进程内也可直接运行）。
+- 交付链路的测试层次：`git ls-remote` 与 worktree 清理跑在真实临时 git 仓库与本地 bare 远程上（`tests/worktree.spec.ts`）；`orchestrator_delivery` 的 `ls-remote`/push/`gh pr list|create` 走注入的 `Commands` 替身（`tests/delivery-tool.spec.ts`），**没有真实 GitHub 远端**，所以「推送与建 PR 在真实仓库上成立」仍需 §8 的联调。
 - 真实 CLI 实测（阶段 C，手工一次性执行，不在自动化里跑网络）：临时 git 仓库内用委派器起 `claude`（写权限）与 `codex`（只读）。`claude` 返回 `session_id` 与 `DONE`，`changes.status` 为 `?? agent-proof.txt`，注记投递给当前 Assignment；`codex` 经系统代理（`scutil --proxy` → `127.0.0.1:10902`）返回 `pong` 并记录 `thread_id`。两者均 `done`，说明命令拼装、输出解析、改动采集与代理透传在真实二进制上成立。
 - 真实验收（阶段 E）：两个独立测试仓库、两个测试群，保存工单、PR、重叠运行时间与恢复证据。
 
@@ -56,9 +59,12 @@
 | 阶段 A · 固定路由与就绪 | 完成 | `be834b3` | 4 个 manager 测试文件 32 例；全量 `pnpm check` 通过 |
 | 阶段 B · 托管 worktree | 完成 | `bf7432a` | `tests/worktree.spec.ts` 6 例 + 4 个相关文件扩展；全量 `pnpm check` 通过 |
 | 架构表补录 | 完成 | `f1095b3` | `tests/docs.spec.ts` 校验每个模块与测试都在表中 |
-| 阶段 C · 本地 Agent | 完成 | `0c97e9b` | `tests/agents.spec.ts` 15 例（假 CLI 子进程）；真实 `claude`/`codex` 各一次端到端实测；全量 `pnpm check` 通过 |
-| 阶段 D · GitHub 交付与面板 | 完成（面板部分） | `9bcf8a6`、`dca1055` | `tests/views.spec.ts` 8 例与 `tests/panel-execution.spec.tsx` 3 例新增；回执四类事实、列表仓库/Agent/PR、运行详情；全量 `pnpm check` 通过 |
-| 阶段 E · 兼容与验收 | 进行中 | — | 全量检查已绿（66 文件 / 1269 例）；验收矩阵自动化证据见 §7；真实双仓双群联调待凭据（§8） |
+| 阶段 C · 本地 Agent | 完成 | `0c97e9b` | `tests/agents.spec.ts`（假 CLI 子进程）；真实 `claude`/`codex` 各一次端到端实测；全量 `pnpm check` 通过 |
+| 阶段 D · GitHub 交付与面板 | 完成（面板部分） | `9bcf8a6`、`dca1055` | `tests/views.spec.ts` 与 `tests/panel-execution.spec.tsx` 新增；回执事实、列表仓库/Agent/PR、运行详情；全量 `pnpm check` 通过 |
+| 阶段 C 收口 · 默认 Agent、停止收束、权限边界 | 完成 | `02eac98` | `tests/agents.spec.ts` 25 例（顽抗进程不释放名额、默认 Agent、环境白名单与私有 HOME、超范围检测）、`tests/settings.spec.ts`、`tests/manager-{runtime,instances}.spec.ts` 的就绪 agent 维度 |
+| 阶段 D 收口 · 宿主交付与检查证据 | 完成 | `02eac98` | `tests/delivery-tool.spec.ts` 9 例（计划、远端 head 移动拒绝、幂等 PR、未知结果恢复、overrun 阻断）、`tests/views.spec.ts`、`tests/model-surface.spec.ts` |
+| 阶段 B/D 缺口 · 超范围审批与清理前核对 | 完成 | `02eac98` | `tests/http.spec.ts` 6 例（批准/子集/未知路径/无 overrun/整仓）、`tests/runtime-concurrency.spec.ts`（stopAll 未确认保留 `stopping`）、`tests/worktree.spec.ts` 8 例（远端移动拒绝、已删允许） |
+| 阶段 E · 兼容与验收 | 进行中 | — | 全量检查已绿（67 文件 / 1294 例、构建 857.16 kB）；验收矩阵自动化证据见 §7；真实双仓双群联调待凭据（§8） |
 
 更新本表时同时写明对应提交 SHA 与测试汇总行，避免只有结论没有证据。
 
@@ -71,11 +77,11 @@
 | 两群两仓同时发单 | `tests/manager-runtime.spec.ts`「keeps two groups on two repositories on their own routes without cross delivery」；`tests/manager-store.spec.ts`「routes each group to its repository and persists an unacknowledged delivery across restart」 | 两仓并发时间重叠、各自 PR、回执只回原话题 |
 | 重复、停用、离线与换绑 | `tests/manager-store.spec.ts`（重复只存一次、换绑后旧话题续原仓、停用群说明等待原因）；`tests/manager-runtime.spec.ts`（一组停用另一组继续、实例离线后投原仓、重启后重新发现实例） | 真实事件重复投递与断线重连 |
 | 同仓库两个独立改动 | `tests/worktree.spec.ts`「prepares independent worktrees for two tickets of one repository, side by side」「never touches the person's …」 | 两个分支与 PR 在真实 GitHub 上独立审查 |
-| 范围重叠与扩大 | `tests/worktree.spec.ts`「queues overlapping write scopes of one repository while different files run in their own worktrees」；`tests/agents.spec.ts`「refuses a write run while another ticket writes the repository and allows it once the slot is free」 | 实际超范围差异与远端冲突转人工（依赖 `prompts/team/delivery.md` 的指令，未自动化） |
-| Codex 与 Claude Code | `tests/agents.spec.ts` 15 例（命令拼装、输出解析、幂等、续接、停止、失败分类）；§5 的真实 CLI 各一次实测 | 两种 Agent 各自推送并发 PR；一种实现、另一种只读审阅同一工单 |
-| 能力、权限和上下文 | `tests/agents.spec.ts`（登录失败与修复提示、代理优先级、停止后进程已退出）；`tests/environment.spec.ts`（子进程环境剔除凭据与 `DSH_*`） | 未安装/未登录在真实二进制上的提示文案；读权限未做隔离，见 §8 已知限制 |
-| 停止、崩溃、恢复 | `tests/agents.spec.ts`（停止后标记 stopped 且进程已退出、重启把运行标 interrupted 并保留会话、先收束再释放写入名额）；`tests/worktree.spec.ts`（准备中断后复用现场）；`tests/manager-store.spec.ts`（确认丢失仍只存一次、重启后队列仍在） | GitHub 成功后回执丢失、飞书发送失败的端到端演练 |
-| 旧部署和首次使用 | `tests/migration.spec.ts`（schema 10 的写入与旧形状读取）；`tests/manager-instances.spec.ts`（保留旧工单）；`tests/panel-*.spec.tsx`（首次配置与检查结果） | 新用户按页面完成仓库、Agent、GitHub 与群绑定并独立试单 |
+| 范围重叠与扩大 | `tests/worktree.spec.ts`「queues overlapping write scopes of one repository while different files run in their own worktrees」；`tests/agents.spec.ts`「refuses a write run while another ticket writes the repository and allows it once the slot is free」；超范围：`tests/agents.spec.ts` 记录的 overrun 与 `tests/delivery-tool.spec.ts`「blocks push and open while an overrun waits for approval」；批准：`tests/http.spec.ts` 的 scope-approval 用例 | 真实仓库上他人并发推送与人工裁决的完整演练 |
+| Codex 与 Claude Code | `tests/agents.spec.ts` 25 例（命令拼装与沙箱标志、输出解析、幂等、续接、停止、失败分类、默认 Agent、环境白名单）；§5 的真实 CLI 各一次实测 | 两种 Agent 各自推送并发 PR；一种实现、另一种只读审阅同一工单 |
+| 能力、权限和上下文 | `tests/agents.spec.ts`（可约束性探测决定是否可用、登录失败与修复提示、代理优先级、每运行私有 HOME 与凭据剥离）；`tests/environment.spec.ts`（子进程环境剔除凭据与 `DSH_*`） | 未安装/未登录在真实二进制上的提示文案；`claude` 的文件读取边界仍是进程约定而非 OS 沙箱，见 §8 已知限制 |
+| 停止、崩溃、恢复 | `tests/agents.spec.ts`（顽抗进程让停止保持未确认、运行仍为 running；确认后才 stopped）；`tests/runtime-concurrency.spec.ts`（未确认时名额仍被占用并写 `stopping`，重启重试确认后才释放）；`tests/worktree.spec.ts`（准备中断后复用现场、远端分叉拒绝清理）；`tests/manager-store.spec.ts`（确认丢失仍只存一次、重启后队列仍在） | GitHub 成功后回执丢失、飞书发送失败的端到端演练 |
+| 旧部署和首次使用 | `tests/migration.spec.ts`（schema 10 的写入与旧形状读取）；`tests/manager-instances.spec.ts`（保留旧工单）；`tests/panel-*.spec.tsx`（首次配置与检查结果，含默认 Agent 与就绪 agent 维度）；`tests/settings.spec.ts`（默认 Agent 保存） | 新用户按页面完成仓库、Agent、GitHub 与群绑定并独立试单 |
 
 ## 8. 真实双仓双群联调、升级与限制
 
@@ -91,10 +97,11 @@
 
 证据按「工单号 / PR 链接 / 时间戳 / 截图」存到 `.artifacts/acceptance/`，并在本表补一行记录。
 
-升级先备份管理库（`outbox`、`tickets`、`triggers`）、仓库状态与 DSH 会话，停止共享同一机器人事件流的旧消费者后再切换。回退时保留已确认接收的事件、未送达回执与已创建的 PR；旧数据仍按原工单语义读取（`tests/migration.spec.ts` 覆盖 schema 10 的写入与旧形状读取）。
+升级先备份管理库与仓库实例状态（`outbox`、`tickets`、`triggers`、`manager.sqlite` 的路由与收件队列）、`<executionDirectory>` 下的镜像与 worktree 登记、以及 DSH 会话目录；停止共享同一机器人事件流的旧消费者后再切换。回退时保留已确认接收的事件、未送达回执与已创建的 PR：镜像与 worktree 分支留在磁盘上，恢复后按工单的 `execution.worktree` 现场续接；未送达回执由 `outbox` 重放，已建 PR 通过 `orchestrator_delivery` 的 `recover` 重新对账而不是重建；旧数据仍按原工单语义读取（`tests/migration.spec.ts` 覆盖 schema 10 的写入与旧形状读取）。
 
 已知限制（本轮有意保留，均不影响验收矩阵的自动化部分）：
 
-- `stopAll` 在 10 秒内未确认退出时也把运行标为 stopped 并释放写入名额，比方案「收束未确认时保留名额」放宽；风险是极慢退出的进程可能与下一工单短暂并存。
-- 未提供 `settings.executor.agent` 默认执行者设置项：切换执行者仍需在工单内显式选择，避免破坏既有设置的精确断言与表单。
-- 外部 Agent 的工作目录是工单 worktree，写入受 `codex -s workspace-write` 与 `claude` 权限模式约束，但**读**没有额外隔离；`Assignment.report` 只有 `state/summary/at`，因此运行详情不显示「检查证据」字段。
+- 真实双仓双群联调尚未执行：本仓库没有可用的 GitHub 测试仓库凭据与两个已授权飞书测试群，因此验收矩阵里「真实 PR、真实回执」一列仍为空；`.artifacts/acceptance/` 未落盘。
+- 交付链路的推送与建 PR 只用注入的 `Commands` 替身验证过；`git ls-remote` 的真实调用只在 worktree 清理路径上覆盖（本地 bare 远程）。真实 GitHub 上的 `gh pr create`、分支保护与 PR 复用行为需在联调时复核。
+- `claude` 的文件读取边界仍是进程约定（私有 `HOME` + 凭据剥离 + `plan`/`acceptEdits` 权限模式 + 可约束性探测），没有 OS 级沙箱包裹；`codex` 走自身 `--sandbox workspace-write`。因此「外部 Agent 无法读取其他工单目录」目前以环境隔离与探测为主，严格的读隔离留待后续用沙箱工具包一层。
+- 未知范围的工单按整仓计入写入名额（`ticket.scope` 为空即整仓）；尚未提供「先只读调查再声明范围」的独立前置阶段，Worker 需在首次写入前自行声明 `scope`。
