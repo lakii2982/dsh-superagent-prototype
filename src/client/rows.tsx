@@ -5,7 +5,7 @@ import { Icon, Tag } from './controls.tsx'
 import { decisionMark, threadMark, ticketMark } from './marks.ts'
 import { usePanel } from './provider.tsx'
 import { actorName, localized, readableMarkers, reasonLabel, valueLabel } from './text.ts'
-import { ActionLink, ConfirmButton, LabelValue, SessionButton, StageMark, When } from './widgets.tsx'
+import { ActionLink, ConfirmButton, ExternalLink, LabelValue, SessionButton, StageMark, When } from './widgets.tsx'
 
 export function TicketLine({ ticket, question, onChanged, context }: {
   ticket: TicketRow; question?: boolean; onChanged?: () => Promise<void>; context?: boolean
@@ -15,6 +15,8 @@ export function TicketLine({ ticket, question, onChanged, context }: {
   const after = async (request: Promise<unknown>) => { await request; await onChanged?.() }
   const note = question && ticket.note && { ...ticket.note, text: readableMarkers(t, ticket.note.text) }
   const answer = ticket.reply && ticket.stage === 'person' && ticket.action === 'answer' ? ticket.reply : undefined
+  const pullLabel = ticket.pull && (ticket.pull.state === 'merged' ? t('ticketPullMerged')
+    : ticket.pull.state === 'closed' ? t('ticketPullClosed') : t('ticketPullOpen'))
   return <li className="dt-row dt-link dt-ticket" data-state={question ? status.dot : undefined}>
     <div className="dt-ticket-stage"><StageMark state={status.dot} icon={status.icon} label={status.label} /></div>
     <div className="dt-ticket-body">
@@ -23,6 +25,10 @@ export function TicketLine({ ticket, question, onChanged, context }: {
       <div className="dt-row-meta dt-ticket-meta">
         {ticket.threads.map(thread => <ThreadChip key={thread.key} thread={thread} />)}
         {context && <ContextTag />}
+        {ticket.repository && <span className="dt-hint dt-mono" title={t('ticketRepositoryLabel')}>{ticket.repository.id}</span>}
+        {ticket.agent && <LabelValue label={t('ticketAgentLabel')} value={ticket.agent} />}
+        {ticket.pull && <LabelValue label={t('ticketPullLabel')} value={ticket.pull.url
+          ? <ExternalLink href={ticket.pull.url}>{pullLabel}</ExternalLink> : pullLabel} />}
         {ticket.undelivered > 0 && <LabelValue label={t('ticketUndeliveredLabel')} value={ticket.undelivered} />}
         {note ? <span className={note.error ? 'dt-ticket-note dt-ticket-note-error' : 'dt-ticket-note'} title={note.text}>{note.text}</span>
           : <When at={ticket.updatedAt} />}

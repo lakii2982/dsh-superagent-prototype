@@ -1,12 +1,12 @@
 /** Ticket list, ticket detail, mandate basis formatting, and executor load views. */
 import { liveTicket, threadKey, ticketStage, type AcceptMode, type AdmissionCell, type MandateBasis, type Ticket,
   type TicketStage } from '../../core/index.ts'
+import { agentRepairHint, agentRunsOf } from '../../executor/agents.ts'
 import { workerSessionId } from '../../executor/dsh.ts'
-import { githubPage } from '../../sources/github-trigger.ts'
 import type { Store } from '../store.ts'
-import { channelLink, decisionView, newestFirst, page, snapshot, threadSummary, ticketLine, type Snapshot,
+import { channelLink, decisionView, newestFirst, page, pullFacts, snapshot, threadSummary, ticketLine, type Snapshot,
   type ViewHost } from './records.ts'
-import { attribute, markdown, preview } from './text.ts'
+import { markdown, preview } from './text.ts'
 
 export type BasisFact =
   | { name: 'addressed'; value: 'mention' | 'direct' } | { name: 'followup' } | { name: 'admission'; value: AdmissionCell } | { name: 'observation' }
@@ -63,15 +63,6 @@ export interface DeliveryView {
   channel: 'none' | 'waiting' | 'sent' | 'dropped'
   waiting: number
 }
-/** The Ticket's GitHub pull request: an open one wins (the newest number), else the most recently closed. */
-function followedPull(ticket: Ticket): { thread: string; number: number; closed?: { at: string; outcome: 'merged' | 'closed' } } | undefined {
-  const pulls = (ticket.follows ?? []).flatMap(follow => {
-    const match = /^github:(\d+)$/.exec(follow.thread)
-    return match ? [{ thread: follow.thread, number: Number(match[1]), ...follow.closed ? { closed: follow.closed } : {} }] : []
-  })
-  const open = pulls.filter(pull => !pull.closed).sort((a, b) => b.number - a.number)[0]
-  return open ?? pulls.filter(pull => pull.closed).sort((a, b) => b.closed!.at.localeCompare(a.closed!.at))[0]
-}
 export function ticketDetail(host: ViewHost, id: string) {
   const { store } = host
   const ticket = store.tickets.get(id)
@@ -90,9 +81,7 @@ export function ticketDetail(host: ViewHost, id: string) {
   }
   // Pass `human = false` for bot-originated mandates so the Source kind still labels the actor as a bot if removed from the policy list.
   const human = ticket.mandate.basis.via !== 'bot'
-  const pull = followedPull(ticket)
-  const pullUrl = pull && (attribute(store.threads.get(pull.thread)?.meta.url)
-    ?? (ticket.execution?.repository ? githubPage(ticket.execution.repository, pull.number, true) : undefined))
+  const pull = pullFacts(view, ticket)
   const receipts = store.receipts.ticket(id).filter(receipt => receipt.channel.source !== 'github')
   const pending = receipts.filter(receipt => receipt.status === 'pending').length
   const channel: DeliveryView['channel'] = pending ? 'waiting'
@@ -100,13 +89,26 @@ export function ticketDetail(host: ViewHost, id: string) {
       : receipts.some(receipt => receipt.status === 'dropped') ? 'dropped' : 'none'
   const delivery: DeliveryView = {
     code: pull || ticket.assignments.some(assignment => assignment.report?.state === 'ready') ? 'ready' : 'none',
-    pull: pull ? pull.closed?.outcome ?? 'open' : 'none',
+    pull: pull ? pull.state : 'none',
     ...pull ? { pullNumber: pull.number } : {},
-    ...pullUrl ? { pullUrl } : {},
+    ...pull?.url ? { pullUrl: pull.url } : {},
     channel,
     waiting: pending,
   }
-  return { ...ticketLine(view, ticket), delivery, mandate: { ...ticket.mandate, actor: view.actor(ticket.mandate.actor, human) },
+  const worktree = ticket.execution?.worktree
+  // The stored run record's `endedAt`/`changes` are projected under the names the run detail shows; `hint` is derived
+  // from the failure kind because the record keeps only the kind, not the repair sentence.
+  const runs = agentRunsOf(store, id).map(run => ({ id: run.id, agent: run.agent, permission: run.permission, status: run.status,
+    ...run.externalId ? { externalId: run.externalId } : {}, startedAt: run.startedAt,
+    ...run.endedAt ? { settledAt: run.endedAt } : {},
+    ...run.errorKind ? { errorKind: run.errorKind, hint: agentRepairHint(run.errorKind) } : {},
+    ...run.result ? { result: run.result.text } : {},
+    ...run.changes ? { changes: run.changes } : {} }))
+  return { ...ticketLine(view, ticket), delivery,
+    ...worktree ? { worktree: { path: worktree.path, ...worktree.branch ? { branch: worktree.branch } : {},
+      ...worktree.baseRef ? { baseRef: worktree.baseRef } : {}, ...worktree.baseSha ? { baseSha: worktree.baseSha } : {} } } : {},
+    runs,
+    mandate: { ...ticket.mandate, actor: view.actor(ticket.mandate.actor, human) },
     basis: basisFacts(ticket.mandate.basis, view.rule), paused: store.settings().paused,
     channels: ticket.channels.map(channel => channelLink(view, channel)),
     decision: decision ? decisionView(view, decision) : undefined,

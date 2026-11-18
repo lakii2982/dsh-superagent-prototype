@@ -7,7 +7,7 @@ import { SettingsSchema } from '../src/policy.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
 import { feishuKind } from '../src/sources/feishu.ts'
 import { githubKind } from '../src/sources/github.ts'
-import { snapshot, threadSummary, ticketSummary, triggerView } from '../src/app/views/records.ts'
+import { snapshot, threadSummary, ticketLine, ticketSummary, triggerView } from '../src/app/views/records.ts'
 import { basisFacts, ticketDetail } from '../src/app/views/tickets.ts'
 import { threadDetail } from '../src/app/views/threads.ts'
 import { droppedReplies, sourcesStatus } from '../src/app/views/sources.ts'
@@ -20,6 +20,7 @@ import { feishuChannel, feishuTriggerId } from '../src/sources/feishu-trigger.ts
 import { githubLink } from '../src/sources/github-channel.ts'
 import { githubChannel } from '../src/sources/github-trigger.ts'
 import { followupOwners, type ChannelRef } from '../src/core/index.ts'
+import type { AgentRun } from '../src/executor/agents.ts'
 
 let directory: string
 let store: Store
@@ -63,6 +64,9 @@ const live = (id: string) => store.tickets.save({ id, title: id, decisionId: 'd'
   updatedAt: at,
   mandate: { strength: 'explicit', policyVersion: 'v', basis: { via: 'listed' }, actor: { source: 'feishu', id: 'ou_alice' }, scope: '' },
   origin: { triggerId: 'e0', triggerIds: ['e0'] }, assignments: [], inputs: [] })
+/** A stored AgentRun record, as the executor writes one. */
+const runRecord = (id: string, agent: AgentRun['agent'], startedAt: string, extra: Partial<AgentRun> = {}): AgentRun => ({
+  id, ticketId: 't1', assignmentId: 'a1', agent, permission: 'write', prompt: 'work', status: 'done', directory: '/w/t1', startedAt, ...extra })
 const message = (id: string, actor: { source: string; id: string }, human = true) => ({ id, source: actor.source,
   threads: [{ source: 'feishu', id: 'oc_1:om_root' }], actor, human, at, text: `message ${id}`, meta: {} })
 
@@ -359,4 +363,69 @@ it('shows code ready from a worker report even without a pull request', () => {
   store.tickets.save({ ...ticket, assignments: [{ id: 'a1', state: 'running', createdAt: at,
     report: { state: 'ready', summary: 'Done', at } }] })
   expect(ticketDetail(host, 't1')!.delivery).toEqual({ code: 'ready', pull: 'none', channel: 'none', waiting: 0 })
+})
+
+it('adds the repository, the followed pull request and the newest run\'s agent to a ticket row', () => {
+  const host = views()
+  live('t1')
+  store.threads.save({ key: 'github:42', ref: { source: 'github', id: '42' }, createdAt: '', subscriptions: [], correlated: [], pending: [],
+    meta: { url: 'https://github.com/acme/widgets/pull/42' } })
+  const ticket = store.tickets.get('t1')!
+  store.tickets.save({ ...ticket, execution: { name: 't1', directory: '/w/t1', assignment: 'a1', repository: 'acme/widgets' },
+    follows: [{ thread: 'github:42', own: true }] })
+  store.set(KV.executor.agentRun('t1', 'r1'), runRecord('r1', 'claude', '2026-09-22T00:00:00Z'))
+  store.set(KV.executor.agentRuns('t1'), ['r1'])
+  const row = ticketLine(snapshot(host), store.tickets.get('t1')!)
+  expect(row.repository).toEqual({ id: 'acme/widgets' })
+  expect(row.pull).toEqual({ number: 42, state: 'open', url: 'https://github.com/acme/widgets/pull/42' })
+  expect(row.agent).toBe('claude')
+})
+
+it('takes the row\'s agent from the newest run, and leaves the fields out when there is no repository, pull request or run', () => {
+  const host = views()
+  live('t1')
+  const ticket = store.tickets.get('t1')!
+  store.tickets.save({ ...ticket, execution: { name: 't1', directory: '/w/t1', assignment: 'a1' } })
+  store.set(KV.executor.agentRun('t1', 'r1'), runRecord('r1', 'claude', '2026-09-22T00:00:00Z'))
+  store.set(KV.executor.agentRun('t1', 'r2'), runRecord('r2', 'codex', '2026-09-22T00:05:00Z'))
+  store.set(KV.executor.agentRuns('t1'), ['r1', 'r2'])
+  const withRuns = ticketLine(snapshot(host), store.tickets.get('t1')!)
+  expect(withRuns.agent).toBe('codex')
+  expect(withRuns).not.toHaveProperty('repository')
+  expect(withRuns).not.toHaveProperty('pull')
+  store.set(KV.executor.agentRuns('t1'), [])
+  const bare = ticketLine(snapshot(host), store.tickets.get('t1')!)
+  expect(bare).not.toHaveProperty('agent')
+})
+
+it('shows the worktree and the run records, oldest first, on the ticket page', () => {
+  const host = views()
+  live('t1')
+  const ticket = store.tickets.get('t1')!
+  store.tickets.save({ ...ticket, execution: { name: 't1', directory: '/w/t1', assignment: 'a1', repository: 'acme/widgets',
+    workspaceMode: 'worktree', worktree: { path: '/w/worktrees/t1', branch: 'dsh/t1', baseRef: 'origin/main',
+      baseSha: 'abc1234def5678', repositoryId: 'acme/widgets' } } })
+  store.set(KV.executor.agentRun('t1', 'r1'), runRecord('r1', 'claude', '2026-09-22T00:00:00Z', { status: 'failed',
+    endedAt: '2026-09-22T00:01:00Z', error: 'not logged in', errorKind: 'login', result: { text: 'half done' },
+    changes: { status: ' M src/a.ts', stat: ' 1 file changed, 1 insertion(+)' } }))
+  store.set(KV.executor.agentRun('t1', 'r2'), runRecord('r2', 'codex', '2026-09-22T00:02:00Z'))
+  // The index may name a record that a later cleanup removed; the read model skips it.
+  store.set(KV.executor.agentRuns('t1'), ['r1', 'gone', 'r2'])
+  const page = ticketDetail(host, 't1')!
+  expect(page.worktree).toEqual({ path: '/w/worktrees/t1', branch: 'dsh/t1', baseRef: 'origin/main', baseSha: 'abc1234def5678' })
+  expect(page.runs.map(run => run.id)).toEqual(['r1', 'r2'])
+  expect(page.runs[0]).toMatchObject({ agent: 'claude', permission: 'write', status: 'failed', startedAt: '2026-09-22T00:00:00Z',
+    settledAt: '2026-09-22T00:01:00Z', errorKind: 'login', result: 'half done',
+    changes: { status: ' M src/a.ts', stat: ' 1 file changed, 1 insertion(+)' } })
+  expect(page.runs[0]!.hint).toMatch(/signed in/)
+  expect(page.runs[1]).toEqual({ id: 'r2', agent: 'codex', permission: 'write', status: 'done',
+    startedAt: '2026-09-22T00:02:00Z' })
+})
+
+it('omits the worktree and keeps an empty run list for a ticket that never delegated', () => {
+  const host = views()
+  live('t1')
+  const page = ticketDetail(host, 't1')!
+  expect(page).not.toHaveProperty('worktree')
+  expect(page.runs).toEqual([])
 })

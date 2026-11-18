@@ -233,3 +233,23 @@ it('shows the Ticket\'s delivery facts as separate labels, linking an open pull 
     `${zh.ticketPullLabel} ${zh.ticketPullOpen}`, `${zh.ticketReceiptLabel} ${zh.ticketReceiptWaiting.replace('{count}', '1')}`])
   expect(all('.dt-status-line a').map(link => link.getAttribute('href'))).toEqual(['https://github.com/acme/widgets/pull/42'])
 })
+
+it('shows a Ticket\'s repository, Agent and pull request in the Execution task list', async () => {
+  await mount()
+  await click(zh['tab.execution'])
+  const row = all('.dt-ticket').find(item => item.textContent?.includes('修复回归'))!
+  expect(row.querySelector('.dt-ticket-meta')?.textContent).toContain('acme/widgets')
+  expect(row.querySelector('.dt-ticket-meta')?.textContent).toContain(zh.ticketAgentLabel)
+  expect(row.textContent).toContain(zh.ticketPullOpen)
+  expect(Array.from(row.querySelectorAll('a')).map(link => link.getAttribute('href')))
+    .toContain('https://github.com/acme/widgets/pull/42')
+})
+
+it('shows the worktree path, branch and base commit in the Ticket page\'s Run details', async () => {
+  await mount()
+  await click(all('.dt-open').find(button => button.textContent === '修复回归')!)
+  await click(zh.runDetails)
+  expect(text()).toContain('/srv/work/t1')
+  expect(text()).toContain('dsh/t1')
+  expect(text()).toContain('abc1234')
+})

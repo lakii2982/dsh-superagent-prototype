@@ -1,5 +1,5 @@
 /** Ticket detail page: stage and actions, Mandate details, undelivered/delivered Inputs, subscribed Threads, and Assignments. */
-import { useState, type ReactNode } from 'react'
+import { Fragment, useState, type ReactNode } from 'react'
 import { ApiError, usePoll, type TicketPageView } from './api.ts'
 import { DisclosureRow, Dot, Icon, Tag, type IconName } from './controls.tsx'
 import { decisionMark, reportDot, ticketMark } from './marks.ts'
@@ -121,6 +121,44 @@ function DeliveryFacts({ delivery }: { delivery: TicketPageView['delivery'] }) {
   </>
 }
 
+/** The worktree the Ticket's runs worked in, the run records themselves, and the Agent session they share. */
+function RunDetails({ ticket }: { ticket: TicketPageView }) {
+  const { t } = usePanel()
+  const { worktree } = ticket
+  const span = (from: string, to?: string) => t('assignmentSpan', { from: when(from, t('lang')), to: to ? when(to, t('lang')) : t('now') })
+  return <>
+    {worktree && <KeyValues rows={[
+      [t('runWorktree'), <span className="dt-mono">{worktree.path}</span>],
+      ...worktree.branch ? [[t('runBranch'), <span className="dt-mono">{worktree.branch}</span>] as [string, ReactNode]] : [],
+      ...worktree.baseSha ? [[t('runBaseCommit'), <span className="dt-mono">{worktree.baseSha.slice(0, 7)}
+        {worktree.baseRef ? ` · ${worktree.baseRef}` : ''}</span>] as [string, ReactNode]] : [],
+    ]} />}
+    {ticket.runs.length > 0 && <table className="dt-table">
+      <thead><tr>
+        <th>{t('runAgent')}</th><th>{t('runPermission')}</th><th>{t('runStatus')}</th><th>{t('runSpan')}</th>
+      </tr></thead>
+      <tbody>{ticket.runs.map(run => <Fragment key={run.id}>
+        <tr>
+          <td>{run.agent}</td>
+          <td>{valueLabel(t, 'permission', run.permission)}</td>
+          <td>{valueLabel(t, 'runStatus', run.status)}</td>
+          <td>{span(run.startedAt, run.settledAt)}</td>
+        </tr>
+        {(run.errorKind || run.result || run.changes) && <tr><td colSpan={4}>
+          {run.errorKind && <p className="dt-hint">{t('runError')}: {valueLabel(t, 'agentFailure', run.errorKind)}{run.hint
+            ? ` — ${run.hint}` : ''}</p>}
+          {run.result && <p className="dt-hint">{t('runResult')}: {run.result}</p>}
+          {run.changes && <div className="dt-hint">
+            <div>{t('runChanges')}{run.changes.status ? `: ${run.changes.status}` : ''}</div>
+            {run.changes.stat && <pre className="dt-mono">{run.changes.stat}</pre>}
+          </div>}
+        </td></tr>}
+      </Fragment>)}</tbody>
+    </table>}
+    {ticket.sessionId && <KeyValues rows={[[t('runSession'), <SessionButton variant="outline" sessionId={ticket.sessionId} />]]} />}
+  </>
+}
+
 export function TicketPage({ id }: { id: string }) {
   const { t, call } = usePanel()
   const { data, error, reload } = usePoll(() => call('GET tickets/:id', { id }), [id])
@@ -198,6 +236,9 @@ export function TicketPage({ id }: { id: string }) {
       {data.inputs.length > undelivered.length && <Details icon="inbox" title={t('deliveredInputs',
         { count: data.inputs.length - undelivered.length })}>
         <InputList inputs={data.inputs.filter(input => input.delivered)} />
+      </Details>}
+      {(data.worktree || data.runs.length > 0) && <Details icon="queue" title={t('runDetails')}>
+        <RunDetails ticket={data} />
       </Details>}
       <Details icon="hash" title={t('identifiers')}>
         <KeyValues rows={[[t('ticketId'), <span className="dt-mono">{data.id}</span>], [t('executionDirectory'), <span

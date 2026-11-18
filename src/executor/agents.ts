@@ -277,6 +277,15 @@ export function agentNote(run: AgentRun): string {
   return lines.join('\n')
 }
 
+/**
+ * The read model of a Ticket's runs for the views: the run index in delegation order, oldest first, skipping records
+ * that no longer exist. It only reads the KV families `AgentRuns` writes, so no view has to know their layout.
+ */
+export function agentRunsOf(store: Store, ticketId: string): AgentRun[] {
+  const index = store.get(KV.executor.agentRuns(ticketId)) ?? []
+  return index.map(id => store.get(KV.executor.agentRun(ticketId, id))).filter((run): run is AgentRun => !!run)
+}
+
 /** The host dependencies of `AgentRuns`; DshExecutor supplies them, and tests supply fakes. */
 export interface AgentRunsHost {
   readonly subprocess: SubprocessRuntime
