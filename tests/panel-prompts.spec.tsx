@@ -4,7 +4,7 @@ import { act } from 'react'
 import { builtInBase, builtInParts, defaultPrompts } from '../src/app/prompts.ts'
 import { expect, it } from 'vitest'
 import { zh } from '../src/client/locales.ts'
-import { usePanel, mount, settle, all, tab, click, type, text, field, at } from './fixtures/panel.tsx'
+import { usePanel, mount, settle, all, click, type, text, field, at } from './fixtures/panel.tsx'
 import { server, promptVersion } from './fixtures/panel-server.ts'
 
 usePanel()
@@ -16,7 +16,7 @@ it('lists the team sections, then the built-in parts, edits and saves them separ
   expect(names.slice(3)).toEqual(Object.keys(builtInParts()).map(key => zh[`promptPart.${key}` as keyof typeof zh]))
   await type(field<HTMLTextAreaElement>(zh.promptBody), 'Custom communication rule')
   expect(text()).toContain('1 处修改')
-  await click(tab(zh.promptViewFull))
+  await type(field<HTMLSelectElement>(zh.promptViews), 'full')
   // The full prompt shows every part, team or built in, as editable, in the order the Session reads them.
   const parts = all('.dt-preview-part').map(part => [part.querySelector('b')?.textContent, part.hasAttribute('data-editable')])
   expect(parts.slice(0, 5)).toEqual([['共享约定', true], ['主 Session 角色', true], ['沟通方式', true], ['工单范围', true], ['交付要求', true]])
@@ -45,11 +45,11 @@ it('keeps a conflicting prompt draft, rebases it onto the newer version and save
 it('shows a built-in skill with the CLI notes in the full prompt, editable as a built-in part, and adds a team skill but no skill under a built-in name', async () => {
   at({ page: 'settings', query: { group: 'prompts' } })
   await mount()
-  await click(tab(zh.promptViewFull))
+  await type(field<HTMLSelectElement>(zh.promptViews), 'full')
   await act(async () => { const select = field<HTMLSelectElement>(zh.promptPreviewTarget); select.value = 'skill/github'; select.dispatchEvent(new Event('change', { bubbles: true })) }); await settle()
   expect(text()).toContain('## CLI usage')
   expect(all('.dt-preview-part[data-editable] b').map(name => name.textContent)).toEqual([zh['promptPart.skill/github']])
-  await click(tab(zh.promptViewEdit))
+  await type(field<HTMLSelectElement>(zh.promptViews), 'edit')
   for (const name of ['Bad Name', 'github']) {
     await type(field<HTMLInputElement>(zh.promptAddSkill), name)
     await click(zh.promptAddSkillAction)
@@ -64,7 +64,7 @@ it('loads all defaults into the draft from the history without saving them', asy
   server.prompts.current = promptVersion(0, { ...defaultPrompts(), scope: 'Old scope' })
   at({ page: 'settings', query: { group: 'prompts' } })
   await mount()
-  await click(tab(zh.promptViewHistory))
+  await type(field<HTMLSelectElement>(zh.promptViews), 'history')
   const first = `版本 0 · ${zh.promptHistoryInitial} · ${zh['historySource.defaults']}`
   expect(all('.dt-row-title').map(title => title.textContent)).toContain(first)
   await click(zh.promptDefaults)
@@ -78,7 +78,7 @@ it('keeps the Prompts save bar hidden while a preview loads for an unchanged dra
   let shown = false
   const watch = new MutationObserver(() => { if (document.querySelector('.dt-savebar')) shown = true })
   watch.observe(document.body, { childList: true, subtree: true })
-  await click(tab(zh.promptViewFull))
+  await type(field<HTMLSelectElement>(zh.promptViews), 'full')
   await settle()
   watch.disconnect()
   expect(shown).toBe(false)
@@ -91,7 +91,7 @@ it('marks team sections that differ from the defaults, and shows a draft as a di
   await mount()
   expect(all('.dt-prompt-nav .dt-nav-item').filter(item => item.querySelector('.dt-changed-tag')).map(item => item.querySelector('span')!.firstChild?.textContent)).toEqual(['交付要求'])
   await type(field<HTMLTextAreaElement>(zh.promptBody), `${defaultPrompts().communication}\nSign as the agent.`)
-  await click(tab(zh.promptViewFull))
+  await type(field<HTMLSelectElement>(zh.promptViews), 'full')
   // A draft opens against the saved version: only its change shows, and the parts it leaves as they were fold.
   expect(all('.dt-preview-part ins').map(line => line.textContent)).toEqual(['Sign as the agent.\n'])
   expect(all('.dt-preview-part del')).toHaveLength(0)
@@ -124,7 +124,7 @@ it('edits a built-in part as an override of its built-in text, marks it changed,
   // The override records the built-in text it was edited from.
   expect(server.prompts.current.config.overrides).toEqual({ 'runtime/shared': { text: 'Shared, the team way.', base: builtInBase(shared.text) } })
   // The full prompt reads the override in place of the built-in text, compared with the defaults.
-  await click(tab(zh.promptViewFull))
+  await type(field<HTMLSelectElement>(zh.promptViews), 'full')
   expect(all('.dt-preview-part ins').map(line => line.textContent)).toContain('Shared, the team way.\n')
   await click(all('.dt-preview-part[data-editable] button')[0]!)
   await click(zh.promptResetSection)
@@ -206,10 +206,10 @@ it('shows a draft\'s template of a generated part filled, and names a part by it
   await mount()
   await click(builtInItem(zh['promptPart.runtime/environment']))
   await type(field<HTMLTextAreaElement>(zh.promptBody), 'Where you work:\n{variables}')
-  await click(tab(zh.promptViewFull))
+  await type(field<HTMLSelectElement>(zh.promptViews), 'full')
   const environment = all('.dt-preview-part').find(part => part.querySelector('b')?.textContent === zh['promptPart.runtime/environment'])!
   expect(environment.querySelector('pre')?.textContent).toBe('Where you work:\n')
-  await click(tab(zh.promptViewEdit))
+  await type(field<HTMLSelectElement>(zh.promptViews), 'edit')
   await click(builtInItem(zh['promptPart.runtime/policy']))
   await type(field<HTMLTextAreaElement>(zh.promptBody), '## Policy\n{version} {mode}')
   await click(zh.save)
@@ -227,7 +227,7 @@ it('loads a version from the history without its overrides of parts this version
   const dispatch = { text: '## dispatch\nOurs.', base: builtInBase(builtInParts()['runtime/dispatch'].text) }
   at({ page: 'settings', query: { group: 'prompts' } })
   await mount()
-  await click(tab(zh.promptViewHistory))
+  await type(field<HTMLSelectElement>(zh.promptViews), 'history')
   // The version restored overrides a part a later version removed.
   const saved = server.prompts.current
   server.prompts.current = promptVersion(0, { ...defaultPrompts(), overrides: { 'runtime/dispatch': dispatch, 'runtime/retired': { text: 'Old.', base: 'b' } } })

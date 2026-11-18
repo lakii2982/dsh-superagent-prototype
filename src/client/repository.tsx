@@ -30,7 +30,6 @@ export function RepositoryPage() {
   ]
   return <div className="dt-repo-page">
     <div className="dt-page-head">
-      <h2>{t('nav.repository')}</h2>
       <p>{t('repository.subtitle')}</p>
     </div>
 

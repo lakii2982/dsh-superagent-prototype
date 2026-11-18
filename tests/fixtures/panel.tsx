@@ -51,6 +51,14 @@ export function find(name: string, selector = CONTROLS): HTMLElement {
   return match
 }
 export const tab = (name: string) => find(name, '[role="tab"]')
+/** A page in the panel's single left rail, by its label rather than its count badge. */
+export const rail = (name: string) => {
+  const match = all('.dt-rail-item').find(item => item.querySelector('.dt-rail-label')?.textContent === name)
+  if (!match) throw new Error(`No rail item named ${name}`)
+  return match
+}
+/** The work area the rail marks as current, by its label. */
+export const activeRail = () => document.querySelector('.dt-rail-item[aria-current="page"] .dt-rail-label')?.textContent
 export async function click(target: string | HTMLElement) {
   const element = typeof target === 'string' ? find(target) : target
   await act(async () => { element.click() })

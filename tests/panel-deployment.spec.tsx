@@ -5,7 +5,7 @@ import { createRoot } from 'react-dom/client'
 import { PluginConfig } from '../src/client/deployment.tsx'
 import { expect, it, onTestFinished, vi } from 'vitest'
 import { zh } from '../src/client/locales.ts'
-import { usePanel, mount, remount, settle, all, find, tab, click, type, text, field, at, translator } from './fixtures/panel.tsx'
+import { usePanel, mount, remount, settle, all, find, rail, click, type, text, field, at, translator } from './fixtures/panel.tsx'
 import { server, problemOf, fakeForm } from './fixtures/panel-server.ts'
 
 usePanel()
@@ -13,12 +13,12 @@ it('saves this machine\'s settings in the Deployment settings through DSH\'s con
   const { form: editable, mutations } = fakeForm()
   server.form = editable
   await mount()
-  await click(tab(zh['tab.settings']))
-  await click(find(zh['settingsGroup.deployment'], '.dt-settings-link'))
-  expect(text()).toContain('/srv/dsh-superagent')
+  await click(rail(zh['tab.settings']))
+  const deployment = () => document.querySelector('[data-group="deployment"]')!
+  expect(deployment().textContent).toContain('/srv/dsh-superagent')
   // Accounts are on the Source settings; the Plugin Manager page, where those are not at hand, shows them here.
-  expect(text()).not.toContain('@agent-bot')
-  for (const moved of ['仓库克隆', '工单 worktree 目录', '禁用的命令']) expect(text()).not.toContain(moved)
+  expect(deployment().textContent).not.toContain('@agent-bot')
+  for (const moved of ['仓库克隆', '工单 worktree 目录', '禁用的命令']) expect(deployment().textContent).not.toContain(moved)
   expect(text()).toContain(zh.deploymentIntro)
   // A limit applies at once, so a draft of one says only that it is unsaved, even while Assignments run.
   await type(field<HTMLInputElement>(zh.deploymentContextTimeout), '20000')
