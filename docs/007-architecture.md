@@ -541,7 +541,7 @@ Existing main Sessions on `standard` also need explicit timeouts for foreground 
 
 ### Executor tools
 
-Each Executor has six application tools:
+Each Executor has eight application tools:
 
 | Tool | Purpose |
 | --- | --- |
@@ -551,10 +551,12 @@ Each Executor has six application tools:
 | `orchestrator_thread_unrelated` | Drop an unrelated attached Thread, hand back its owned follow-ups and tell the main Session why |
 | `orchestrator_thread_follow` | Subscribe to a related Thread for context and tell the main Session |
 | `orchestrator_trigger_handback` | Hand back a message once, with a reason carried by its candidate |
+| `orchestrator_agent` | Run, continue, stop or inspect a governed local `codex`/`claude` delegation; a run's result is delivered only to the Assignment that started it |
+| `orchestrator_delivery` | Record the delivery plan, check the remote head, push, open or reuse one pull request, and recover an unknown result by querying the repository |
 
 A hand-back returns `queued: false` if another Ticket still owns the message, or this Ticket never owned it. For example, a bot message went to Eval independently.
 
-The worker preset is defined in `cordis.patch.yml` and selected through `WORKER_PRESET`. `WORK_TOOLS` in `src/app/sessions.ts` retains available file, search, shell, job, web, skill, todo and subagent tools. Workers do not receive tools for asking or presenting to a person, changing the profile, scheduling work outside worker slots, starting or messaging other Sessions, or editing external documents. Tool calls are refused after the Ticket ends.
+The worker preset is defined in `cordis.patch.yml` and selected through `WORKER_PRESET`. `WORK_TOOLS` in `src/app/sessions.ts` retains available file, search, shell, job, web, skill, todo and subagent tools, and the profile's local subagent plugin tools (`subagent_claude_code`, `subagent_codex`, `subagent_kimi`, `subagent_opencode`) plus `fleet`/`fleet_status` when those bundles are mounted. Workers do not receive tools for asking or presenting to a person, changing the profile, scheduling work outside worker slots, starting or messaging other Sessions, or editing external documents. Tool calls are refused after the Ticket ends.
 
 ### Result shapes and assessment context
 

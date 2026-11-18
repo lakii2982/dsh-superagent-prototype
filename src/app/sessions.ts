@@ -54,13 +54,20 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 /**
- * The DSH tools an Executor Session works with: files, search, the shell and its jobs, the web, skills, its todo list and
- * subagents. It gets no other tool the profile has, whenever it was registered: none that asks or shows a person something,
- * changes the profile, schedules work or starts goals outside the worker slots, the pause and a person's hold, starts or
- * messages other Sessions, or edits documents.
+ * The DSH tools an Executor Session works with: files, search, the shell and its jobs, the web, skills, its todo list,
+ * subagents, and the local agent plugins the profile mounts. It gets no other tool the profile has, whenever it was
+ * registered: none that asks or shows a person something, changes the profile, schedules work or starts goals outside the
+ * worker slots, the pause and a person's hold, starts or messages other Sessions, or edits documents.
+ *
+ * The `subagent_*` names are the one-shot local agent tools registered by the profile's subagent plugin bundles
+ * (`claude-code`, `codex`, `kimi`, `opencode`), and `fleet`/`fleet_status` is the graph orchestrator commander mode uses.
+ * They are listed here rather than in a preset row because they are global tools: a profile that mounts the bundle exposes
+ * them, and one that does not registers nothing, which `workOnly`'s availability filter then leaves out. Adding them here
+ * gives a worker the same backends as commander mode without making the dsh-superagent bundle depend on those local plugins.
  */
 const WORK_TOOLS = ['read', 'write', 'edit', 'read_image', 'glob', 'grep', 'bash', 'pwsh', 'job_output', 'job_list', 'job_kill', 'web_search',
-  'web_fetch', 'skill', 'todo_write', 'subagent', 'list_subagent_models', 'send_message', 'list_agents', 'interrupt_agent']
+  'web_fetch', 'skill', 'todo_write', 'subagent', 'list_subagent_models', 'send_message', 'list_agents', 'interrupt_agent',
+  'subagent_claude_code', 'subagent_codex', 'subagent_kimi', 'subagent_opencode', 'fleet', 'fleet_status']
 /** What the main Session is told when it would wait: what it waits for comes to it, and a waiting step holds back the next. */
 const NO_WAIT = 'Reports, follow_up notices, new candidates and a background job\'s end with its output arrive by themselves as messages; '
   + 'end the turn instead of waiting for them.'

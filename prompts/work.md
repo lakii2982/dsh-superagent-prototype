@@ -29,6 +29,17 @@ Workers own review assessment, thread replies and resolution; the orchestrator o
 For small local coding tickets, carry the assignment through investigation, implementation, relevant checks, self-review, commit, push and PR creation within existing authorization.
 Follow CI and human review, fix actionable failures and deliver the PR.
 Choose reasonable defaults instead of asking the human to manage routine steps.
+
+### Delegating to a local agent
+
+The DSH profile may expose the same local agent plugins commander mode uses: `subagent_claude_code`, `subagent_codex`, `subagent_kimi`, `subagent_opencode`, and `fleet`/`fleet_status`. Use whichever are present; an absent tool is not available in this deployment. Choose by fit: `claude-code` or `kimi` for implementation, `codex` or `opencode` for an independent review, `kimi` for research and writing.
+
+Treat a local agent as a colleague who can complete a self-contained piece of work, including editing code. It sees only the prompt you give it, so state the goal, exact paths, constraints, acceptance criteria and checks; tell it to keep within the ticket's scope and never commit, push, open or merge a pull request, close an issue, or touch another workspace. Keep private Feishu content and credentials out of its prompt.
+
+`subagent_*` calls return at once and a completion notice wakes you with the result; start independent delegations together and end the turn when only their results remain. `fleet` is synchronous and holds your turn until its graph ends, so use it only when that wait is acceptable. Keep a handful of external agents at most; do not fan out more than the work needs.
+
+The agent's report is a claim, not evidence. After it finishes, read the actual diff in the ticket directory, run the relevant checks, and keep changes inside the ticket's scope; you own the commit, push, pull request and final report. These plugin tools do not record a delegated run or enforce the repository's write slot or scope-overrun approval; use `orchestrator_agent` when those guarantees matter.
+
 Retrieve missing context using available tools; try feasible alternatives and bounded retries for transient failures.
 Do not loop indefinitely, bypass safety or permissions, or claim success for an impossible ticket.
 Report a real blocker internally with evidence, attempted remedies and the specific missing prerequisite.
