@@ -105,6 +105,22 @@ function MandateDetails({ ticket, actor }: { ticket: TicketPageView; actor: stri
   </Section>
 }
 
+/** Code prepared, the pull request's state, and the message back to the original Channel, as separate facts. */
+function DeliveryFacts({ delivery }: { delivery: TicketPageView['delivery'] }) {
+  const { t } = usePanel()
+  const pull = delivery.pull === 'open' ? t('ticketPullOpen') : delivery.pull === 'merged' ? t('ticketPullMerged')
+    : delivery.pull === 'closed' ? t('ticketPullClosed') : undefined
+  const receipt = delivery.channel === 'waiting' ? t('ticketReceiptWaiting', { count: delivery.waiting })
+    : delivery.channel === 'sent' ? t('ticketReceiptSent')
+      : delivery.channel === 'dropped' ? t('ticketReceiptDropped') : undefined
+  return <>
+    {delivery.code === 'ready' && <LabelValue label={t('ticketCodeLabel')} value={t('ticketCodeReady')} />}
+    {pull && <LabelValue label={t('ticketPullLabel')} value={delivery.pull === 'open' && delivery.pullUrl
+      ? <ExternalLink href={delivery.pullUrl}>{pull}</ExternalLink> : pull} />}
+    {receipt && <LabelValue label={t('ticketReceiptLabel')} value={receipt} />}
+  </>
+}
+
 export function TicketPage({ id }: { id: string }) {
   const { t, call } = usePanel()
   const { data, error, reload } = usePoll(() => call('GET tickets/:id', { id }), [id])
@@ -136,6 +152,7 @@ export function TicketPage({ id }: { id: string }) {
     {error && <LoadState error={error} loading={false} />}
     <div className="dt-row-meta dt-status-line">
       <StageMark state={status.dot} icon={status.icon} label={status.label} />
+      <DeliveryFacts delivery={data.delivery} />
       <LabelValue label={t('ticketMandateLabel')} value={valueLabel(t, 'strength', data.mandate.strength)} />
       <LabelValue label={t('ticketActorLabel')} value={`${valueLabel(t, 'source', data.mandate.actor.source)} · ${actor}`} />
       <LabelValue label={t('ticketUpdatedLabel')} value={when(data.updatedAt, t('lang'))} />

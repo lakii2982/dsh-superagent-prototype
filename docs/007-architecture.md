@@ -347,7 +347,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/api.ts` | `Api`, every route with its parameters, query, body and response, and the filters of the lists; it imports only types, so the panel bundles it |
 | `src/app/views/text.ts` | The two forms of a view's text: `preview`, plain text on one line, and `markdown` without HTML; `plain` and `readable` |
 | `src/app/views/records.ts` | The rows the views share: Triggers, Tickets, Threads, Decisions and Channel links, and `ownersOf`, the owners of follow-ups as one request reads them |
-| `src/app/views/tickets.ts` | The Ticket lists by stage, a Ticket's page, the Mandate basis facts and the Executor's load |
+| `src/app/views/tickets.ts` | The Ticket lists by stage, a Ticket's page with its delivery facts (code, pull request, original-Channel receipt), the Mandate basis facts and the Executor's load |
 | `src/app/views/threads.ts` | The Thread lists, a Thread's timeline, the search and the Decision list |
 | `src/app/views/sources.ts` | The Source status: each Source instance's state, its last day's counts, and what it filtered and dropped in that day |
 | `src/app/views/settings.ts` | The settings page's view: each block with its revision, each Source's settings with its kind's form, and the execution environment |

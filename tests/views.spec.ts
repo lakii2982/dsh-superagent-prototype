@@ -319,3 +319,44 @@ it('reads each ticket a page\'s follow-ups reached once, and nothing for a messa
   expect(followupOwners(store.triggers.get('f3')!, records)).toEqual([])
   expect([records.tickets.get, records.threads.get].map(read => read.mock.calls.length)).toEqual([0, 0])
 })
+
+it('shows an open pull request and a waiting original-Channel receipt as separate delivery facts', () => {
+  const host = views()
+  live('t1')
+  const ticket = store.tickets.get('t1')!
+  store.tickets.save({ ...ticket, execution: { name: 't1', directory: '/w/t1', assignment: 'a1', repository: 'acme/widgets' },
+    follows: [{ thread: 'github:41', own: true }, { thread: 'github:42', own: true }] })
+  // A GitHub receipt is not a message back to the original Channel, so it does not make the Channel wait.
+  store.receipts.add({ id: 'r-github', channel: githubChannel(42), text: 'pushed', kind: 'reply', ticketId: 't1' })
+  store.receipts.add({ id: 'r-feishu', channel: feishuChannel('oc_1', 'om_root'), text: 'done', kind: 'reply', ticketId: 't1' })
+  expect(ticketDetail(host, 't1')!.delivery).toEqual({ code: 'ready', pull: 'open', pullNumber: 42,
+    pullUrl: 'https://github.com/acme/widgets/pull/42', channel: 'waiting', waiting: 1 })
+})
+
+it('shows a merged pull request and a delivered original-Channel receipt as separate delivery facts', () => {
+  const host = views()
+  live('t1')
+  const ticket = store.tickets.get('t1')!
+  store.tickets.save({ ...ticket, follows: [{ thread: 'github:41', own: true,
+    closed: { at: '2026-09-22T00:01:00Z', outcome: 'closed' } }, { thread: 'github:42', own: true,
+    closed: { at: '2026-09-22T00:02:00Z', outcome: 'merged' } }] })
+  const receipt = { id: 'r1', channel: feishuChannel('oc_1', 'om_root'), text: 'done', kind: 'reply' as const, ticketId: 't1' }
+  store.receipts.add(receipt)
+  store.receipts.settle(receipt, 'sent')
+  expect(ticketDetail(host, 't1')!.delivery).toEqual({ code: 'ready', pull: 'merged', pullNumber: 42, channel: 'sent', waiting: 0 })
+})
+
+it('shows no delivery facts for a ticket with no pull request, no ready report and no receipt', () => {
+  const host = views()
+  live('t1')
+  expect(ticketDetail(host, 't1')!.delivery).toEqual({ code: 'none', pull: 'none', channel: 'none', waiting: 0 })
+})
+
+it('shows code ready from a worker report even without a pull request', () => {
+  const host = views()
+  live('t1')
+  const ticket = store.tickets.get('t1')!
+  store.tickets.save({ ...ticket, assignments: [{ id: 'a1', state: 'running', createdAt: at,
+    report: { state: 'ready', summary: 'Done', at } }] })
+  expect(ticketDetail(host, 't1')!.delivery).toEqual({ code: 'ready', pull: 'none', channel: 'none', waiting: 0 })
+})

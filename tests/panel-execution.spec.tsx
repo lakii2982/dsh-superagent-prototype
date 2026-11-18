@@ -222,3 +222,14 @@ it('sends one stop for a double click on Confirm', async () => {
   await act(async () => { confirm.click(); confirm.click() })
   expect(server.requests.filter(request => request.path === 'tickets/t1/stop')).toHaveLength(1)
 })
+
+it('shows the Ticket\'s delivery facts as separate labels, linking an open pull request', async () => {
+  const t1 = server.ticketDetails.t1!
+  server.ticketDetails.t1 = { ...t1, delivery: { code: 'ready', pull: 'open', pullNumber: 42,
+    pullUrl: 'https://github.com/acme/widgets/pull/42', channel: 'waiting', waiting: 1 } }
+  await mount()
+  await click(all('.dt-open').find(button => button.textContent === '修复回归')!)
+  expect(all('.dt-status-line .dt-lv').slice(0, 3).map(item => item.textContent)).toEqual([`${zh.ticketCodeLabel} ${zh.ticketCodeReady}`,
+    `${zh.ticketPullLabel} ${zh.ticketPullOpen}`, `${zh.ticketReceiptLabel} ${zh.ticketReceiptWaiting.replace('{count}', '1')}`])
+  expect(all('.dt-status-line a').map(link => link.getAttribute('href'))).toEqual(['https://github.com/acme/widgets/pull/42'])
+})

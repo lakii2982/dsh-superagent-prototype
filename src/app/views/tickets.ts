@@ -2,10 +2,11 @@
 import { liveTicket, threadKey, ticketStage, type AcceptMode, type AdmissionCell, type MandateBasis, type Ticket,
   type TicketStage } from '../../core/index.ts'
 import { workerSessionId } from '../../executor/dsh.ts'
+import { githubPage } from '../../sources/github-trigger.ts'
 import type { Store } from '../store.ts'
 import { channelLink, decisionView, newestFirst, page, snapshot, threadSummary, ticketLine, type Snapshot,
   type ViewHost } from './records.ts'
-import { markdown, preview } from './text.ts'
+import { attribute, markdown, preview } from './text.ts'
 
 export type BasisFact =
   | { name: 'addressed'; value: 'mention' | 'direct' } | { name: 'followup' } | { name: 'admission'; value: AdmissionCell } | { name: 'observation' }
@@ -53,6 +54,24 @@ export function executorLoad(store: Store, running: number): ExecutorLoad {
   const queued = (ticket: Ticket) => { const stage = ticketStage(ticket); return stage.stage === 'working' && stage.action === 'queued' }
   return { running, queued: store.tickets.open().filter(queued).length }
 }
+/** The separate delivery facts of a Ticket: code prepared, its pull request, and the message back to the original Channel. */
+export interface DeliveryView {
+  code: 'none' | 'ready'
+  pull: 'none' | 'open' | 'merged' | 'closed'
+  pullNumber?: number
+  pullUrl?: string
+  channel: 'none' | 'waiting' | 'sent' | 'dropped'
+  waiting: number
+}
+/** The Ticket's GitHub pull request: an open one wins (the newest number), else the most recently closed. */
+function followedPull(ticket: Ticket): { thread: string; number: number; closed?: { at: string; outcome: 'merged' | 'closed' } } | undefined {
+  const pulls = (ticket.follows ?? []).flatMap(follow => {
+    const match = /^github:(\d+)$/.exec(follow.thread)
+    return match ? [{ thread: follow.thread, number: Number(match[1]), ...follow.closed ? { closed: follow.closed } : {} }] : []
+  })
+  const open = pulls.filter(pull => !pull.closed).sort((a, b) => b.number - a.number)[0]
+  return open ?? pulls.filter(pull => pull.closed).sort((a, b) => b.closed!.at.localeCompare(a.closed!.at))[0]
+}
 export function ticketDetail(host: ViewHost, id: string) {
   const { store } = host
   const ticket = store.tickets.get(id)
@@ -71,7 +90,23 @@ export function ticketDetail(host: ViewHost, id: string) {
   }
   // Pass `human = false` for bot-originated mandates so the Source kind still labels the actor as a bot if removed from the policy list.
   const human = ticket.mandate.basis.via !== 'bot'
-  return { ...ticketLine(view, ticket), mandate: { ...ticket.mandate, actor: view.actor(ticket.mandate.actor, human) },
+  const pull = followedPull(ticket)
+  const pullUrl = pull && (attribute(store.threads.get(pull.thread)?.meta.url)
+    ?? (ticket.execution?.repository ? githubPage(ticket.execution.repository, pull.number, true) : undefined))
+  const receipts = store.receipts.ticket(id).filter(receipt => receipt.channel.source !== 'github')
+  const pending = receipts.filter(receipt => receipt.status === 'pending').length
+  const channel: DeliveryView['channel'] = pending ? 'waiting'
+    : receipts.some(receipt => receipt.status === 'sent') ? 'sent'
+      : receipts.some(receipt => receipt.status === 'dropped') ? 'dropped' : 'none'
+  const delivery: DeliveryView = {
+    code: pull || ticket.assignments.some(assignment => assignment.report?.state === 'ready') ? 'ready' : 'none',
+    pull: pull ? pull.closed?.outcome ?? 'open' : 'none',
+    ...pull ? { pullNumber: pull.number } : {},
+    ...pullUrl ? { pullUrl } : {},
+    channel,
+    waiting: pending,
+  }
+  return { ...ticketLine(view, ticket), delivery, mandate: { ...ticket.mandate, actor: view.actor(ticket.mandate.actor, human) },
     basis: basisFacts(ticket.mandate.basis, view.rule), paused: store.settings().paused,
     channels: ticket.channels.map(channel => channelLink(view, channel)),
     decision: decision ? decisionView(view, decision) : undefined,
