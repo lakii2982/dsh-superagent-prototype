@@ -30,7 +30,7 @@ const Args = z.object({
   action: Action,
   branch: z.string().trim().min(1).optional().describe('Branch to deliver, ending in the ticket\'s short name; defaults to the worktree branch.'),
   base: z.string().trim().min(1).optional().describe('Base branch of the pull request; defaults to the worktree base or the repository default.'),
-  expected: z.string().trim().min(1).optional().describe('Remote head sha you expect; a different one means another writer got there first, so the push is refused.'),
+  expected: z.string().trim().min(1).optional().describe('Remote head sha you expect, or for a branch that does not exist yet, the base commit it must descend from; a different head means another writer got there first, so the push is refused.'),
   title: z.string().trim().min(1).optional().describe('Pull request title; defaults to the ticket title.'),
   body: z.string().optional().describe('Pull request body.'),
   pr: z.number().int().positive().optional().describe('An existing pull request number.'),
@@ -158,13 +158,16 @@ async function push(host: DeliveryToolsHost, ticketId: string, ticket: Ticket, a
   previous: DeliveryPlan | undefined, signal: AbortSignal): Promise<Answer> {
   const expected = args.expected ?? previous?.expected ?? ''
   if (!expected) {
-    return FAILED('push', 'expected_required', 'Record the remote head you expect first: call action=plan with expected, or pass expected. The host will not push without a head to check.',
+    return FAILED('push', 'expected_required', 'Record the remote head you expect first: call action=plan with expected (the remote head, or the base commit when the branch does not exist yet), or pass expected. The host will not push without a head to check.',
       { branch, plan: previous ?? null })
   }
   if (!shaLike(expected)) return FAILED('push', 'invalid_expected', 'expected must be a full commit sha, as `git ls-remote` prints it.', { branch, expected })
-  // §5.2: record the plan before the first write, even when the worker skipped action=plan.
-  const planned: DeliveryPlan = previous ?? { action: 'push', branch, base: '', expected, at: new Date().toISOString() }
-  if (!previous) savePlan(host, ticketId, planned)
+  // §5.2: record the plan before the first write, even when the worker skipped action=plan. A retry names a new expected
+  // head (a moved remote head, or the base commit of a branch that does not exist yet), which the plan must carry too.
+  const planned: DeliveryPlan = previous
+    ? { ...previous, action: 'push', branch, expected }
+    : { action: 'push', branch, base: '', expected, at: new Date().toISOString() }
+  savePlan(host, ticketId, planned)
   let remote: string | undefined
   try { remote = await remoteHead(host, cwd, branch, signal) }
   catch (error) { return FAILED('push', 'remote_unavailable', `Could not read the remote head, so nothing was pushed: ${failure(error).detail}`,
@@ -177,6 +180,27 @@ async function push(host: DeliveryToolsHost, ticketId: string, ticket: Ticket, a
     const next: DeliveryPlan = { ...planned, result: { at, outcome: 'applied', branchSha: local, detail: 'The remote head already equals the local branch; nothing was pushed.' } }
     savePlan(host, ticketId, next)
     return { ok: true, action: 'push', branch, branch_sha: local, remote_head: local, expected, forced: false, already: true, plan: next }
+  }
+  // A first push: the remote branch does not exist yet, so `expected` is the base commit the ticket branch was cut from.
+  // Require it to be an ancestor of the local branch, so creating the branch is a plain fast-forward rather than a
+  // replacement of unknown history, and never force a branch that is not there.
+  if (!remote) {
+    if (!(await contains(host, cwd, expected, branch, signal))) {
+      return FAILED('push', 'base_mismatch',
+        `The remote branch ${branch} does not exist, and ${expected} is not an ancestor of the local branch; refusing to create it from an unexpected base.`,
+        { branch, expected, remote_head: null })
+    }
+    try {
+      await host.commands.withSignal(signal).git(['push', 'origin', branch], cwd)
+    } catch (error) {
+      return FAILED('push', 'push_rejected', `The remote refused the new branch; nothing changed: ${failure(error).detail}`,
+        { branch, expected, remote_head: null, ...failure(error) })
+    }
+    const at = new Date().toISOString()
+    const next: DeliveryPlan = { ...planned, result: { at, outcome: 'applied', branchSha: local,
+      detail: 'Created the remote branch from its recorded base commit.' } }
+    savePlan(host, ticketId, next)
+    return { ok: true, action: 'push', branch, branch_sha: local, remote_head: local, expected, forced: false, created: true, plan: next }
   }
   if (remote !== expected) {
     const recent = await recentCommits(host, cwd, branch, signal)
