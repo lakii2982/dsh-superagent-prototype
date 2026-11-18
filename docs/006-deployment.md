@@ -245,6 +245,14 @@ A database migrated by a newer version cannot be opened by an older one. Rollbac
 
 The worker and router presets move shell commands to the background after 5 seconds. A Session cannot load without its preset. Keep the `dsh-superagent-worker` and `dsh-superagent-router` rows in `cordis.patch.yml` while their Sessions are in use; otherwise resume fails with `agent-preset/not-found`.
 
+### Managed worktrees and local agents
+
+Repositories can opt into `worktree` mode, which gives each Ticket its own checkout under `<executionDirectory>/worktrees/<repository>/<ticket>` on a `dsh-superagent/<ticket>` branch, cut from a refreshed mirror. The person's own checkout is never stashed, reset or cleaned, and Tickets that still use `current` or `isolated` keep their directory. Worktree mode needs a configured GitHub repository (`owner/name`); Tickets of one repository that declare overlapping write scopes queue before writing, and a Ticket that has not declared a scope stays read-only until it does.
+
+Workers may also hand a Ticket to a local `claude` or `codex` CLI (`orchestrator_agent`). Both must be installed on the `PATH` of the `dsh-superagent` process and signed in as the user beforehand: the child process receives no DSH credentials (the base environment strips credential-shaped variables and `DSH_*`, and only explicit proxy variables are added). If the CLIs do not read the system proxy — for example QuickQ on macOS, where `scutil --proxy` reports `127.0.0.1:10902` — export `HTTPS_PROXY`, `HTTP_PROXY` and `ALL_PROXY` in the shell that starts the service, otherwise `codex exec` reports `Reconnecting...` until it times out.
+
+Upgrading with Tickets in worktree mode keeps their worktrees: interrupted preparations are re-verified instead of cloned again, and running Assignments end with a recovery note as usual. Rollback leaves the branches and PRs those Tickets created in place, keeps undelivered receipts queued, and restores the queue from the pre-upgrade backup.
+
 ## Troubleshooting
 
 Setup problems appear on the overview with a link to the fix, in the panel's language; the log and the API show the English text below.
