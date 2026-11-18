@@ -36,6 +36,8 @@ import { decisionList, search, threadDetail, threadList } from '../src/app/views
 import { executorLoad, ticketDetail, ticketList } from '../src/app/views/tickets.ts'
 
 let runtime: Runtime
+/** The git configuration the host process had before this file started a Runtime: a host that runs these tests may already carry one of its own, and setup restores what it found. */
+const hostGitConfigGlobal = process.env.GIT_CONFIG_GLOBAL
 const viewsOf = (value: Runtime) => ({ store: value.store, sources: value.sources, links: value.links() })
 const overviewOf = (value: Runtime) => overview(viewsOf(value), value.health, policyVersion(value.store.settings()), executorLoad(value.store, value.executor.activeCount()), value.setupProblem ?? value.feishuProblem)
 let directory: string
@@ -966,7 +968,7 @@ it('runs setup again while the Feishu bot check failed, and restores the process
   const broken = await restart()
   await broken.ready
   expect(broken.setupProblem).toMatchObject({ place: 'deployment', code: 'gitTooOld' })
-  expect(process.env.GIT_CONFIG_GLOBAL).toBeUndefined()
+  expect(process.env.GIT_CONFIG_GLOBAL).toBe(hostGitConfigGlobal)
   expect(process.env.PATH?.split(':')).not.toContain(join(directory, 'worker-bin'))
 })
 
@@ -986,7 +988,7 @@ it('writes worker shims and the agent environment from the configuration only, a
   expect(process.env.GIT_AUTHOR_NAME).toBeUndefined()
   expect(process.env.PATH?.split(':')[0]).toBe(bin)
   await next.stop()
-  expect(process.env.GIT_CONFIG_GLOBAL).toBeUndefined()
+  expect(process.env.GIT_CONFIG_GLOBAL).toBe(hostGitConfigGlobal)
   expect(process.env.PATH?.split(':')).not.toContain(bin)
 })
 
