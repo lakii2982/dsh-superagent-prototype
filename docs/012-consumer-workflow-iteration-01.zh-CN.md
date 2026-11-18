@@ -38,19 +38,22 @@
 
 ## 5. 验证方式
 
-- 自动化：`pnpm typecheck`、`pnpm vitest run tests/manager-*.spec.ts tests/worktree.spec.ts tests/runtime-concurrency.spec.ts tests/repository.spec.ts tests/migration.spec.ts`。
+- 自动化：`pnpm check`（类型检查 + 全量测试 + 构建）。本迭代收尾时 65 个测试文件 / 1243 例全部通过，其中新增或重写的用例覆盖逐话题顺序、群停用隔离、就绪维度、worktree 并行与排队、准备续接与现场保留。
+- 定向回归：`pnpm vitest run tests/manager-*.spec.ts tests/worktree.spec.ts tests/runtime-concurrency.spec.ts tests/repository.spec.ts tests/migration.spec.ts tests/settings.spec.ts`。
 - 回归：`pnpm test`（基线两例失败除外）。
 - 真实验收（阶段 E）：两个独立测试仓库、两个测试群，保存工单、PR、重叠运行时间与恢复证据。
 
 ## 6. 状态
 
-| 项 | 状态 |
-| --- | --- |
-| 基线同步与依赖安装 | 完成 |
-| 阶段 A | 进行中 |
-| 阶段 B | 进行中 |
-| 阶段 C | 未开始 |
-| 阶段 D | 未开始 |
-| 阶段 E | 未开始 |
+| 项 | 状态 | 提交 | 证据 |
+| --- | --- | --- | --- |
+| 基线同步与依赖安装 | 完成 | `444b876` | 依赖安装成功，`pnpm check` 通过 |
+| 测试环境修正 | 完成 | `b103162` | `tests/runtime.spec.ts` 不再假设宿主没有 `GIT_CONFIG_GLOBAL` |
+| 阶段 A · 固定路由与就绪 | 完成 | `be834b3` | 4 个 manager 测试文件 32 例；全量 `pnpm check` 通过 |
+| 阶段 B · 托管 worktree | 完成 | `bf7432a` | `tests/worktree.spec.ts` 6 例 + 4 个相关文件扩展；全量 `pnpm check` 通过 |
+| 架构表补录 | 完成 | `f1095b3` | `tests/docs.spec.ts` 校验每个模块与测试都在表中 |
+| 阶段 C · 本地 Agent | 未开始 | — | — |
+| 阶段 D · GitHub 交付与面板 | 未开始 | — | — |
+| 阶段 E · 兼容与验收 | 进行中 | — | 全量检查已绿；双仓联调证据待补 |
 
 更新本表时同时写明对应提交 SHA 与测试汇总行，避免只有结论没有证据。
