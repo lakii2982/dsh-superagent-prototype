@@ -86,43 +86,34 @@ export function jobRegistry(owner: (sessionId: string) => FakeAgent | undefined 
 }
 
 /**
- * DSH's subagents as the Executor uses them. `spawn` starts a child of a Session, an agent while it lives, which a drain of
- * the Session's descendants refuses from then on; `settle` ends one, whose end wakes its idle parent or steers a running one
- * before a wait for the parent's children returns. Releasing or interrupting a child settles it; a drain of descendants
- * injects their ends. The catalog lists every child a Session had.
+ * DSH's subagents as the Executor uses them. `spawn` starts a child of a Session, an agent while it lives; `settle` ends one,
+ * whose end wakes its idle parent or steers a running one before a join of the Session's tree returns. Interrupting a child
+ * settles it, which is the stop DSH offers: no resident child is released by id, and DSH releases each as it settles, so the
+ * Session admits new ones. The catalog lists every child a Session had, also those that ended.
  */
 export function subagentRuntime(agents: Map<string, FakeAgent>) {
   const children = new Map<string, { parent: string; live: boolean; settled: PromiseWithResolvers<void> }>()
-  const closed = new Set<string>()
-  const settle = (id: string, wake = true) => {
+  const settle = (id: string) => {
     const child = children.get(id)
     if (!child?.live) return
     child.live = false
     agents.delete(id)
     const parent = agents.get(child.parent), ended = notice(`settled-${id}`, `Subagent ${id} settled`)
-    if (!wake) parent?.inject(ended)
-    else if (parent?.status === 'idle') parent.followup(ended)
+    if (parent?.status === 'idle') parent.followup(ended)
     else parent?.steer(ended)
     child.settled.resolve()
   }
   const service = {
-    waitForChildren: vi.fn(async (parent: { id: string }) => {
+    waitForTreeWork: vi.fn(async (parent: { id: string }) => {
       const live = [...children.values()].filter(child => child.parent === parent.id && child.live)
       await Promise.all(live.map(child => child.settled.promise))
       return live.length > 0
     }),
-    listChildren: vi.fn(async (id: string) => [...children].filter(([, child]) => child.parent === id).map(([childId]) => ({ id: childId }))),
-    drainChildren: vi.fn(async (_parent: { id: string }, ids: readonly string[]) => { for (const id of ids) settle(id) }),
-    drainDescendants: vi.fn(async (parents: readonly { id: string }[]) => {
-      for (const parent of parents) {
-        closed.add(parent.id)
-        for (const [id, child] of children) if (child.parent === parent.id) settle(id, false)
-      }
-    }),
+    listDescendants: vi.fn(async (id: string) => [...children].filter(([, child]) => child.parent === id).map(([childId, child]) =>
+      ({ kind: 'child', id: childId, activity: child.live ? 'running' : 'inactive' }))),
     interrupt: vi.fn((id: string) => { settle(id) }),
   }
   const spawn = (parent: string) => {
-    if (closed.has(parent)) throw new Error('DRAINING: the Session admits no new subagents')
     const id = `child-${children.size + 1}`
     children.set(id, { parent, live: true, settled: Promise.withResolvers<void>() })
     agents.set(id, { id, status: 'running', session: { header: { parentSession: parent } } } as never)
