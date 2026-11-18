@@ -23,6 +23,7 @@ import { WorktreeNameSchema } from '../app/assessment.ts'
 import { resultRelay } from '../app/notices.ts'
 import type { HealthEntry } from '../infra/health.ts'
 import { cancelled, collectJob, killJobs, runningJobs, stopBackground, stopSubagents, until, untilQuiet } from './background.ts'
+import { AgentRuns, type AgentDelegation } from './agents.ts'
 
 const now = (): string => new Date().toISOString()
 /** Returns the worker session ID (`worker-<ticketId>`) for a ticket. */
@@ -245,6 +246,8 @@ export class DshExecutor implements Executor {
   private readonly timers = new Set<ReturnType<typeof setTimeout>>()
   /** Write occupancy of the tickets that write now, claimed before a worktree worker writes and released when it stops. */
   private readonly scope = new ScopeQueue()
+  /** The local agent CLI runs the workers delegate to, whose processes this Executor owns. */
+  private readonly agentRuns: AgentRuns
   /** Registers the `launch` and `delivery` effect handlers; both are held (concurrency limit 0) while processing is paused. */
   constructor(private readonly host: ExecutorHost) {
     this.slots = new WorkerSlots(() => this.runningWorkIds(),
@@ -254,12 +257,36 @@ export class DshExecutor implements Executor {
       retry: [5000, 300_000] })
     // Failed input deliveries are recorded on the ticket itself rather than reported through the `delivery` effect health entry (`quiet: true`).
     host.effects.handle('delivery', payload => this.deliverQueued(payload.ticketId), { limit: () => host.paused() ? 0 : 4, quiet: true })
+    this.agentRuns = new AgentRuns({ subprocess: host.context.subprocess, store: host.store, lifetime: host.lifetime,
+      running: (ticketId, assignmentId) => this.stillRunning(ticketId, assignmentId),
+      writeRefusal: ticketId => this.writeRefusal(ticketId),
+      deliver: (ticketId, assignmentId, requestId, text) => this.deliverAgentRun(ticketId, assignmentId, requestId, text) })
   }
+  /** The local agent CLI delegation surface, when a worker's `orchestrator_agent` tool needs it. */
+  get agents(): AgentDelegation { return this.agentRuns }
   workRefusal(ticketId: string): string | undefined {
     if (this.sharedWorkspace() && this.runningWorkIds().some(id => id !== ticketId)) {
       return 'Another ticket is using this checkout. Wait until it releases the repository before running work tools.'
     }
     return undefined
+  }
+  /** Why a delegation run that writes is refused now: another ticket writes this repository, so the write slot is not held. */
+  writeRefusal(ticketId: string): string | undefined {
+    const ticket = this.host.store.tickets.get(ticketId)
+    if (!ticket) return undefined
+    const blockers = this.blockersOf(ticket)
+    if (!blockers.length) return undefined
+    return `Another ticket is writing in this repository: ${blockers.map(blocker => `${blocker.title} (${blocker.ticketId})`).join(', ')}. Wait until it stops writing before running an agent that writes.`
+  }
+  /** Whether `assignmentId` still runs the ticket, which alone may receive a late result of its run. */
+  private stillRunning(ticketId: string, assignmentId: string): boolean {
+    const stored = this.host.store.tickets.get(ticketId)
+    return !!stored && liveTicket(stored) && runningAssignment(stored)?.id === assignmentId
+  }
+  /** Delivers a finished agent run's note to its worker Session, after rechecking that its Assignment still runs the ticket. */
+  private async deliverAgentRun(ticketId: string, assignmentId: string, requestId: string, text: string): Promise<void> {
+    if (!this.stillRunning(ticketId, assignmentId)) return
+    await this.host.sessions.prompt(workerSessionId(ticketId), requestId, text, { inject: 'Agent run ended' })
   }
   private runningWorkIds(): string[] {
     return [...new Set([...this.host.store.tickets.open().filter(ticket => this.running(ticket)).map(ticket => ticket.id),
@@ -492,9 +519,13 @@ export class DshExecutor implements Executor {
       void this.background(this.stopped(ticket.id).catch(() => {}).then(() => { this.releaseScope(ticket.id) }))
     })
   }
-  /** Stop what a ticket's worker runs in the background (see `stopBackground`). */
+  /**
+   * Stop what a ticket's worker runs in the background (see `stopBackground`) and settle its delegations: the write slot is
+   * released only after the agent processes exited (先收束再释放).
+   */
   private stopWork(ticketId: string, reason: string, keepInbox = false): void {
-    this.track(ticketId, stopBackground(this.host.context, workerSessionId(ticketId), reason, keepInbox))
+    this.track(ticketId, Promise.all([stopBackground(this.host.context, workerSessionId(ticketId), reason, keepInbox),
+      this.agentRuns.stopAll(ticketId, reason)]).then(() => {}))
   }
   /** A stop of a ticket's background work, which a launch or a delivery of the ticket waits for while it runs. */
   private track(ticketId: string, stop: Promise<void>): void {
@@ -516,7 +547,8 @@ export class DshExecutor implements Executor {
     const agents = this.host.store.tickets.list().map(ticket => this.host.context.agents.get(workerSessionId(ticket.id) as SessionId))
       .filter((agent): agent is Agent => agent !== undefined)
     const stop = async () => {
-      await Promise.allSettled(agents.map(agent => stopBackground(this.host.context, agent.id, 'dsh-superagent stopped', true)))
+      await Promise.allSettled([...agents.map(agent => stopBackground(this.host.context, agent.id, 'dsh-superagent stopped', true)),
+        this.agentRuns.shutdown('dsh-superagent stopped')])
       for (const { collect } of this.left.values()) collect.abort()
       const running = agents.filter(agent => agent.status !== 'idle')
       for (const agent of running) agent.cancel({ kind: 'user' }, { keepInbox: true })

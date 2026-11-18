@@ -8,6 +8,7 @@ import type { SettingsSave } from './policy.ts'
 import type { Retry } from './sources/github.ts'
 import type { ScopeStatus } from './core/scope.ts'
 import type { WorktreePreparation } from './infra/worktree.ts'
+import type { AgentRun } from './executor/agents.ts'
 
 /** Key of a KV record whose value has type `V`; a plain string represents an untyped key. */
 export type Key<V> = string & { readonly __value?: V }
@@ -36,7 +37,11 @@ export const KV = {
     /** Durable worktree preparation phase of a ticket (`pending`, `preparing`, `ready`, `failed`), resumed after a restart. */
     worktree: family<WorktreePreparation, [ticket: string]>('executor-worktree:'),
     /** Durable write occupancy of a ticket, with the tickets it waits for, as the task page shows it. */
-    scope: family<ScopeStatus, [ticket: string]>('executor-scope:') },
+    scope: family<ScopeStatus, [ticket: string]>('executor-scope:'),
+    /** Durable delegation run of a ticket to a local agent CLI, by run id. */
+    agentRun: family<AgentRun, [ticket: string, run: string]>('executor-agent-run:'),
+    /** A ticket's recent delegation runs, oldest first, bounded to its last 20. */
+    agentRuns: family<string[], [ticket: string]>('executor-agent-runs:') },
   /** Runtime: the main Session's ID. */
   runtime: { masterId: record<string>('master-id') },
   /** Sessions: prompt revisions each Session has worked under, ordered oldest first; the last entry (`.at(-1)`) is its active revision. */

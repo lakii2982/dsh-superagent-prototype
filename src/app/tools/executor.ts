@@ -8,6 +8,7 @@ import { readResource, type ResourceHost } from '../resources.ts'
 import type { Store } from '../store.ts'
 import { reportRelay, threadFollowedNotice } from '../notices.ts'
 import type { Sessions } from '../sessions.ts'
+import type { AgentDelegation, AgentRun } from '../../executor/agents.ts'
 import { AcknowledgementSchema, readTool, tool, type Tool } from './tool.ts'
 
 export interface ExecutorToolsHost {
@@ -17,8 +18,33 @@ export interface ExecutorToolsHost {
   readonly resources: ResourceHost
   /** GitHub Source context whose pull-request rules govern claiming a reported PR. */
   readonly github: SourceContext
+  /** The Executor's local agent CLI delegation, when the deployment supports it. */
+  readonly agents?: AgentDelegation
   sendReplies(): Promise<void>
 }
+
+/** Cap on the agent result text a tool answer carries. */
+const AGENT_VIEW_CHARS = 4000
+/** The model-facing view of a run: its identity, status, failure, result summary, and captured workspace difference. */
+const agentRunView = (run: AgentRun) => ({
+  run_id: run.id,
+  ticket_id: run.ticketId,
+  assignment_id: run.assignmentId,
+  agent: run.agent,
+  permission: run.permission,
+  status: run.status,
+  prompt: run.prompt.slice(0, 500),
+  directory: run.directory,
+  started_at: run.startedAt,
+  ended_at: run.endedAt,
+  session_id: run.externalId,
+  resume_of: run.resumeOf,
+  exit_code: run.exitCode,
+  error: run.error,
+  error_kind: run.errorKind,
+  result: run.result ? { text: run.result.text.slice(0, AGENT_VIEW_CHARS), cost_usd: run.result.costUsd, usage: run.result.usage } : undefined,
+  changes: run.changes,
+})
 
 export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
   const ticketId = ticket.id
@@ -99,6 +125,44 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
           const notification = relay ? 'orchestrator' : 'internal_only'
           return { reported: true, notification, ...(updated.attention ? { attention: updated.attention } : {}) }
         })
+      },
+    }),
+    tool({
+      name: 'orchestrator_agent',
+      description: 'Delegate to the local Codex or Claude Code CLI in this ticket\'s workspace. Runs are asynchronous: this returns a run id at once, and the result arrives later as an injected message in this Session. Use action=continue with it to resume its agent session and action=stop to stop it. A write run is refused while another ticket holds the repository\'s write slot, so ask for read while only inspecting. A run belongs to the current Assignment; its result is delivered only while that Assignment still runs the ticket, and a late result of an older Assignment is recorded but never delivered.',
+      schema: z.object({
+        action: z.enum(['run', 'continue', 'stop', 'status']),
+        agent: z.enum(['codex', 'claude']).optional().describe('With action=run: the CLI to run.'),
+        prompt: z.string().min(1).optional().describe('With action=run: the task. With action=continue: what to do next; omitted means carry on from where the session stopped.'),
+        permission: z.enum(['read', 'write']).optional().describe("With action=run: 'read' (default) inspects only; 'write' edits the workspace and needs the repository's write slot."),
+        run_id: z.string().optional().describe('With action=continue or stop: the run to resume or stop. With action=status: the run to read; omit to list recent runs.'),
+      }).strict(),
+      execute: async args => {
+        const agents = host.agents
+        if (!agents) throw new Error('Local agent delegation is not available in this deployment.')
+        if (args.action === 'run') {
+          if (!args.agent) throw new Error('Choose an agent: "codex" or "claude".')
+          if (!args.prompt) throw new Error('Give the agent a prompt.')
+          const run = agents.start(ticket, { agent: args.agent, prompt: args.prompt, permission: args.permission ?? 'read' })
+          return { action: 'run', run: agentRunView(run) }
+        }
+        if (args.action === 'continue') {
+          if (!args.run_id) throw new Error('action=continue needs the run_id of the run to resume.')
+          const run = agents.resume(ticket, args.run_id, args.prompt ?? 'Continue from where you left off.')
+          return { action: 'continue', run: agentRunView(run) }
+        }
+        if (args.action === 'stop') {
+          if (!args.run_id) throw new Error('action=stop needs the run_id of the run to stop.')
+          const run = await agents.stop(ticketId, args.run_id, 'Stopped by the worker')
+          return { action: 'stop', run: agentRunView(run) }
+        }
+        if (args.run_id) {
+          const found = agents.status(ticketId, args.run_id)
+          const run = Array.isArray(found) ? found[0] : found
+          return { action: 'status', run: run ? agentRunView(run) : null }
+        }
+        const runs = agents.status(ticketId)
+        return { action: 'status', runs: Array.isArray(runs) ? runs.map(agentRunView) : [] }
       },
     }),
   ]
