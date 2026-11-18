@@ -312,6 +312,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/core/reasons.ts` | `Reason`, `REASONS` and `reasonText`: why the core recorded a Decision or set a Trigger aside, by code |
 | `src/core/ids.ts` | `key`: ids derived from their inputs, equal for equal inputs |
 | `src/core/memory.ts` | `MemoryRepositories`: the Store's repositories in memory, in the Store's order and with its nested rollback, for domain tests |
+| `src/core/scope.ts` | The write scope of a Ticket in one repository: `ScopeClaim` and `ScopeBlock`, `normalizeScopePath`, `covers`, `overlaps` and `overlappingPaths`, and the in-memory `ScopeQueue` of running claims, whose holders a Ticket with an overlapping scope waits for |
 | `src/core/index.ts` | The core's exports |
 | `src/app/runtime.ts` | The Runtime, the composition root, with its start and stop |
 | `src/app/setup.ts` | Setup, and `setupChanged`, whether a save changes a field setup reads |
@@ -356,6 +357,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/infra/commands.ts` | `Commands`, the CLI transport: `run`; `api` and `pages`, limited to the configured repository and validated; `lark` as the bot; `git`. `CliError` carries the code a command's output reports, such as a GitHub HTTP status, and a command that prints nothing fails with how it ended, never with its arguments; `validItems` skips and counts the malformed items of a list |
 | `src/infra/environment.ts` | The agent's process environment: command shims, the git configuration and credential helper, `runAsWorker`, and the checks of the environment and of a Ticket's directory |
 | `src/infra/repository.ts` | Validates checkout roots, remote identity, unfinished Git operations and existing changes without modifying files |
+| `src/infra/worktree.ts` | Managed worktrees, one directory and ticket branch per Ticket, from a bare mirror per repository: `prepareWorktree`, which is resumable and never repairs by force, `inspectWorktree`, `removeWorktree`, and `WorktreeConflict` when the scene on disk is not the recorded one |
 | `src/infra/paths.ts` | The package's root, where packaged files are |
 | `src/infra/text.ts` | Word counts and the chat message limit, `fill` and `sameName` |
 | `src/infra/health.ts` | The `HealthBoard`, every part's health entry, each claimed by its one writer |
@@ -405,6 +407,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/manager/protocol.ts` | Multi-repository management, deterministic Feishu routing and isolated execution |
 | `src/manager/store.ts` | Multi-repository management, deterministic Feishu routing and isolated execution |
 | `src/manager/instances.ts` | Multi-repository management, deterministic Feishu routing and isolated execution |
+| `src/manager/readiness.ts` | `readiness`: the five readiness dimensions of one Repository, instance, checkout, agent, Feishu and queued deliveries, each with its state, its detail and where an operator repairs it |
 | `src/manager/runtime.ts` | Multi-repository management, deterministic Feishu routing and isolated execution |
 
 ## Tests
@@ -456,6 +459,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 `tests/fixtures/` holds what several tests share: `host.ts`, a simulated DeepSeek Harness host; `panel-server.ts` and `panel.tsx`, the fake management API and the panel around a page; `deployment.ts`, a resolved deployment; `git.ts`, the environment of every git the tests start, which names no repository; and `async.ts`.
 
 | `tests/repository.spec.ts` | Checkout identity and shared-workspace slot protection |
+| `tests/worktree.spec.ts` | Two Tickets of one repository preparing their worktrees side by side, overlapping write scopes queued, an interrupted preparation resumed, a scene someone else changed refused, cleanup, and the person's checkout left untouched |
 | `tests/manager-store.spec.ts` | Multi-repository routing, durable replay, binding changes and local protocol guards |
 
 | `tests/manager-instances.spec.ts` | Isolated DSH storage, CLI environment, restart preservation and legacy session migration guard |
