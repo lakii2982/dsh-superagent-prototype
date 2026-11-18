@@ -3,7 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { z } from 'zod'
 import { verifyRepository } from '../infra/repository.ts'
 import { UserError, type EngineForSettings } from '../core/index.ts'
-import { EvalConfigSchema, ExecutorConfigSchema, PolicyConfigSchema, SettingsSchema, policyEffects, policyVersion } from '../policy.ts'
+import { EvalConfigSchema, ExecutorConfigSchema, PolicyConfigSchema, SettingsSchema, policyEffects, policyVersion, workspaceMode } from '../policy.ts'
 import type { Settings as SettingsValue, SettingsBlock, SettingsOrigin, SettingsSave } from '../policy.ts'
 import type { SourceHost } from '../sources/host.ts'
 import type { HealthBoard, HealthEntry } from '../infra/health.ts'
@@ -22,7 +22,8 @@ import { KV } from '../kv.ts'
 export class SettingsConflict extends Error {}
 const now = (): string => new Date().toISOString()
 /** Executor settings that control shell execution paths, prepare commands, and command shims. */
-const environment = ({ executor }: SettingsValue) => JSON.stringify([executor.directory, executor.prepare, executor.blockedCommands, executor.workspaceMode, executor.repositoryPath])
+const environment = ({ executor, sources }: SettingsValue) => JSON.stringify([executor.directory, executor.prepare, executor.blockedCommands,
+  workspaceMode({ executor, sources }), executor.repositoryPath])
 
 /** Schema parser, settings merger, and non-panel origin guard for one settings block kind. */
 interface Block {
@@ -166,7 +167,7 @@ export class Settings {
     }
     rules.guard?.(current, candidate, origin)
     const changing = current.executor.repositoryPath !== candidate.executor.repositoryPath
-      || current.executor.workspaceMode !== candidate.executor.workspaceMode
+      || workspaceMode(current) !== workspaceMode(candidate)
     if (changing && store.tickets.open().some(ticket => ticket.execution?.workspaceMode === 'current')) {
       throw new SettingsConflict('Finish or stop open checkout tickets before changing their workspace configuration.')
     }
@@ -178,7 +179,7 @@ export class Settings {
     if (preparing) {
       throw new SettingsConflict(`Let ${preparing.title} (${preparing.id}) finish preparing its worktree before changing the workspace configuration.`)
     }
-    if ((block === 'executor' || block === 'source:github') && candidate.executor.workspaceMode === 'current') {
+    if ((block === 'executor' || block === 'source:github') && workspaceMode(candidate) === 'current') {
       candidate.executor.repositoryPath = await verifyRepository(candidate.executor.repositoryPath, String(candidate.sources.github?.config.repository ?? ''), this.host.context.subprocess, this.host.lifetime)
     }
     if (setupChanged(current, candidate)) await this.host.setup.checkAccounts(block, candidate)

@@ -77,9 +77,10 @@ export function ExecutionSettings() {
   const { blocks, environment, sources } = useSettings().settings
   // Keep raw user text (such as separators between blocked commands) in the draft and parse only on save.
   const executor = blocks.executor.value
-  const saved = { ...executor, maxWorkers: String(executor.maxWorkers), blockedCommands: executor.blockedCommands.join(' ') }
+  const saved = { ...executor, workspaceMode: executor.workspaceMode ?? '', maxWorkers: String(executor.maxWorkers), blockedCommands: executor.blockedCommands.join(' ') }
   const draft = useBlockDraft('executor', saved, blocks.executor.revision,
-    value => ({ ...value, maxWorkers: numberOf(value.maxWorkers), blockedCommands: value.blockedCommands.split(/[\s,]+/).filter(Boolean) }))
+    value => ({ ...value, workspaceMode: value.workspaceMode === '' ? null : value.workspaceMode,
+      maxWorkers: numberOf(value.maxWorkers), blockedCommands: value.blockedCommands.split(/[\s,]+/).filter(Boolean) }))
   const value = draft.value
   const edit = (next: Partial<typeof value>) => draft.edit({ ...value, ...next })
   const prepare = useRef<HTMLTextAreaElement>(null)
@@ -104,12 +105,16 @@ export function ExecutionSettings() {
         <div className="dt-form dt-block">
           <h2 className="dt-block-title">{t('term.environment')}<InfoTip text={t('environmentIntro')} /></h2>
           <Field label={t('workspaceMode')} hint={t('workspaceModeHint')}>
-            <SegmentedControl label={t('workspaceMode')} options={[{ value: 'isolated', label: t('workspaceIsolated') }, { value: 'current', label: t('workspaceCurrent') }]}
+            <SegmentedControl label={t('workspaceMode')} options={[{ value: '', label: t('workspaceAuto') },
+              { value: 'worktree', label: t('workspaceWorktree') }, { value: 'isolated', label: t('workspaceIsolated') },
+              { value: 'current', label: t('workspaceCurrent') }]}
               value={value.workspaceMode} onChange={workspaceMode => edit({ workspaceMode })} />
           </Field>
           {value.workspaceMode === 'current' && <Field label={t('repositoryPath')} hint={t('repositoryPathHint')}>
             <Input value={value.repositoryPath} required pattern="/.*" onChange={event => edit({ repositoryPath: event.target.value })} />
           </Field>}
+          {value.workspaceMode === '' && <Hint>{t('workspaceAutoHint')}</Hint>}
+          {value.workspaceMode === 'worktree' && <Hint>{t('workspaceWorktreeHint')}</Hint>}
           {value.workspaceMode === 'current' && <Hint>{t('workspaceSerial')}</Hint>}
           {value.workspaceMode === 'isolated' && <Field label={t('executionDirectory')} hint={t('executionDirectoryHint')} note={value.directory ? undefined
             : t('executionDirectoryDefault', { root: environment.root })}>

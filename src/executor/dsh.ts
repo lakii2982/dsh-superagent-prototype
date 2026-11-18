@@ -13,6 +13,7 @@ import { verifyRepository } from '../infra/repository.ts'
 import { runAsWorker, verifyDirectory } from '../infra/environment.ts'
 import { WorktreeConflict, prepareWorktree, repositoryId, worktreeBranch, worktreePath, worktreeRemote, type WorktreePlan }
   from '../infra/worktree.ts'
+import { workspaceMode } from '../policy.ts'
 import type { Settings } from '../policy.ts'
 import type { Store } from '../app/store.ts'
 import { KV } from '../kv.ts'
@@ -122,12 +123,12 @@ export function ticketExecution(ticket: Ticket, outcome: Extract<AssessmentOutco
     ? `Proactively accepted under ${ruleIds.join(', ')}. Scope: ${outcome.scope}.${precedence}${note}`
     : note.trim()
   const repository = String(settings.sources.github?.config.repository ?? '')
-  if (settings.executor.workspaceMode === 'current') {
+  if (workspaceMode(settings) === 'current') {
     return { name, directory: settings.executor.repositoryPath, assignment, workspaceMode: 'current', repository }
   }
   // A ticket of a repository we know runs in its own managed worktree; without one it keeps the isolated workspace, which the
   // settings schema prevents worktree mode from being saved without.
-  if (settings.executor.workspaceMode === 'worktree' && repositoryId(repository)) {
+  if (workspaceMode(settings) === 'worktree' && repositoryId(repository)) {
     const root = executionRoot(settings, stateDir)
     const id = repositoryId(repository)
     const path = worktreePath(root, id, name)
@@ -301,7 +302,7 @@ export class DshExecutor implements Executor {
       ...(this.sharedWorkspace() ? this.stopping.keys() : [])])]
   }
   private sharedWorkspace(): boolean {
-    return this.host.store.settings().executor.workspaceMode === 'current'
+    return workspaceMode(this.host.store.settings()) === 'current'
       || this.host.store.tickets.open().some(ticket => ticket.execution?.workspaceMode === 'current')
   }
   /** Populates a newly accepted ticket's `execution` attributes (worktree name, workspace directory, and assignment text). */

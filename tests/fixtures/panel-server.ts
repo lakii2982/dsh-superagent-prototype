@@ -243,7 +243,8 @@ function initial(): PanelServer {
     sources: { feishu: { enabled: true, config: { cli: 'lark-bot', chats: [{ chatId: 'oc_team', listen: 'mentions' }],
       directMessages: true } },
       github: { enabled: true, config: { repository: 'acme/widgets', cli: 'gh-agent' } } },
-    executor: { blockedCommands: ['gh-personal'] },
+    // The panel tests the isolated-directory fields; the follow-the-repository default has its own test.
+    executor: { workspaceMode: 'isolated', blockedCommands: ['gh-personal'] },
   })
   const ended = ticketSummary({ id: 't0', title: '旧工单', state: 'ended', actions: { retry: false, stop: false },
     ended: { at: '2026-09-21T00:00:00Z', by: 'human', reason: 'Human asked to stop', outcome: 'stopped' } }, { stage: 'ended' })

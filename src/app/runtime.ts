@@ -14,7 +14,7 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { lockSync } from 'proper-lockfile'
 import { Engine, key, reasonText, type EngineForSettings, type ReceiveResult, type Ticket, type Trigger } from '../core/index.ts'
-import { allowedSender, settingsPolicy } from '../policy.ts'
+import { allowedSender, settingsPolicy, workspaceMode } from '../policy.ts'
 import { SourceRegistry } from '../sources/registry.ts'
 import { Commands } from '../infra/commands.ts'
 import type { AgentProbe } from '../executor/agents.ts'
@@ -103,11 +103,11 @@ export class Runtime extends Service implements SourceHost {
         ? environmentOf({ deployment: setup.deployment, sources: this.sources, settings: store.settings() }) : undefined
       const feishu = () => setup.configured() && !!setup.deployment.feishu
       const prompts = this.prompts = new Prompts(store, () => machine.promptMaxChars.get(), deployed, feishu)
-      const executorSettings = store.settings().executor
-      const masterId = this.masterId = executorSettings.workspaceMode === 'current'
-        ? `orchestrator-${key(machine.stateDir + ':' + executorSettings.repositoryPath)}`
+      const executorSettings = store.settings()
+      const masterId = this.masterId = workspaceMode(executorSettings) === 'current'
+        ? `orchestrator-${key(machine.stateDir + ':' + executorSettings.executor.repositoryPath)}`
         : store.get(KV.runtime.masterId) ?? `orchestrator-${key(machine.stateDir)}`
-      if (executorSettings.workspaceMode !== 'current') store.set(KV.runtime.masterId, masterId)
+      if (workspaceMode(executorSettings) !== 'current') store.set(KV.runtime.masterId, masterId)
       const commands = this.commands = new Commands(() => setup.deployment, setup.commandEnvironment, this.lifetime)
       const board = this.board
       const effects = this.effects = new Effects(store, board)
@@ -230,7 +230,7 @@ export class Runtime extends Service implements SourceHost {
     }
     this.sessions.install()
     this.executor.install()
-    await this.sessions.ensure(this.masterId, this.store.settings().executor.workspaceMode === 'current' ? this.store.settings().executor.repositoryPath : this.machine.stateDir, 'dsh-superagent orchestrator', 'orchestrator')
+    await this.sessions.ensure(this.masterId, workspaceMode(this.store.settings()) === 'current' ? this.store.settings().executor.repositoryPath : this.machine.stateDir, 'dsh-superagent orchestrator', 'orchestrator')
     for (const id of this.settings.syncable()) await this.settings.sync(id).catch(() => { /* sync() records its failure in health. */ })
     // If stop() was called while awaiting setup, session creation, or policy sync, do not start background loops.
     if (this.closing()) return

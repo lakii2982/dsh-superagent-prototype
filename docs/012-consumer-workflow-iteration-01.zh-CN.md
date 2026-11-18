@@ -105,3 +105,12 @@
 - 推送已用真实 git 对本地 bare 远程验证（含远端 head 移动时拒绝）；但 `gh pr create`、真实 GitHub 上的分支保护与 PR 复用仍只是替身证据，需在联调时复核。
 - `claude` 的文件读取边界仍是进程约定（私有 `HOME` + 凭据剥离 + `plan`/`acceptEdits` 权限模式 + 可约束性探测），没有 OS 级沙箱包裹；`codex` 走自身 `--sandbox workspace-write`。因此「外部 Agent 无法读取其他工单目录」目前以环境隔离与探测为主，严格的读隔离留待后续用沙箱工具包一层。
 - 未知范围的工单按整仓计入写入名额（`ticket.scope` 为空即整仓）；尚未提供「先只读调查再声明范围」的独立前置阶段，Worker 需在首次写入前自行声明 `scope`。
+
+## 9. 收口后的补充：工作方式跟随仓库
+
+迭代收口后按评审结论补一处默认值：`executor.workspaceMode` 不再默认落成 `isolated`，而是默认「未选择」（`null`）。未选择时由仓库决定——已配置 GitHub 仓库就用托管 worktree（本轮 §3.1 的目标），未配置则保持独立目录，因此没有仓库的安装行为不变。面板的「默认」档显示这一状态，选择任一具体工作方式即固定下来，「默认」档再清回未选择。
+
+- 解析点集中在 `src/policy.ts` 的 `workspaceMode(settings)`：工单目录规划、master Session 位置、setup 的仓库校验、设置切换守卫与设置历史都走它，避免各处各判一次。
+- 测试：`tests/repository.spec.ts` 覆盖未选择 + 已配置仓库 → worktree、未选择 + 无仓库 → isolated、显式 isolated 保持；`tests/panel-execution.spec.tsx` 覆盖「默认」档清空选择并提交 `workspaceMode: null`；用例夹具显式写入 `isolated`，让既有编排用例继续覆盖独立目录行为。
+- 文档：`docs/006-deployment.md` 的 Managed worktrees 一节说明默认值。
+

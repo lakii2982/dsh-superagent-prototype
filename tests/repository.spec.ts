@@ -7,7 +7,7 @@ import { afterEach, beforeEach, expect, it } from 'vitest'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import { githubRepository, verifyRepository } from '../src/infra/repository.ts'
 import { gitEnv } from './fixtures/git.ts'
-import { SettingsSchema } from '../src/policy.ts'
+import { SettingsSchema, workspaceMode } from '../src/policy.ts'
 import { WorkerSlots, ticketExecution } from '../src/executor/dsh.ts'
 import type { Ticket } from '../src/core/index.ts'
 
@@ -46,8 +46,15 @@ it('refuses an unfinished Git operation even while resuming a ticket', async () 
   await mkdir(join(directory, '.git', 'rebase-merge'))
   await expect(check(directory, false)).rejects.toThrow('Finish the Git operation')
 })
-it('requires a path for current mode and preserves isolated defaults for old configurations', () => {
-  expect(SettingsSchema.parse({}).executor.workspaceMode).toBe('isolated')
+it('requires a path for current mode and follows the repository when no mode is chosen', () => {
+  // An unset mode is remembered as unset: it resolves to a managed worktree once a GitHub repository is configured, and to
+  // isolated directories otherwise, so the choice can be revisited by configuring or dropping the repository.
+  expect(SettingsSchema.parse({}).executor.workspaceMode).toBeNull()
+  const bare = SettingsSchema.parse({})
+  expect(workspaceMode(bare)).toBe('isolated')
+  expect(workspaceMode(SettingsSchema.parse({ sources: { github: { config: { repository: 'acme/widgets' } } } }))).toBe('worktree')
+  expect(workspaceMode(SettingsSchema.parse({ executor: { workspaceMode: 'isolated' },
+    sources: { github: { config: { repository: 'acme/widgets' } } } }))).toBe('isolated')
   expect(() => SettingsSchema.parse({ executor: { workspaceMode: 'current' } })).toThrow()
   const settings = SettingsSchema.parse({ executor: { workspaceMode: 'current', repositoryPath: directory }, sources: { github: { config: { repository: 'acme/widgets' } } } })
   const ticket = { id: 'abc123456789000', origin: { triggerId: 'msg' }, mandate: { strength: 'explicit', basis: {} } } as Ticket
@@ -65,6 +72,9 @@ it('maps worktree mode to a managed worktree per ticket and requires a repositor
   expect(ticketExecution(ticket, accept, settings, '/state')).toEqual({ name: 'fix-abc123456789', directory: path,
     assignment: expect.any(String), workspaceMode: 'worktree', repository: 'acme/widgets',
     worktree: { path, branch: 'dsh-superagent/fix-abc123456789', baseRef: '', baseSha: '', repositoryId: 'acme--widgets' } })
+  // Leaving the mode unset follows the repository, so a configured repository already lands here without any choice.
+  expect(ticketExecution(ticket, accept, SettingsSchema.parse({ sources: { github: { config: { repository: 'acme/widgets' } } } }), '/state'))
+    .toMatchObject({ directory: path, workspaceMode: 'worktree', repository: 'acme/widgets' })
   expect(() => SettingsSchema.parse({ executor: { workspaceMode: 'worktree' } })).toThrow('GitHub repository')
   // Old tickets are never rewritten: an isolated execution records no workspace mode and keeps its own directory.
   expect(ticketExecution(ticket, accept, SettingsSchema.parse({}), '/state')).toEqual({ name: 'fix-abc123456789',

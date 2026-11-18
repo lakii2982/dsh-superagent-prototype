@@ -119,6 +119,19 @@ it('offers a Ticket awaiting review its review place and Session in the page hea
     'https://github.com/acme/widgets/pull/42']])
 })
 
+it('lets the workspace mode follow the repository again after a mode was chosen', async () => {
+  await mount()
+  await click(zh['tab.execution'])
+  await click(find(zh['tab.settings'], '.dt-status-head button'))
+  expect(field<HTMLInputElement>(zh.executionDirectory).value).toBe('')
+  // The default option clears the stored choice, so the configured repository decides again instead of the panel pinning a mode.
+  await click(find(zh.workspaceAuto, 'button'))
+  expect(text()).toContain(zh.workspaceAutoHint)
+  await click(zh.save)
+  expect(server.requests.find(request => request.path === 'settings/executor')?.body).toMatchObject({ value: { workspaceMode: null } })
+  expect(server.settings.executor.workspaceMode).toBeNull()
+})
+
 it('keeps what a person types in the Execution settings, converting it once on save', async () => {
   await mount()
   await click(zh['tab.execution'])

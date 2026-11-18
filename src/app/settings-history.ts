@@ -68,7 +68,9 @@ function settingsChanges(before: SettingsVersion['settings'], after: SettingsVer
   if (!same(before.executor.model, after.executor.model)) changes.push({ code: 'executorModel' })
   if (before.executor.maxWorkers !== after.executor.maxWorkers) changes.push({ code: 'maxWorkers', from: before.executor.maxWorkers, to: after.executor.maxWorkers })
   if (before.paused !== after.paused) changes.push({ code: after.paused ? 'paused' : 'resumed' })
-  if (before.executor.workspaceMode !== after.executor.workspaceMode) changes.push({ code: 'workspaceMode', from: before.executor.workspaceMode, to: after.executor.workspaceMode })
+  if (before.executor.workspaceMode !== after.executor.workspaceMode) {
+    changes.push({ code: 'workspaceMode', from: before.executor.workspaceMode ?? 'default', to: after.executor.workspaceMode ?? 'default' })
+  }
   if (before.executor.repositoryPath !== after.executor.repositoryPath) changes.push({ code: 'repositoryPath', from: before.executor.repositoryPath, to: after.executor.repositoryPath })
   if (before.executor.directory !== after.executor.directory) changes.push({ code: 'executionDirectory', from: before.executor.directory, to: after.executor.directory })
   if (before.executor.prepare !== after.executor.prepare) changes.push({ code: 'prepareCommand' })

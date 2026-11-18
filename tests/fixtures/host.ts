@@ -237,7 +237,9 @@ export async function startRuntime(seed?: (store: Store) => void) {
   for (const cli of [AGENT, BOT]) writeFileSync(cli, '#!/bin/sh\n', { mode: 0o755 })
   const seeded = new Store(join(directory, 'orchestrator.sqlite'))
   const sources = { github: { enabled: true, config: { repository: 'acme/widgets', cli: AGENT } }, feishu: { enabled: true, config: { cli: BOT } } }
-  seeded.saveSettings(SettingsSchema.parse({ ...seeded.settings(), sources }))
+  // Fixtures opt into isolated directories explicitly: an unset workspace mode now follows the configured repository and would
+  // put every ticket of these tests into a managed worktree; the worktree default has tests of its own.
+  seeded.saveSettings(SettingsSchema.parse({ ...seeded.settings(), sources, executor: { ...seeded.settings().executor, workspaceMode: 'isolated' } }))
   seed?.(seeded)
   seeded.close()
   const runtime = new Runtime(ctx, testMachine({ stateDir: directory }), vi.fn())

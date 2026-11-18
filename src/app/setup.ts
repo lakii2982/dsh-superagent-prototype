@@ -6,6 +6,7 @@ import { verifyRepository } from '../infra/repository.ts'
 import { UserError } from '../core/index.ts'
 import { SETUP_FIELDS, resolveDeployment, resolveFeishuBot, workerProbe, type Deployment, type Machine } from '../deployment.ts'
 import { agentVariables, applyEnvironment, verifyEnvironment, withoutDirectory, workerBin, writeEnvironment } from '../infra/environment.ts'
+import { workspaceMode } from '../policy.ts'
 import type { Settings, SettingsBlock } from '../policy.ts'
 import { SetupError, type SetupProblem } from '../setup.ts'
 import { executionRoot } from './execution-environment.ts'
@@ -20,7 +21,7 @@ export interface SetupHost {
 const setupFields = (settings: Settings) =>
   JSON.stringify(Object.entries(SETUP_FIELDS).map(([id, keys]) => keys.map(key => settings.sources[id]?.config[key] ?? '')))
 export const setupChanged = (before: Settings, after: Settings): boolean => setupFields(before) !== setupFields(after)
-  || before.executor.workspaceMode !== after.executor.workspaceMode || before.executor.repositoryPath !== after.executor.repositoryPath
+  || workspaceMode(before) !== workspaceMode(after) || before.executor.repositoryPath !== after.executor.repositoryPath
 
 /**
  * Resolves the target repository, GitHub account, and optional Feishu bot by probing CLIs, then writes and applies the isolated git and shim environment used by worker processes.
@@ -90,17 +91,19 @@ export class Setup {
       return undefined
     })
     const resolved = { ...deployment, ...(feishu ? { feishu } : {}) }
+    // An unset workspace mode follows the repository: managed worktrees once GitHub is configured, isolated directories otherwise.
+    const mode = workspaceMode(settings)
     const machineProblem = (error: unknown): never => {
       if (error instanceof SetupError) throw error
       throw new SetupError('environmentFailed', { output: error instanceof Error ? error.message : String(error) })
     }
-    if (settings.executor.workspaceMode === 'current') {
+    if (mode === 'current') {
       const directory = await verifyRepository(settings.executor.repositoryPath, resolved.repository, context.subprocess, lifetime).catch(machineProblem)
       try { this.releaseRepository = lockSync(directory, { stale: 30_000, onCompromised: () => this.host.restart() }) } catch (error) { machineProblem(error) }
     }
     // Worktree tickets never touch the checkout a person works in: each gets a managed worktree under the execution root, whose
     // per-repository mirror is cloned from the configured remote on first use.
-    if (settings.executor.workspaceMode === 'worktree') {
+    if (mode === 'worktree') {
       if (!String(resolved.repository ?? '')) machineProblem(new Error('Worktree workspace mode needs the repository of the GitHub source.'))
       await mkdir(executionRoot(settings, machine.stateDir), { recursive: true }).catch(machineProblem)
     }
