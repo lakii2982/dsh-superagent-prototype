@@ -93,6 +93,7 @@ const TEXT = {
   'nav.tasks': ['任务', 'Tasks'],
   'nav.prompts': ['提示词', 'Prompts'],
   'nav.health': ['健康与设置', 'Health & settings'],
+  allPages: ['全部页面', 'All pages'],
   'repository.subtitle': ['当前部署只有一个仓库；提示词、设置和任务都在同一个面板里。', 'This deployment has one repository; prompts, settings and tasks live in the same panel.'],
   'repository.current': ['当前仓库', 'Current repository'],
   'repository.notSetUp': ['尚未完成部署设置', 'Setup is not complete'],

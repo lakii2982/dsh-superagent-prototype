@@ -161,8 +161,11 @@ function Pages({ route, openTab, deploymentForm }: { route: Route; openTab: (tab
     <div className="dt-column">
       <Header masterId={state?.masterId} />
       {error && state && <p className="dt-error" role="status">{error.message}</p>}
-      <SegmentedTabs className="dt-tabs" label={t('pagesLabel')} value={route.page === 'repository' ? 'overview' : route.page} onChange={openTab}
-        items={TABS.map(value => ({ value, label: t(`tab.${value}`), id: `dt-tab-${value}`, panelId: 'dt-page' }))} />
+      <details className="dt-all-pages">
+        <summary>{t('allPages')}</summary>
+        <SegmentedTabs className="dt-tabs" label={t('pagesLabel')} value={route.page === 'repository' ? 'overview' : route.page} onChange={openTab}
+          items={TABS.map(value => ({ value, label: t(`tab.${value}`), id: `dt-tab-${value}`, panelId: 'dt-page' }))} />
+      </details>
       <main id="dt-page" role="tabpanel" aria-labelledby={`dt-tab-${route.page}`} className="dt-main">{page}</main>
     </div>
   </div>
