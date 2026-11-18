@@ -8,7 +8,7 @@ import { afterEach, beforeEach, expect, it } from 'vitest'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import { ScopeQueue, normalizeScopePath, overlaps } from '../src/core/scope.ts'
 import { WORKTREE_BRANCH_PREFIX, WorktreeConflict, inspectWorktree, mirrorPath, prepareWorktree, removeWorktree, repositoryId,
-  worktreeBranch, worktreePath, worktreeRemote } from '../src/infra/worktree.ts'
+  verifyRemoteBeforeRemoval, worktreeBranch, worktreePath, worktreeRemote } from '../src/infra/worktree.ts'
 import { gitEnv } from './fixtures/git.ts'
 
 const exec = promisify(execFile)
@@ -176,4 +176,38 @@ it('never touches the person\'s checkout, including its uncommitted changes', as
   expect(await readFile(join(checkout, 'README.md'), 'utf8')).toBe('edited by hand\n')
   // The worktree was created from the pushed commit, not from the person's uncommitted change.
   expect(await readFile(join(scene.path, 'README.md'), 'utf8')).toBe('base\n')
+})
+
+it('removes a worktree only when the remote holds its branch at the local head or no longer holds it', async () => {
+  // A branch that never reached the remote was delivered by definition, so its worktree may go: nothing is lost.
+  const unpushed = await prepareWorktree(subprocess, signal, plan('fix-remote-abc123456789'))
+  expect(await removeWorktree(subprocess, signal, plan('fix-remote-abc123456789'), unpushed)).toMatchObject({ branch: 'gone' })
+  expect(await exists(unpushed.path)).toBe(false)
+  // A branch the remote holds at the local head was delivered: removal is allowed and reports that head.
+  const delivered = await prepareWorktree(subprocess, signal, plan('fix-remote-def456789012'))
+  await writeFile(join(delivered.path, 'delivered.txt'), 'delivered\n'); await commitAll(delivered.path, 'delivered')
+  const head = (await git(['rev-parse', 'HEAD'], delivered.path)).stdout.trim()
+  await git(['push', 'origin', `${delivered.branch}:refs/heads/${delivered.branch}`], delivered.path)
+  expect(await removeWorktree(subprocess, signal, plan('fix-remote-def456789012'), delivered)).toEqual({ branch: 'merged',
+    remoteHead: head })
+  expect(await exists(delivered.path)).toBe(false)
+  // A remote branch at another commit means the delivery is pending or unknown: nothing is removed, and the local work stays.
+  const pending = await prepareWorktree(subprocess, signal, plan('fix-remote-ghi789012345'))
+  await writeFile(join(pending.path, 'pending.txt'), 'pending\n'); await commitAll(pending.path, 'pending')
+  await git(['push', 'origin', `${pending.branch}:refs/heads/${pending.branch}`], pending.path)
+  // Another writer moves the remote branch back to the base commit, as an overwritten or reverted delivery would.
+  await git(['push', '--force', 'origin', `main:refs/heads/${pending.branch}`], checkout)
+  const localHead = (await git(['rev-parse', 'HEAD'], pending.path)).stdout.trim()
+  await expect(removeWorktree(subprocess, signal, plan('fix-remote-ghi789012345'), pending)).rejects.toThrow('delivery is still pending')
+  expect(await exists(pending.path)).toBe(true)
+  expect(await readFile(join(pending.path, 'pending.txt'), 'utf8')).toBe('pending\n')
+  expect((await git(['rev-parse', 'HEAD'], pending.path)).stdout.trim()).toBe(localHead)
+  expect((await git(['branch', '--list', pending.branch], mirrorPath(execution, repositoryId(remote)))).stdout).toContain(pending.branch)
+})
+
+it('decides from the recorded and the remote head whether a branch was delivered', () => {
+  expect(verifyRemoteBeforeRemoval('abc123', undefined)).toEqual({ allowed: true, branch: 'gone' })
+  expect(verifyRemoteBeforeRemoval('abc123', 'abc123')).toEqual({ allowed: true, branch: 'merged', remoteHead: 'abc123' })
+  expect(verifyRemoteBeforeRemoval(undefined, 'abc123')).toMatchObject({ allowed: false, branch: 'present' })
+  expect(verifyRemoteBeforeRemoval('abc123', 'def456')).toMatchObject({ allowed: false, branch: 'present', remoteHead: 'def456' })
 })

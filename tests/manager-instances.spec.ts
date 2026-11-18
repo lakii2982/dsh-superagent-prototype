@@ -63,7 +63,15 @@ it('reports Feishu readiness as a repair instead of blocking a GitHub-only repos
   const offline = readiness({ repository, status: { online: true, configured: true }, bot: false, groups: 0, pending })
   expect(offline.repository).toMatchObject({ state: 'ok' })
   expect(offline.feishu).toMatchObject({ state: 'pending', repair: 'feishu' })
+  // An instance that reports no probe yet stays unknown; a probe that says every agent is unavailable is an error with its reason.
   expect(offline.agent).toMatchObject({ state: 'unknown', repair: 'agent' })
+  const constrained = readiness({ repository, status: { online: true, configured: true,
+    agent: [{ kind: 'codex', available: true, detail: 'codex was found' }, { kind: 'claude', available: false, detail: 'no sandbox tool' }] },
+  bot: true, groups: 1, pending })
+  expect(constrained.agent).toMatchObject({ state: 'ok' })
+  const blocked = readiness({ repository, status: { online: true, configured: true,
+    agent: [{ kind: 'codex', available: false, detail: 'This host cannot constrain codex\'s file access.' }] }, bot: true, groups: 1, pending })
+  expect(blocked.agent).toMatchObject({ state: 'error', repair: 'agent', detail: 'This host cannot constrain codex\'s file access.' })
   expect(offline.delivery).toMatchObject({ state: 'ok', pending: 0 })
   const connected = readiness({ repository, status: { online: true, configured: true }, bot: true, groups: 2, pending: { total: 3, byChat: { oc_team: 3 } } })
   expect(connected.feishu).toMatchObject({ state: 'ok', detail: '2 个飞书群' })

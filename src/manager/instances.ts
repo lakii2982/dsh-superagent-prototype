@@ -4,6 +4,7 @@ import { promisify } from 'node:util'
 import { access, chmod, mkdir, readFile, writeFile, open, symlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
+import type { AgentKind, AgentProbe } from '../executor/agents.ts'
 import { Store } from '../app/store.ts'
 import { SettingsSchema } from '../policy.ts'
 import { packageRoot } from '../infra/paths.ts'
@@ -21,10 +22,26 @@ export async function instanceRequest(repository: Repository, path: string, body
   if (!response.ok) throw new Error(result.error ?? `Repository instance returned ${response.status}`)
   return result
 }
-export async function instanceHealth(repository: Repository): Promise<{ pid: number; configured: boolean; state?: string }> {
-  const health = await instanceRequest(repository, 'health') as { repositoryId: string; pid: number; configured: boolean; state?: string }
+export interface InstanceHealth { pid: number; configured: boolean; state?: string; agent?: AgentProbe[] }
+/** The shape a probe entry from an instance may have; anything else it reports is ignored rather than trusted. */
+const agentProbeOf = (value: unknown): AgentProbe | undefined => {
+  if (typeof value !== 'object' || value === null) return undefined
+  const probe = value as Record<string, unknown>
+  if (probe.kind !== 'codex' && probe.kind !== 'claude') return undefined
+  if (typeof probe.available !== 'boolean') return undefined
+  return { kind: probe.kind as AgentKind, available: probe.available,
+    ...typeof probe.detail === 'string' ? { detail: probe.detail } : {}, ...typeof probe.repair === 'string' ? { repair: probe.repair } : {} }
+}
+/**
+ * Reads the instance's authenticated health, including the probe of the agent CLIs its host can run. The probe is optional
+ * so an older instance still reports health; readiness then says the agent state is unknown instead of inventing one.
+ */
+export async function instanceHealth(repository: Repository): Promise<InstanceHealth> {
+  const health = await instanceRequest(repository, 'health') as { repositoryId: string; pid: number; configured: boolean; state?: string; agent?: unknown }
   if (health.repositoryId !== repository.id || !Number.isInteger(health.pid) || health.pid < 1) throw new Error('Unexpected repository instance')
-  return health
+  const agent = Array.isArray(health.agent) ? health.agent.map(agentProbeOf).filter((probe): probe is AgentProbe => !!probe) : undefined
+  return { pid: health.pid, configured: health.configured, ...health.state !== undefined ? { state: health.state } : {},
+    ...agent?.length ? { agent } : {} }
 }
 export async function provision(repository: Repository, directory: string, managerOrigin: string, botCli: string, chats: string[]): Promise<void> {
   const home = instanceHome(directory, repository.id), env = instanceEnvironment(repository, directory)

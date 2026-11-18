@@ -207,9 +207,9 @@ export const acceptDecision = (): NonNullable<TicketPageView['decision']> => ({ 
   reason: [{ code: 'explicitRouted' }], at: '2026-09-22T00:00:00Z', strength: 'explicit', ticketId: undefined,
   triggerIds: ['e1'], thread: 'feishu:oc_1:om_root', rules: [], preview: '@bot 修一下', ticketTitle: undefined })
 const ticketDetail = (): TicketPageView => ({
-  ...ticketSummary(), delivery: { code: 'none', pull: 'none', channel: 'none', waiting: 0 },
+  ...ticketSummary(), delivery: { code: 'none', pull: 'none', channel: 'none', waiting: 0, channels: [] },
   worktree: { path: '/srv/work/t1', branch: 'dsh/t1', baseRef: 'origin/main', baseSha: 'abc1234def5678' }, runs: [],
-  paused: false, decision: acceptDecision(), threads: [threadSummary()],
+  paused: false, decision: acceptDecision(), threads: [threadSummary()], scope: [], scopeStatus: null, overrun: null,
   mandate: { strength: 'explicit', policyVersion: 'abcdef1234567890', basis: { via: 'addressed', sender: 'Alice', addressed: 'mention' },
     actor: actor('feishu', MEMBER), scope: '修复登录页回归' },
   basis: { facts: [{ name: 'sender', value: 'Alice' }, { name: 'addressed', value: 'mention' }], legacy: false },
@@ -341,6 +341,17 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
     if (!ticketOf(params.id)) return refuse(404, 'Ticket not found')
     server.tickets.open = []; server.person = server.person.filter(ticket => ticket.id !== params.id)
     return { stopped: true }
+  } },
+  'POST tickets/:id/scope-approval': { body: true, answer: ({ params, body }) => {
+    const ticket = server.ticketDetails[params.id]
+    if (!ticketOf(params.id)) return refuse(404, 'Ticket not found')
+    if (!ticket?.overrun) return refuse(400, 'The ticket has no scope overrun waiting for approval')
+    const paths = body.paths?.length ? body.paths : ticket.overrun.paths
+    const approval = { at: '2026-09-22T00:05:00Z', by: 'panel', paths: [...(ticket.overrun.approval?.paths ?? []), ...paths] }
+    // An empty declared scope is the whole repository, which approving paths must not narrow.
+    const scope = ticket.scope.length ? [...new Set([...ticket.scope, ...paths])] : []
+    server.ticketDetails[params.id] = { ...ticket, scope, overrun: { ...ticket.overrun, approval } }
+    return { scope, overrun: { ...ticket.overrun, approval } }
   } },
   'POST executor/pause': { body: true, answer: ({ body }) => {
     server.settings = { ...server.settings, paused: body.paused }

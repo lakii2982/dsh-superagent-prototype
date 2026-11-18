@@ -1,4 +1,5 @@
 /** Readiness dimensions for one repository: instance, checkout, agent, Feishu and queued deliveries. */
+import type { AgentProbe } from '../executor/agents.ts'
 import type { Repository } from './store.ts'
 
 export type ReadinessState = 'ok' | 'pending' | 'error' | 'unknown'
@@ -13,7 +14,9 @@ export interface RepositoryReadiness {
   feishu: ReadinessItem
   delivery: DeliveryReadiness
 }
-export type InstanceView = { online: boolean; configured?: boolean; error?: string; state?: string }
+export type InstanceView = { online: boolean; configured?: boolean; error?: string; state?: string
+  /** The instance's probe of the agent CLIs its host can run; absent when the instance did not report it. */
+  agent?: AgentProbe[] }
 
 /** Compose the five readiness dimensions without touching the network or the database. */
 export function readiness(input: { repository: Repository; status?: InstanceView; bot: boolean; groups: number; pending: { total: number; byChat: Record<string, number> } }): RepositoryReadiness {
@@ -34,8 +37,7 @@ export function readiness(input: { repository: Repository; status?: InstanceView
           : status?.configured === true
             ? { state: 'ok' }
             : { state: 'pending', detail: '仓库设置尚未完成（仓库或 GitHub 账号缺失）', repair: 'repository' },
-    // The instance does not yet report whether its execution Agent can run; say so instead of guessing.
-    agent: { state: 'unknown', detail: '仓库实例尚未报告执行 Agent 状态', repair: 'agent' },
+    agent: agentReadiness(status?.agent),
     feishu: !bot
       ? { state: 'pending', detail: '尚未连接飞书机器人；仓库仍可通过 GitHub 交付', repair: 'feishu' }
       : groups === 0
@@ -45,4 +47,16 @@ export function readiness(input: { repository: Repository; status?: InstanceView
       ? { state: 'pending', detail: `${pending.total} 条消息待投递`, repair: 'repository', pending: pending.total, byChat: pending.byChat }
       : { state: 'ok', pending: 0, byChat: {} },
   }
+}
+
+/**
+ * The execution-agent dimension from the instance's real probe: at least one agent the host can constrain is ready; all
+ * of them unavailable is an error with the host's own reason and the agent repair entry; no report at all stays unknown.
+ */
+export function agentReadiness(probes?: AgentProbe[]): ReadinessItem {
+  if (!probes?.length) return { state: 'unknown', detail: '仓库实例尚未报告执行 Agent 状态', repair: 'agent' }
+  const ready = probes.filter(probe => probe.available)
+  if (ready.length) return { state: 'ok', detail: `可用的执行 Agent：${ready.map(probe => probe.kind).join('、')}` }
+  const first = probes[0]!
+  return { state: 'error', detail: first.detail ?? `执行 Agent 不可用：${probes.map(probe => probe.kind).join('、')}`, repair: 'agent' }
 }

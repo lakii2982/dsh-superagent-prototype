@@ -214,6 +214,13 @@ export type AssignmentState = 'pending' | 'running' | 'ended'
  * ready (`ready`), a person must act to unblock or recover it (`blocked` or `failed`), or nothing is left to do (`dropped`).
  */
 export type ReportState = 'progress' | 'waiting' | 'ready' | 'blocked' | 'failed' | 'dropped'
+/** One check a worker ran for a report, with its evidence: the run detail shows pass, fail and unknown checks separately. */
+export interface CheckEvidence {
+  name: string
+  state: 'pass' | 'fail' | 'unknown'
+  /** What was run or observed, such as the failing test name or "no test covers this path". */
+  detail?: string
+}
 /** Binding between a ticket and one executor instance. */
 export interface Assignment {
   id: string
@@ -222,7 +229,7 @@ export interface Assignment {
   startedAt?: string
   endedAt?: string
   endedReason?: string
-  report?: { state: ReportState; summary: string; at: string }
+  report?: { state: ReportState; summary: string; at: string; checks?: CheckEvidence[] }
   /** When Inputs last reached the worker; one at or after `report.at` means the worker has been busy with Inputs since that report. */
   deliveredAt?: string
   /**

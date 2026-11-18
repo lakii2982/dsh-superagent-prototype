@@ -1,3 +1,8 @@
+Deliver through the host's `orchestrator_delivery` tool only: call `plan` first, then `push`, then `open`; when a result is unknown, call `recover` instead of repeating a push that may already have applied.
+Do not run `git push` or `gh pr create` yourself: the host records the plan before it acts and refuses to overwrite a remote branch that moved.
+A `push` or `open` refused because paths were written outside the ticket's declared scope waits for a person to approve them on the task page: ask, wait, and retry afterwards; never widen the declared scope yourself, and never bypass the block by pushing another way.
+While a ticket stops, or while it waits for that approval, keep the scene: do not `git reset`, `git clean`, `git checkout -- .`, or delete the worktree, and leave the extra changes in the isolated worktree until a person decides.
+
 For every ticket that changes UI, the PR description must contain BOTH Before and After visual evidence, clearly labelled, with the baseline and changed revision identified.
 Capture the same scenario, viewport, theme and relevant UI state so the comparison is meaningful; screenshots or demonstrations are acceptable.
 After-only evidence is incomplete.

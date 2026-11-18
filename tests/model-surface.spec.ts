@@ -37,7 +37,8 @@ interface Skill { name: string; description: string; content: string }
  * Maximum combined character count of system prompt and tool definitions per role (~5% above baseline).
  * Lower this limit when shrinking model-facing text; raise it only intentionally and explain why in the commit message.
  */
-const BUDGET: Record<Role, number> = { orchestrator: 59_000, worker: 40_500 }
+// Worker grew with orchestrator_delivery (the host-executed GitHub delivery contract) and the report's check evidence.
+const BUDGET: Record<Role, number> = { orchestrator: 59_000, worker: 43_500 }
 const PROMPTS = 'prompts/, skills/', TOOLS = 'src/app/tools/', SESSIONS = 'src/app/sessions.ts'
 const NOTICES = 'src/app/notices.ts', LINKS = 'src/app/links.ts', ASSESSMENT = 'src/app/assessment.ts'
 const EXECUTOR = 'src/executor/dsh.ts', ERRORS = 'src/core/errors.ts'
@@ -348,7 +349,7 @@ function failures(): Map<string, string> {
 }
 
 it('collects both roles\' tools, prompts, skills and inputs', () => {
-  expect([...toolsOf('worker').keys()].sort()).toEqual(['orchestrator_ack', 'orchestrator_agent', 'orchestrator_read', 'orchestrator_report',
+  expect([...toolsOf('worker').keys()].sort()).toEqual(['orchestrator_ack', 'orchestrator_agent', 'orchestrator_delivery', 'orchestrator_read', 'orchestrator_report',
     'orchestrator_thread_follow',
     'orchestrator_thread_unrelated', 'orchestrator_trigger_handback'])
   expect([...toolsOf('orchestrator').keys()]).toEqual(expect.arrayContaining(['orchestrator_route', 'orchestrator_eval_decide', 'orchestrator_reply']))

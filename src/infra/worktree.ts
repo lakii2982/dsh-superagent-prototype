@@ -249,11 +249,13 @@ const describe = (facts: WorktreeFacts): string => [`directory ${facts.directory
 
 /**
  * Remove the worktree of a ticket, and with `branch` its ticket branch: only a directory inside the managed root that the
- * mirror registers, on a product branch, and with no uncommitted or untracked change is removed; the branch is kept by
- * default so its commits stay reachable after the ticket ended. Anything else is refused and kept as it is.
+ * mirror registers, on a product branch, with no uncommitted or untracked change, and whose remote delivery state was checked
+ * is removed; the branch is kept by default so its commits stay reachable after the ticket ended. A branch the remote holds at
+ * another commit than the local head is refused, because removing the worktree would hide work that never reached the remote.
+ * Anything else is refused and kept as it is.
  */
 export async function removeWorktree(subprocess: SubprocessRuntime, signal: AbortSignal, plan: WorktreePlan, scene: WorktreeScene,
-  options: { branch?: boolean } = {}): Promise<void> {
+  options: { branch?: boolean } = {}): Promise<RemoveWorktreeResult> {
   const id = repositoryId(plan.repository), managed = worktreePath(plan.root, id, plan.name)
   const mirror = mirrorPath(plan.root, id)
   if (!scene.branch.startsWith(WORKTREE_BRANCH_PREFIX)) throw new Error(`${scene.branch} is not a product branch; it was left as it is`)
@@ -265,10 +267,36 @@ export async function removeWorktree(subprocess: SubprocessRuntime, signal: Abor
   const facts = await inspectWorktree(subprocess, signal, plan)
   if (!facts.registered) throw new WorktreeConflict(`${scene.path} is not registered by ${mirror}; it was left as it is`)
   if (!facts.clean) throw new Error(`The worktree at ${scene.path} has uncommitted or untracked changes. Commit or move them before cleanup; no files were changed`)
+  // The remote is asked before anything is removed: a branch the remote no longer has, or has at the local head, was delivered;
+  // one the remote holds at another commit means a delivery is still pending or unknown, and nothing is removed.
+  const remoteHead = await runAsWorker(subprocess, ['git', 'ls-remote', 'origin', `refs/heads/${scene.branch}`], mirror,
+    AbortSignal.any([signal, AbortSignal.timeout(FETCH_TIMEOUT_MS)])).then(output => output.split('\n')
+    .map(line => line.trim()).find(line => line !== '')?.split(/\s+/)[0], (error: unknown) => {
+    throw new WorktreeConflict(`The remote state of ${scene.branch} could not be checked (${String(error)}); the worktree at ${scene.path} was left as it is`)
+  })
+  const check = verifyRemoteBeforeRemoval(facts.headSha ?? facts.branchSha, remoteHead)
+  if (!check.allowed) throw new WorktreeConflict(check.reason!)
   const git = (...args: string[]) => runAsWorker(subprocess, ['git', ...args], mirror,
     AbortSignal.any([signal, AbortSignal.timeout(GIT_TIMEOUT_MS)]))
   await git('worktree', 'remove', scene.path)
   if (options.branch) await git('branch', '-D', scene.branch)
+  return { branch: check.branch, ...remoteHead ? { remoteHead } : {} }
+}
+
+/** The remote state of a ticket branch before its worktree is removed, as `removeWorktree` returns it. */
+export interface RemoveWorktreeResult { remoteHead?: string; branch: 'merged' | 'gone' | 'present' }
+/** Whether the remote state of a ticket branch allows removing its worktree, and why not. */
+export interface RemoteRemovalCheck { allowed: boolean; branch: 'merged' | 'gone' | 'present'; remoteHead?: string; reason?: string }
+/**
+ * Decide from the recorded local head and the remote's head of the same branch whether the worktree may be removed: a branch
+ * the remote does not have (`gone`) or has at the local head (`merged`) is delivered, so removal loses nothing; a branch the
+ * remote has at another commit (`present`) is refused, because a delivery is pending or its outcome is unknown.
+ */
+export function verifyRemoteBeforeRemoval(head: string | undefined, remoteHead: string | undefined): RemoteRemovalCheck {
+  if (!remoteHead) return { allowed: true, branch: 'gone' }
+  if (head && remoteHead === head) return { allowed: true, branch: 'merged', remoteHead }
+  return { allowed: false, branch: 'present', remoteHead,
+    reason: `The branch is at ${remoteHead} on the remote, not at the local head ${head ?? 'unknown'}: its delivery is still pending or its outcome unknown, so the worktree was left as it is` }
 }
 
 /** Read the `.git` pointer of a worktree, for a caller that needs the mirror's metadata directory. */

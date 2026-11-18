@@ -1,12 +1,14 @@
 /** Concurrent runtime behavior across overlapping triggers, deliveries, and worker launches. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { join } from 'node:path'
-import { latestAssignment, waitsForPerson, type Ticket, type Trigger } from '../src/core/index.ts'
+import { latestAssignment, waitsForPerson, type ScopeQueue, type Ticket, type Trigger } from '../src/core/index.ts'
 import { Later } from '../src/app/effects.ts'
 import { reportRelay } from '../src/app/notices.ts'
 import { WorkerSlots, inputMessage, mandateInstructions, ticketExecution, transient, triggerMessage } from '../src/executor/dsh.ts'
 import { SettingsSchema } from '../src/policy.ts'
 import { Commands } from '../src/infra/commands.ts'
+import { AgentRuns } from '../src/executor/agents.ts'
+import { KV } from '../src/kv.ts'
 import { deferred, waitUntil } from './fixtures/async.ts'
 import { CHAT, MEMBER, feishu, startRuntime, type Host } from './fixtures/host.ts'
 
@@ -985,4 +987,35 @@ it('routes subscribed Feishu topic recovery through the manager before local int
     expect(fetcher.mock.calls[0]?.[0]).toBe('http://127.0.0.1:39999/orchestrator/internal/repository-a/receive')
     expect(h.runtime.store.triggers.get(message.id)).toBeUndefined()
   } finally { delete h.runtime.machine.managed; vi.unstubAllGlobals() }
+})
+
+it('keeps a stopped ticket\'s write slot until its agent processes confirm their exit, and hands it on afterwards', async () => {
+  const one = await h.acceptedTicket(feishu('1', '@bot 修一'))
+  // Its execution names the repository it writes in, as a ticket accepted from a repository source does.
+  h.runtime.store.tickets.save({ ...one.ticket, execution: { ...one.ticket.execution!, repository: 'acme/widgets' } })
+  const executor = h.runtime.executor as unknown as { scope: ScopeQueue }
+  // The repository identity a scope claim is recorded under, with the path separator folded to `--`.
+  const holders = () => executor.scope.holders('acme--widgets').map(claim => claim.ticketId)
+  const status = () => h.runtime.store.get(KV.executor.scope(one.ticket.id))
+  // The stop reports that the ticket's agent processes did not exit within its limit.
+  const stopAll = vi.spyOn(AgentRuns.prototype, 'stopAll').mockResolvedValue({ confirmed: false, runs: [] } as never)
+  await h.runtime.engine.stopTicket(one.ticket.id)
+  await waitUntil(() => status()?.state === 'stopping')
+  expect(stopAll).toHaveBeenCalled()
+  // The slot stays claimed, and the task page can read why the ticket is still writing.
+  expect(holders()).toContain(one.ticket.id)
+  expect(status()).toMatchObject({ state: 'stopping', scope: [], blockers: [] })
+  expect(String(status()?.detail)).toContain('did not confirm their exit')
+  // A restart retries the settlement; the now confirmed exit releases the slot for the next ticket.
+  stopAll.mockResolvedValue({ confirmed: true, runs: [] } as never)
+  h.runtime.executor.resume()
+  await waitUntil(() => status() === undefined)
+  expect(holders()).not.toContain(one.ticket.id)
+  // Another ticket then claims the same repository, so the slot was released and is reusable.
+  const two = await h.acceptedTicket(feishu('5', '@bot 修二'))
+  h.runtime.store.tickets.save({ ...two.ticket, execution: { ...two.ticket.execution!, repository: 'acme/widgets' } })
+  stopAll.mockResolvedValue({ confirmed: false, runs: [] } as never)
+  await h.runtime.engine.stopTicket(two.ticket.id)
+  await waitUntil(() => h.runtime.store.get(KV.executor.scope(two.ticket.id))?.state === 'stopping')
+  expect(holders()).toEqual([two.ticket.id])
 })

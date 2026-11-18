@@ -19,7 +19,7 @@ import type { Health } from '../sources/host.ts'
 import { ManagerStore, RepositorySchema, BindingSchema, type Repository } from './store.ts'
 import { readiness } from './readiness.ts'
 import { authorized, bridgeOptions, FeishuTriggerSchema } from './protocol.ts'
-import { instanceHealth, instanceRequest, instanceUiUrl, provision, startInstance } from './instances.ts'
+import { instanceHealth, instanceRequest, instanceUiUrl, provision, startInstance, type InstanceHealth } from './instances.ts'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 
 async function body(req: IncomingMessage): Promise<unknown> {
@@ -39,7 +39,8 @@ export class Manager {
   readonly store: ManagerStore
   private readonly lifetime = new AbortController()
   private readonly health = new Map<string, Health>()
-  private readonly instances = new Map<string, { online: boolean; configured?: boolean; error?: string; state?: string }>()
+  private readonly instances = new Map<string, { online: boolean; configured?: boolean; error?: string; state?: string
+    agent?: InstanceHealth['agent'] }>()
   private readonly starting = new Set<string>()
   private bot?: Deployment['feishu']
   private consumer?: { abort: AbortController; done: Promise<unknown> }
@@ -106,13 +107,15 @@ export class Manager {
     try {
       const repositories = this.store.repositories()
       await Promise.all(repositories.map(async repository => {
-        let status: { configured: boolean; state?: string }
+        let status: InstanceHealth
         try { status = await instanceHealth(repository) }
         catch { this.instances.set(repository.id, { online: false }); return }
-        this.instances.set(repository.id, { online: true, configured: status.configured, ...(status.state ? { state: status.state } : {}) })
+        this.instances.set(repository.id, { online: true, configured: status.configured, ...(status.state ? { state: status.state } : {}),
+          ...status.agent ? { agent: status.agent } : {} })
         if (status.configured && !this.closed) {
           try { await this.syncGroups(repository) }
-          catch (error) { this.instances.set(repository.id, { online: true, configured: true, error: errorText(error) }) }
+          // Keep the health this tick already read, including the agent probe, while adding the group-sync error.
+          catch (error) { this.instances.set(repository.id, { ...this.instances.get(repository.id), online: true, configured: true, error: errorText(error) }) }
         }
       }))
       if (this.closed) return

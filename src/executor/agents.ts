@@ -5,8 +5,11 @@
  */
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import { chmodSync, existsSync, mkdtempSync, rmSync, statSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { SubprocessHandle, SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
-import { key, runningAssignment, liveTicket } from '../core/index.ts'
+import { covers, key, normalizeScopePath, runningAssignment, liveTicket } from '../core/index.ts'
 import type { Ticket } from '../core/index.ts'
 import type { Store } from '../app/store.ts'
 import { KV } from '../kv.ts'
@@ -47,6 +50,10 @@ export interface AgentRun {
   exitCode?: number | null
   result?: AgentResult
   changes?: AgentChanges
+  /** When a stop was requested, kept while the process may still be alive. */
+  stopRequestedAt?: string
+  /** Set when the process survived the stop bound: the run still counts as running and holds its write slot. */
+  stopUnconfirmed?: boolean
   error?: string
   errorKind?: AgentFailure
 }
@@ -57,13 +64,24 @@ export interface AgentRunRequest {
   permission: AgentPermission
   resumeOf?: string
 }
+/**
+ * What a host reports about one agent CLI: whether it is installed, and whether the host can hold the file-access
+ * boundary delegation promises. An unavailable agent is shown as unavailable instead of being run unconstrained.
+ */
+export interface AgentProbe { kind: AgentKind; available: boolean; detail?: string; repair?: string }
+/** The result of stopping one run: the recorded run, and whether its process really left within the stop bound. */
+export interface AgentStopResult { run: AgentRun; confirmed: boolean }
+/** The result of stopping every run of a ticket: whether all left, and their final records. */
+export interface AgentStopAllResult { confirmed: boolean; runs: AgentRun[] }
 /** The delegation surface of an Executor, which the worker's tool and the stop path use. */
 export interface AgentDelegation {
   start(ticket: Ticket, request: AgentRunRequest): AgentRun
   resume(ticket: Ticket, runId: string, prompt: string): AgentRun
-  stop(ticketId: string, runId: string, reason?: string): Promise<AgentRun>
+  stop(ticketId: string, runId: string, reason?: string): Promise<AgentStopResult>
   status(ticketId: string, runId?: string): AgentRun | AgentRun[] | undefined
-  stopAll(ticketId: string, reason: string): Promise<void>
+  stopAll(ticketId: string, reason: string): Promise<AgentStopAllResult>
+  /** This delegation's probe of the agents it can run; absent on a delegation that cannot probe. */
+  probe?(): AgentProbe[]
 }
 
 /** The parsed end of an agent's output; `error` is set when the agent reported a failure. */
@@ -130,6 +148,109 @@ export function agentEnvironment(explicit: Record<string, string> = {}, host: No
   return { ...vars, ...explicit }
 }
 
+/** The host tools that can hold a file-access boundary around a child process: `sandbox-exec` on macOS, `bwrap` on Linux. */
+const SANDBOX_TOOLS: Partial<Record<NodeJS.Platform, { path: string; name: string }>> = {
+  darwin: { path: '/usr/bin/sandbox-exec', name: 'sandbox-exec' },
+  linux: { path: 'bwrap', name: 'bwrap' },
+}
+/** Variables an agent process may inherit from the host, besides its proxy variables and its own temporary home. */
+const ENV_ALLOW = ['PATH', 'SHELL', 'USER', 'LOGNAME', 'TERM'] as const
+/** Credentials an agent process must never inherit: delivery accounts, the Feishu bot, cloud keys, instance management. */
+const ENV_DENY = ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'SSH_AUTH_SOCK', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY',
+  'AWS_SESSION_TOKEN', 'GOOGLE_APPLICATION_CREDENTIALS'] as const
+/** Credential families denied by prefix, whatever variable names they add later. */
+const ENV_DENY_PREFIX = ['DSH_', 'FEISHU_', 'LARK_', 'AWS_', 'GH_', 'GITHUB_'] as const
+/** Why a host variable is denied to an agent process. */
+const deniedName = (name: string): boolean =>
+  (ENV_DENY as readonly string[]).includes(name) || ENV_DENY_PREFIX.some(prefix => name.startsWith(prefix))
+
+/** Whether `path` is an executable file; a probe treats a directory on PATH as no CLI. */
+const isExecutable = (path: string): boolean => {
+  try { return existsSync(path) && statSync(path).isFile() && (statSync(path).mode & 0o111) !== 0 } catch { return false }
+}
+
+/** Inputs of `probeAgents`: the CLI prefixes to look for, and the host facts to look them up with; tests replace both. */
+export interface AgentProbeOptions {
+  binaries?: Partial<Record<AgentKind, readonly string[]>>
+  platform?: NodeJS.Platform
+  exists?: (path: string) => boolean
+  searchPath?: string
+}
+/**
+ * Probes the agent CLIs this host can run: the binary must be found, and the host must be able to constrain the child's
+ * file access (`sandbox-exec` on macOS, `bwrap` on Linux). Without that boundary an agent is reported unavailable rather
+ * than run unconstrained, which is what §4.3 requires: a host that cannot hold the boundary says so.
+ */
+export function probeAgents(options: AgentProbeOptions = {}): AgentProbe[] {
+  const platform = options.platform ?? process.platform
+  const exists = options.exists ?? isExecutable
+  const searchPath = options.searchPath ?? process.env.PATH ?? ''
+  const locate = (command: string): string | undefined => {
+    if (command.includes('/')) return exists(command) ? command : undefined
+    for (const dir of searchPath.split(':')) {
+      if (!dir) continue
+      const candidate = join(dir, command)
+      if (exists(candidate)) return candidate
+    }
+    return undefined
+  }
+  const tool = SANDBOX_TOOLS[platform]
+  const constrained = tool ? exists(tool.path) : false
+  return (['claude', 'codex'] as const).map((kind): AgentProbe => {
+    const binary = (options.binaries?.[kind] ?? DEFAULT_BINARIES[kind])[0] ?? kind
+    const found = locate(binary)
+    if (!found) {
+      return { kind, available: false, detail: `The ${kind} CLI is not on PATH: ${binary} was not found.`,
+        repair: `Install ${kind} and make sure its executable is on PATH.` }
+    }
+    if (!constrained) {
+      return { kind, available: false,
+        detail: `This host cannot constrain ${kind}'s file access (no ${tool?.name ?? 'sandbox tool'} is available), so the CLI could read and write outside the ticket's workspace.`,
+        repair: `Install ${tool?.name ?? 'a sandbox tool that can constrain file access'} or run dsh-superagent on a host that provides one.` }
+    }
+    // The boundary each CLI actually gets: Codex's own sandbox keeps its writes in the workspace; Claude gets plan or
+    // acceptEdits, this run's private home, and the credential-stripped environment.
+    const boundary = kind === 'codex' ? "Codex's own sandbox keeps its writes inside the workspace"
+      : 'Claude runs with plan (read) or acceptEdits (write) and a private home'
+    return { kind, available: true, detail: `${kind} was found at ${found}; ${boundary}; this host provides ${tool?.name ?? 'a sandbox tool'}.` }
+  })
+}
+
+/**
+ * The environment of one agent process: an allowlist of the host's harmless variables, the proxy variables above, the
+ * denied credential families explicitly removed, and a fresh home and temp directory private to this run. The subprocess
+ * runtime merges this onto its scrubbed ambient environment, so a name mapped to `undefined` is one it must drop.
+ */
+export function agentProcessEnvironment(home: string, explicit: Record<string, string> = {}, host: NodeJS.ProcessEnv = process.env,
+  system: () => Record<string, string> = systemProxy): Record<string, string | undefined> {
+  const vars: Record<string, string | undefined> = {}
+  for (const name of ENV_ALLOW) {
+    const value = host[name]
+    if (value) vars[name] = value
+  }
+  if (host.LANG) vars.LANG = host.LANG
+  for (const [name, value] of Object.entries(host)) if (name.startsWith('LC_') && value) vars[name] = value
+  Object.assign(vars, agentEnvironment(explicit, host, system))
+  vars.HOME = home
+  vars.TMPDIR = home
+  for (const name of Object.keys(host)) if (deniedName(name)) vars[name] = undefined
+  return vars
+}
+
+/** The paths of a `git status --porcelain` output; a rename is reported by its destination, which is where a write landed. */
+export function changedPaths(status: string): string[] {
+  const paths: string[] = []
+  for (const line of status.split('\n')) {
+    if (line.length < 4) continue
+    let path = line.slice(3)
+    const arrow = path.lastIndexOf(' -> ')
+    if (arrow >= 0) path = path.slice(arrow + 4)
+    path = path.trim().replace(/^"(.*)"$/, '$1').replace(/\\(.)/g, '$1')
+    if (path) paths.push(path)
+  }
+  return paths
+}
+
 const now = (): string => new Date().toISOString()
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
 const textOf = (value: unknown): string | undefined => typeof value === 'string' ? value : undefined
@@ -158,13 +279,14 @@ export const captureChanges = async (subprocess: SubprocessRuntime, directory: s
 /**
  * Builds the argv of one agent run. It comes from the ticket and the caller's agent, permission, prompt and resume choice
  * only; a caller cannot pass a directory or flags. Claude gets `--session-id` for a fresh run and `--resume` for a continued
- * one; Codex gets `-C` for the directory, a read-only sandbox or no approvals for writing, and `resume <id>` when continuing.
+ * one, with `plan` (no edits) for reading and `acceptEdits` (edits inside the workspace, no wider bypass) for writing; Codex
+ * gets `-C` for the directory and a `read-only` or `workspace-write` sandbox, and `resume <id>` when continuing.
  */
 export function agentCommand(input: { agent: AgentKind; permission: AgentPermission; directory: string; prompt: string
   resume?: string; sessionId?: string }, binary: readonly string[] = DEFAULT_BINARIES[input.agent]): string[] {
   if (input.agent === 'claude') {
     const argv = [...binary, '-p', input.prompt, '--output-format', 'json', '--permission-mode',
-      input.permission === 'read' ? 'plan' : 'bypassPermissions']
+      input.permission === 'read' ? 'plan' : 'acceptEdits']
     if (input.permission === 'read') argv.push('--allowedTools', 'Read,Grep,Glob')
     if (input.resume) argv.push('--resume', input.resume)
     else if (input.sessionId) argv.push('--session-id', input.sessionId)
@@ -259,9 +381,10 @@ export function agentRepairHint(kind: AgentFailure): string {
 const capped = (text: string, limit: number): string => text.length <= limit ? text : `${text.slice(0, limit)}…`
 /**
  * The one injected note a finished run delivers: its id and status, the failure with its repair hint, a summary of the
- * result, the real workspace difference, and the warning that a process exit is not a check.
+ * result, the real workspace difference, any paths written outside the ticket's scope, and the warning that a process exit
+ * is not a check.
  */
-export function agentNote(run: AgentRun): string {
+export function agentNote(run: AgentRun, overrun: readonly string[] = []): string {
   const lines = [`Agent run ${run.id} (${run.agent}, ${run.permission}) ended with status ${run.status}.`]
   if (run.error) lines.push(`Error (${run.errorKind ?? 'failed'}): ${capped(run.error, ERROR_TEXT_CHARS)}`, agentRepairHint(run.errorKind ?? 'failed'))
   if (run.result?.text) lines.push(`Result summary: ${capped(run.result.text, NOTE_RESULT_CHARS)}`)
@@ -272,6 +395,10 @@ export function agentNote(run: AgentRun): string {
     if (changes.stat) lines.push(changes.stat)
   } else {
     lines.push('Workspace difference: none captured.')
+  }
+  if (overrun.length) {
+    lines.push(`Paths written outside this ticket's scope (delivery stays blocked until a person approves them):`)
+    for (const path of overrun.slice(0, 20)) lines.push(`- ${path}`)
   }
   lines.push(`The process exited; that alone is not a check. Read the real difference in ${run.directory} and run the checks before reporting.`)
   return lines.join('\n')
@@ -310,11 +437,13 @@ export interface AgentRunsOptions {
   stopMs?: number
   /** Extra environment of every agent process, such as a proxy; it wins over the host's own proxy variables. */
   agentEnv?: Record<string, string>
+  /** Replaces the probe of the agents this host can run; tests use it where the host has no sandbox tool. */
+  probe?: () => AgentProbe[]
 }
 
-/** A run whose process this process owns. */
+/** A run whose process this process owns, with the private home directory created for it. */
 interface ActiveRun { run: AgentRun; controller: AbortController; handle: SubprocessHandle; finished: Promise<void>
-  stopReason?: string; timedOut?: boolean }
+  home: string; stopReason?: string; timedOut?: boolean }
 
 /**
  * Owns the background agent processes of the Executor: it starts them idempotently, records them durably, settles their
@@ -326,12 +455,14 @@ export class AgentRuns implements AgentDelegation {
   private readonly runMs: number
   private readonly stopMs: number
   private readonly env: Record<string, string>
+  private readonly probes: AgentProbe[]
 
   constructor(private readonly host: AgentRunsHost, options: AgentRunsOptions = {}) {
     this.binaries = { claude: options.binaries?.claude ?? DEFAULT_BINARIES.claude, codex: options.binaries?.codex ?? DEFAULT_BINARIES.codex }
     this.runMs = options.runMs ?? RUN_LIMIT_MS
     this.stopMs = options.stopMs ?? STOP_MS
     this.env = agentEnvironment(options.agentEnv)
+    this.probes = options.probe?.() ?? probeAgents({ binaries: this.binaries })
     this.reconcile()
     // A host stop ends every run with its worker: the process dies with the host anyway, so record it as stopped rather than
     // leaving a `running` record behind for the next start to reconcile.
@@ -343,6 +474,10 @@ export class AgentRuns implements AgentDelegation {
   /** Starts a run for the ticket's running Assignment, or returns the stored run of the same submission. */
   start(ticket: Ticket, request: AgentRunRequest): AgentRun {
     return this.launch(ticket, request, undefined)
+  }
+  /** What this delegation knows about the agents it can run, computed once from the CLIs and the host's sandbox tools. */
+  probe(): AgentProbe[] {
+    return this.probes.map(entry => ({ ...entry }))
   }
   /** Continues the stored external session of `runId` with `prompt`, when that run belongs to the ticket's running Assignment. */
   resume(ticket: Ticket, runId: string, prompt: string): AgentRun {
@@ -356,24 +491,27 @@ export class AgentRuns implements AgentDelegation {
     if (parent.assignmentId !== assignment.id) throw new Error(`Run ${runId} belongs to an earlier Assignment and cannot be continued for this one.`)
     return this.launch(stored, { agent: parent.agent, prompt, permission: parent.permission, resumeOf: parent.id }, parent.externalId)
   }
-  /** Stops a run's process and waits (bounded) for its exit, then returns the recorded run. */
-  async stop(ticketId: string, runId: string, reason = 'Stopped by the worker'): Promise<AgentRun> {
+  /** Stops a run's process, waits (bounded) for it to leave, and reports whether it really did. */
+  async stop(ticketId: string, runId: string, reason = 'Stopped by the worker'): Promise<AgentStopResult> {
     const run = this.host.store.get(KV.executor.agentRun(ticketId, runId))
     if (!run) throw new Error(`No run ${runId} belongs to this ticket.`)
     const active = this.active.get(runId)
     if (!active) {
       // A `running` record without a process is a restart leftover (normally already reconciled): settle it here too.
-      if (run.status !== 'running') return run
-      return this.write({ ...run, status: 'stopped', endedAt: now(), error: `Stopped: ${reason}` })
+      if (run.status !== 'running') return { run, confirmed: true }
+      return { run: this.write({ ...run, status: 'stopped', endedAt: now(), error: `Stopped: ${reason}` }), confirmed: true }
     }
     active.stopReason = reason
+    const stopRequestedAt = now()
+    this.write({ ...run, stopRequestedAt })
     this.abort(active)
     await until(active.finished, undefined, this.stopMs)
-    const settled = this.host.store.get(KV.executor.agentRun(ticketId, runId))
-    if (settled && settled.status === 'running') {
-      return this.write({ ...settled, status: 'stopped', endedAt: now(), error: `Stopped: ${reason}` })
+    const settled = this.host.store.get(KV.executor.agentRun(ticketId, runId)) ?? run
+    if (settled.status === 'running') {
+      // The process survived the bound: keep the run running, keep its write slot, and say the stop is unconfirmed.
+      return { run: this.write({ ...settled, stopRequestedAt, stopUnconfirmed: true }), confirmed: false }
     }
-    return settled ?? run
+    return { run: settled, confirmed: true }
   }
   /** Returns one run of the ticket, or its recent runs (newest first) when `runId` is absent. */
   status(ticketId: string, runId?: string): AgentRun | AgentRun[] | undefined {
@@ -381,17 +519,29 @@ export class AgentRuns implements AgentDelegation {
     return this.index(ticketId).map(id => this.host.store.get(KV.executor.agentRun(ticketId, id))).filter((run): run is AgentRun => !!run)
       .reverse()
   }
-  /** Stops every run of the ticket and waits (bounded) for the processes to exit, so its write slot is released only after them. */
-  async stopAll(ticketId: string, reason: string): Promise<void> {
+  /**
+   * Stops every run of the ticket and waits (bounded) for the processes to leave. A run that survives the bound is kept
+   * `running` with `stopUnconfirmed`, so the ticket keeps its write slot until the process is really gone.
+   */
+  async stopAll(ticketId: string, reason: string): Promise<AgentStopAllResult> {
     const active = [...this.active.values()].filter(entry => entry.run.ticketId === ticketId)
-    for (const entry of active) { entry.stopReason = reason; this.abort(entry) }
-    if (active.length) await until(Promise.allSettled(active.map(entry => entry.finished)), undefined, this.stopMs)
-    // A process that did not exit within the bound is still gone from this process's ownership: record it as stopped, so
-    // nothing claims it runs while the ticket's write slot is released.
+    const stopRequestedAt = now()
     for (const entry of active) {
-      const current = this.host.store.get(KV.executor.agentRun(entry.run.ticketId, entry.run.id))
-      if (current?.status === 'running') this.write({ ...current, status: 'stopped', endedAt: now(), error: `Stopped: ${reason}` })
+      entry.stopReason = reason
+      this.write({ ...(this.host.store.get(KV.executor.agentRun(ticketId, entry.run.id)) ?? entry.run), stopRequestedAt })
+      this.abort(entry)
     }
+    if (active.length) await until(Promise.allSettled(active.map(entry => entry.finished)), undefined, this.stopMs)
+    const runs: AgentRun[] = []
+    let confirmed = true
+    for (const entry of active) {
+      const current = this.host.store.get(KV.executor.agentRun(ticketId, entry.run.id)) ?? entry.run
+      if (current.status === 'running') {
+        confirmed = false
+        runs.push(this.write({ ...current, stopRequestedAt, stopUnconfirmed: true }))
+      } else runs.push(current)
+    }
+    return { confirmed, runs }
   }
   /** Stops every run of every ticket; used when the host stops. */
   async shutdown(reason: string): Promise<void> {
@@ -418,6 +568,11 @@ export class AgentRuns implements AgentDelegation {
       if (refusal) throw new Error(refusal)
     }
     if (this.host.lifetime.aborted) throw new Error('dsh-superagent is stopping; the agent run was not started.')
+    const probe = this.probes.find(entry => entry.kind === request.agent)
+    if (probe && !probe.available) {
+      // An unavailable agent is refused for reading too: §4.3 says a host that cannot constrain it reports that, not runs it.
+      throw new Error(`${probe.detail ?? `The ${request.agent} agent is not available on this host.`}${probe.repair ? ` ${probe.repair}` : ''}`)
+    }
     const sessionId = randomUUID()
     const startedAt = now()
     const run: AgentRun = { id, ticketId: stored.id, assignmentId: assignment.id, agent: request.agent, permission: request.permission,
@@ -427,19 +582,26 @@ export class AgentRuns implements AgentDelegation {
     const controller = new AbortController()
     const argv = agentCommand({ agent: request.agent, permission: request.permission, directory, prompt,
       ...resumeExternalId ? { resume: resumeExternalId } : { sessionId } }, this.binaries[request.agent])
+    // Every run gets its own private home and temp directory: the CLI writes its state there, and a run cannot read the
+    // host user's credentials through `$HOME` or leave state another run inherits.
+    const home = mkdtempSync(join(tmpdir(), 'dsh-agent-home-'))
+    try { chmodSync(home, 0o700) } catch { /* The host's temp root is already private on most systems. */ }
     let handle: SubprocessHandle
     try {
-      // Only the proxy variables are passed explicitly: the service's base environment already carries PATH and HOME, and it
-      // is scrubbed of the host's credential-shaped variables, which a spread of `process.env` would put back.
-      handle = this.host.subprocess.spawn({ argv, cwd: directory, graceMs: 2000, signal: controller.signal, env: this.env,
+      // Only the allowlisted variables, the proxy variables and the private home are passed explicitly: the service's base
+      // environment already carries PATH, and it is scrubbed of credential-shaped variables, which a spread of `process.env`
+      // would put back. The denied names are mapped to `undefined`, which the spawn drops.
+      handle = this.host.subprocess.spawn({ argv, cwd: directory, graceMs: 2000, signal: controller.signal,
+        env: agentProcessEnvironment(home, this.env),
         stdio: { stdin: 'ignore', stdout: { maxBytes: MAX_OUTPUT_BYTES }, stderr: { maxBytes: MAX_OUTPUT_BYTES } } })
     } catch (error) {
+      rmSync(home, { recursive: true, force: true })
       const text = String(error)
       return this.write({ ...run, status: 'failed', endedAt: now(), error: text, errorKind: agentErrorKind(text) })
     }
     let finish = (): void => {}
     const finished = new Promise<void>(resolve => { finish = resolve })
-    const active: ActiveRun = { run, controller, handle, finished }
+    const active: ActiveRun = { run, controller, handle, finished, home }
     this.active.set(id, active)
     const timer = setTimeout(() => { active.timedOut = true; this.abort(active) }, this.runMs)
     void handle.done.then(exit => this.settle(active, exit.exitCode, finish, timer), error => this.settle(active, null, finish, timer, error))
@@ -455,6 +617,9 @@ export class AgentRuns implements AgentDelegation {
       const stderr = handle.collected.stderr?.readFrom(0).text ?? ''
       const parsed = run.agent === 'claude' ? parseClaude(stdout) : parseCodex(stdout)
       const changes = await captureChanges(this.host.subprocess, run.directory, this.host.lifetime)
+      // A write run's real paths are compared with the ticket's scope: a path outside it is recorded for a person to approve
+      // before delivery, and the run's own result is kept as it is.
+      const overrun = run.permission === 'write' ? this.overrun(run, changes) : []
       const externalId = parsed.externalId ?? run.externalId
       let status: AgentRunStatus = 'done', error: string | undefined, errorKind: AgentFailure | undefined
       if (active.timedOut) {
@@ -469,18 +634,36 @@ export class AgentRuns implements AgentDelegation {
         status = 'failed'; error = capped((stderr || stdout).trim(), ERROR_TEXT_CHARS) || `The agent exited with code ${String(exitCode)}`
         errorKind = agentErrorKind(error)
       }
-      const settled: AgentRun = { ...run, status, endedAt: now(), exitCode, changes,
+      // A stop that is still unconfirmed leaves its mark on the record if it raced this exit; the exit settles the run.
+      const current = this.host.store.get(KV.executor.agentRun(run.ticketId, run.id))
+      const base: AgentRun = { ...(current?.status === 'running' ? current : run) }
+      delete base.stopUnconfirmed
+      const settled: AgentRun = { ...base, status, endedAt: now(), exitCode, changes,
         ...externalId ? { externalId } : {}, ...parsed.text ? { result: { text: parsed.text, ...parsed.costUsd !== undefined ? { costUsd: parsed.costUsd } : {},
           ...parsed.usage ? { usage: parsed.usage } : {} } } : {}, ...error ? { error } : {}, ...errorKind ? { errorKind } : {} }
       this.write(settled)
       if (this.host.running(run.ticketId, run.assignmentId)) {
-        try { await this.host.deliver(run.ticketId, run.assignmentId, `agent:${run.id}`, agentNote(settled)) }
+        try { await this.host.deliver(run.ticketId, run.assignmentId, `agent:${run.id}`, agentNote(settled, overrun)) }
         catch { /* A worker Session that cannot take the note is gone or stopping; the record carries the result. */ }
       }
     } finally {
+      rmSync(active.home, { recursive: true, force: true })
       this.active.delete(run.id)
       finish()
     }
+  }
+  /**
+   * The paths this write run changed that the ticket's scope does not cover. An absent or empty scope means the whole
+   * repository, so it never overruns. A non-empty result is stored in `KV.executor.overrun` for delivery to check and a
+   * person to approve; the run itself is not aborted and its result is kept.
+   */
+  private overrun(run: AgentRun, changes: AgentChanges): string[] {
+    const scope = this.host.store.tickets.get(run.ticketId)?.scope
+    if (!scope?.length) return []
+    const outside = changedPaths(changes.status)
+      .filter(path => !scope.some(entry => covers(normalizeScopePath(entry), normalizeScopePath(path))))
+    if (outside.length) this.host.store.set(KV.executor.overrun(run.ticketId), { runId: run.id, paths: outside, at: now() })
+    return outside
   }
   /** Aborts a run's process; the settle handler records it as stopped or timed out. */
   private abort(active: ActiveRun): void {

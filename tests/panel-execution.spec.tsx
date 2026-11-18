@@ -226,7 +226,7 @@ it('sends one stop for a double click on Confirm', async () => {
 it('shows the Ticket\'s delivery facts as separate labels, linking an open pull request', async () => {
   const t1 = server.ticketDetails.t1!
   server.ticketDetails.t1 = { ...t1, delivery: { code: 'ready', pull: 'open', pullNumber: 42,
-    pullUrl: 'https://github.com/acme/widgets/pull/42', channel: 'waiting', waiting: 1 } }
+    pullUrl: 'https://github.com/acme/widgets/pull/42', channel: 'waiting', waiting: 1, channels: [{ source: 'feishu', pending: 1, sent: 0, dropped: 0 }] } }
   await mount()
   await click(all('.dt-open').find(button => button.textContent === '修复回归')!)
   expect(all('.dt-status-line .dt-lv').slice(0, 3).map(item => item.textContent)).toEqual([`${zh.ticketCodeLabel} ${zh.ticketCodeReady}`,

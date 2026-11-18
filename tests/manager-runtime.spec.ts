@@ -40,7 +40,8 @@ const fakeInstance = async (): Promise<Fake> => {
   fake.handler = async (req, res) => {
     if (req.headers.authorization !== `Bearer ${fake.token}`) { response(res, { error: 'auth' }, 403); return }
     const url = req.url ?? ''
-    if (url.endsWith('/health')) { response(res, { repositoryId: fake.id, pid: process.pid, configured: true }); return }
+    if (url.endsWith('/health')) { response(res, { repositoryId: fake.id, pid: process.pid, configured: true,
+      agent: [{ kind: 'codex', available: true, detail: 'codex was found' }] }); return }
     if (url.endsWith('/settings')) { response(res, { blocks: { policy: { revision: 1, value: { sources: { github: { allowed: [] }, feishu: { allowed: [] } } } } },
       sources: [{ id: 'feishu', revision: 1, value: { enabled: true, config: { cli: 'bot', chats: [] } } }] }); return }
     if (url.includes('/settings/')) { response(res, { saved: true }); return }
@@ -200,8 +201,8 @@ it('reports every readiness dimension with a repair entry and the delivery backl
   const ready = (await view()).repositories[0]!
   expect(ready.readiness.instance!.state).toBe('ok')
   expect(ready.readiness.repository!.state).toBe('ok')
-  // The instance does not report an execution-agent verdict yet, so readiness says so instead of guessing.
-  expect(ready.readiness.agent).toMatchObject({ state: 'unknown', repair: 'agent' })
+  // The agent dimension comes from the instance's real probe, not from a guess.
+  expect(ready.readiness.agent).toMatchObject({ state: 'ok' })
   expect(ready.readiness.feishu!.state).toBe('ok')
   expect(ready.readiness.delivery!.state).toBe('ok')
   fake.failing.add('om_1'); manager.store.route(feishu('1', 'request'))

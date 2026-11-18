@@ -343,6 +343,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/tools/tool.ts` | The `Tool` type, `readTool`, the `orchestrator_read` of both roles, and `AcknowledgementSchema` |
 | `src/app/tools/main.ts` | The main Session's tools |
 | `src/app/tools/executor.ts` | An Executor Session's tools |
+| `src/app/tools/delivery.ts` | The Worker's delivery tool: record the plan, verify the remote head before pushing, open or reuse the pull request, and recover an unknown result by querying the repository |
 | `src/app/http.ts` | The `/orchestrator/api` routes: the same-origin check, request limits and one status per kind of failure |
 | `src/app/api.ts` | `Api`, every route with its parameters, query, body and response, and the filters of the lists; it imports only types, so the panel bundles it |
 | `src/app/views/text.ts` | The two forms of a view's text: `preview`, plain text on one line, and `markdown` without HTML; `plain` and `readable` |
@@ -424,6 +425,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/feishu-read.spec.ts`, `tests/github-read.spec.ts` | Feishu and GitHub reads |
 | `tests/admission-context.spec.ts`, `tests/feishu-image.spec.ts` | The Thread window of assessments, and Feishu image reads |
 | `tests/assessment.spec.ts` | What the MasterAssessor keeps per Eval, and when it lets go |
+| `tests/delivery-tool.spec.ts` | The delivery tool: recorded plans, a moved remote head refusing the push, no second pull request for the same branch, recovery after an unknown result, and the scope overrun blocking delivery |
 | `tests/agents.spec.ts` | Delegating to the local agent CLIs: commands and permissions, the proxy, duplicate submission, results and the real workspace difference, delivery only to the current Assignment, stop and reconciliation, and the write slot ordered after the stop |
 | `tests/background.spec.ts` | Waiting for a worker's shell jobs and subagents: an end that woke it, and a host that stops |
 | `tests/bundle-patch.spec.ts` | The bundle's patch, read as DeepSeek Harness reads it, and the agent preset of Executor Sessions it defines |

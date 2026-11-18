@@ -23,9 +23,17 @@ import { WorktreeNameSchema } from '../app/assessment.ts'
 import { resultRelay } from '../app/notices.ts'
 import type { HealthEntry } from '../infra/health.ts'
 import { cancelled, collectJob, killJobs, runningJobs, stopBackground, stopSubagents, until, untilQuiet } from './background.ts'
-import { AgentRuns, type AgentDelegation } from './agents.ts'
+import { AgentRuns, type AgentDelegation, type AgentRun } from './agents.ts'
 
 const now = (): string => new Date().toISOString()
+/** What stopping a ticket's delegated agents reports: whether every agent process exited, and the ticket's runs. */
+export interface StopSettlement { confirmed: boolean; runs: AgentRun[] }
+/**
+ * Read the settlement `AgentDelegation.stopAll` reports; a delegation that reports nothing (one that resolves only after its
+ * processes exited) counts as confirmed.
+ */
+const settlementOf = (result: unknown): StopSettlement =>
+  result !== null && typeof result === 'object' && 'confirmed' in result ? result as StopSettlement : { confirmed: true, runs: [] }
 /** Returns the worker session ID (`worker-<ticketId>`) for a ticket. */
 export const workerSessionId = (ticketId: string): string => `worker-${ticketId}`
 /** Returns the ticket ID for a worker session ID (`worker-<ticketId>`), or undefined for non-worker sessions. */
@@ -511,21 +519,55 @@ export class DshExecutor implements Executor {
     this.host.store.afterCommit(() => {
       this.settling.get(ticket.id)?.abort()
       if (!ownTurn) this.host.context.agents.get(sessionId as SessionId)?.cancel({ kind: 'user' }, { keepInbox: false })
-      // Its shell jobs and subagents stop with it, also those of a worker that ends its own turn.
       this.stopWork(ticket.id, reason)
       this.left.get(ticket.id)?.collect.abort(); this.left.delete(ticket.id); this.personal.delete(ticket.id)
-      // Its write occupancy is released only after its background work stopped, so a queued overlapping ticket starts writing
-      // once nothing of this one still does; a ticket that wrote in the checkout is released the same way.
-      void this.background(this.stopped(ticket.id).catch(() => {}).then(() => { this.releaseScope(ticket.id) }))
     })
   }
   /**
    * Stop what a ticket's worker runs in the background (see `stopBackground`) and settle its delegations: the write slot is
-   * released only after the agent processes exited (先收束再释放).
+   * released only after the agent processes confirmed their exit (先收束再释放); an unconfirmed stop keeps it claimed as
+   * `stopping`, with the reason, so no overlapping ticket writes beside a process that may still write.
    */
   private stopWork(ticketId: string, reason: string, keepInbox = false): void {
-    this.track(ticketId, Promise.all([stopBackground(this.host.context, workerSessionId(ticketId), reason, keepInbox),
-      this.agentRuns.stopAll(ticketId, reason)]).then(() => {}))
+    const background = stopBackground(this.host.context, workerSessionId(ticketId), reason, keepInbox)
+    const settle = Promise.resolve().then(() => this.agentRuns.stopAll(ticketId, reason)).then(
+      result => { this.settleScope(ticketId, reason, settlementOf(result)) },
+      (error: unknown) => { this.settleScope(ticketId, reason, { confirmed: false, runs: [] }, String(error)) })
+    this.track(ticketId, Promise.all([background, settle]).then(() => {}))
+  }
+  /**
+   * Release the ticket's write occupancy when its agent processes exited, or keep it and record `stopping` when they did not
+   * (or their stop failed): the slot then stays claimed for a later retry, and the task page reads the reason from
+   * `KV.executor.scope`.
+   */
+  private settleScope(ticketId: string, reason: string, result: StopSettlement, failure?: string): void {
+    if (result.confirmed && !failure) { this.releaseScope(ticketId); return }
+    const ticket = this.host.store.tickets.get(ticketId)
+    const recorded = this.host.store.get(KV.executor.scope(ticketId))
+    const scope = normalizeScope(ticket?.scope ?? recorded?.scope)
+    const repository = ticket ? this.repositoryOf(ticket) : ''
+    // Keep the occupancy in memory too: a launch after a restart finds the in-memory queue empty, and the ticket must still
+    // hold its scope until the retried stop confirms.
+    if (ticket && repository) this.scope.claim({ ticketId, title: ticket.title, repositoryId: repository, scope })
+    if (recorded?.state === 'stopping' && !result.runs.length && !failure) return
+    const running = result.runs.filter(run => run.status === 'running').map(run => run.id)
+    const detail = failure ? `Stopping the delegated agents failed: ${failure}. Their processes may still write, so the write scope stays claimed.`
+      : running.length ? `The delegated agent processes ${running.join(', ')} did not exit within the stop limit after "${reason}". The write scope stays claimed until a retry confirms their exit.`
+        : `The delegated agent processes did not confirm their exit after "${reason}". The write scope stays claimed until a retry confirms it.`
+    this.host.store.set(KV.executor.scope(ticketId), { state: 'stopping', scope, blockers: recorded?.blockers ?? [], at: now(), detail })
+  }
+  /**
+   * Re-register a ticket's write occupancy after its scope grew (a person approved an overrun), so tickets that start later
+   * wait for the paths it may now write; a ticket that holds no occupancy is left alone.
+   */
+  refreshScope(ticketId: string): void {
+    const ticket = this.host.store.tickets.get(ticketId)
+    const repository = ticket ? this.repositoryOf(ticket) : ''
+    if (!ticket || !repository || !this.scope.held(ticketId)) return
+    const scope = normalizeScope(ticket.scope)
+    this.scope.claim({ ticketId, title: ticket.title, repositoryId: repository, scope })
+    const recorded = this.host.store.get(KV.executor.scope(ticketId))
+    if (recorded) this.host.store.set(KV.executor.scope(ticketId), { ...recorded, scope, at: now() })
   }
   /** A stop of a ticket's background work, which a launch or a delivery of the ticket waits for while it runs. */
   private track(ticketId: string, stop: Promise<void>): void {
@@ -693,9 +735,32 @@ export class DshExecutor implements Executor {
    * while failed launches (`waitsForPerson`) wait for a person's message or a retry.
    */
   resume(): void {
+    const tickets = this.host.store.tickets.list()
+    // A stop whose agent processes did not confirm their exit keeps its write slot claimed across a restart, also for a ticket
+    // a person ended meanwhile: its occupancy is registered again, and its settlement retried, before any work starts.
+    const stopping = new Set(tickets.filter(ticket => this.host.store.get(KV.executor.scope(ticket.id))?.state === 'stopping')
+      .map(ticket => ticket.id))
+    for (const id of stopping) {
+      const ticket = this.host.store.tickets.get(id)
+      const repository = ticket ? this.repositoryOf(ticket) : ''
+      if (!ticket || !repository) continue
+      this.scope.claim({ ticketId: id, title: ticket.title, repositoryId: repository, scope: normalizeScope(ticket.scope) })
+      this.stopWork(id, 'dsh-superagent restarted', true)
+    }
     // Launch pending tickets oldest first (in acceptance order).
-    for (const ticket of this.host.store.tickets.open().sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
+    for (const ticket of tickets.filter(liveTicket).sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
       const running = runningAssignment(ticket), latest = latestAssignment(ticket)
+      if (stopping.has(ticket.id)) {
+        // Its stop was retried above: a running assignment is reported interrupted, and pending work starts only once the
+        // retried settlement released the slot, so no ticket writes beside a process that may still write.
+        if (running) this.host.engine.assignmentInterrupted(ticket.id, running.id)
+        else if (latest?.state === 'pending' && !waitsForPerson(ticket)) {
+          void this.background(this.stopped(ticket.id).then(() => {
+            if (!this.host.store.get(KV.executor.scope(ticket.id))) this.start(ticket, latest)
+          }).catch(() => {}))
+        }
+        continue
+      }
       if (running) {
         // A restart within this process left DSH's Sessions, jobs and subagents running: they stop first. The inbox keeps an
         // Input that was handed over but not yet taken.

@@ -80,5 +80,9 @@ export class ScopeQueue {
   }
 }
 
-/** Durable scope state of a ticket's worker, so the task page shows what it waits for after a restart. */
-export interface ScopeStatus { state: 'writing' | 'waiting'; scope: string[]; blockers: ScopeBlock[]; at: string }
+/**
+ * Durable scope state of a ticket's worker, so the task page shows what it waits for after a restart. `stopping` keeps the
+ * occupancy of a ticket whose delegated agent processes did not confirm their exit, with `detail` naming the reason, so its
+ * write slot stays claimed until a retry confirms that nothing writes any more.
+ */
+export interface ScopeStatus { state: 'writing' | 'waiting' | 'stopping'; scope: string[]; blockers: ScopeBlock[]; at: string; detail?: string }

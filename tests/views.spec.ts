@@ -334,7 +334,9 @@ it('shows an open pull request and a waiting original-Channel receipt as separat
   store.receipts.add({ id: 'r-github', channel: githubChannel(42), text: 'pushed', kind: 'reply', ticketId: 't1' })
   store.receipts.add({ id: 'r-feishu', channel: feishuChannel('oc_1', 'om_root'), text: 'done', kind: 'reply', ticketId: 't1' })
   expect(ticketDetail(host, 't1')!.delivery).toEqual({ code: 'ready', pull: 'open', pullNumber: 42,
-    pullUrl: 'https://github.com/acme/widgets/pull/42', channel: 'waiting', waiting: 1 })
+    pullUrl: 'https://github.com/acme/widgets/pull/42', channel: 'waiting', waiting: 1,
+    pr: { number: 42, state: 'open', url: 'https://github.com/acme/widgets/pull/42' },
+    channels: [{ source: 'github', pending: 1, sent: 0, dropped: 0 }, { source: 'feishu', pending: 1, sent: 0, dropped: 0 }] })
 })
 
 it('shows a merged pull request and a delivered original-Channel receipt as separate delivery facts', () => {
@@ -347,13 +349,15 @@ it('shows a merged pull request and a delivered original-Channel receipt as sepa
   const receipt = { id: 'r1', channel: feishuChannel('oc_1', 'om_root'), text: 'done', kind: 'reply' as const, ticketId: 't1' }
   store.receipts.add(receipt)
   store.receipts.settle(receipt, 'sent')
-  expect(ticketDetail(host, 't1')!.delivery).toEqual({ code: 'ready', pull: 'merged', pullNumber: 42, channel: 'sent', waiting: 0 })
+  expect(ticketDetail(host, 't1')!.delivery).toEqual({ code: 'ready', pull: 'merged', pullNumber: 42, channel: 'sent', waiting: 0,
+    pr: { number: 42, state: 'merged' },
+    channels: [{ source: 'feishu', pending: 0, sent: 1, dropped: 0 }] })
 })
 
 it('shows no delivery facts for a ticket with no pull request, no ready report and no receipt', () => {
   const host = views()
   live('t1')
-  expect(ticketDetail(host, 't1')!.delivery).toEqual({ code: 'none', pull: 'none', channel: 'none', waiting: 0 })
+  expect(ticketDetail(host, 't1')!.delivery).toEqual({ code: 'none', pull: 'none', channel: 'none', waiting: 0, channels: [] })
 })
 
 it('shows code ready from a worker report even without a pull request', () => {
@@ -362,7 +366,7 @@ it('shows code ready from a worker report even without a pull request', () => {
   const ticket = store.tickets.get('t1')!
   store.tickets.save({ ...ticket, assignments: [{ id: 'a1', state: 'running', createdAt: at,
     report: { state: 'ready', summary: 'Done', at } }] })
-  expect(ticketDetail(host, 't1')!.delivery).toEqual({ code: 'ready', pull: 'none', channel: 'none', waiting: 0 })
+  expect(ticketDetail(host, 't1')!.delivery).toEqual({ code: 'ready', pull: 'none', channel: 'none', waiting: 0, channels: [] })
 })
 
 it('adds the repository, the followed pull request and the newest run\'s agent to a ticket row', () => {
@@ -428,4 +432,20 @@ it('omits the worktree and keeps an empty run list for a ticket that never deleg
   const page = ticketDetail(host, 't1')!
   expect(page).not.toHaveProperty('worktree')
   expect(page.runs).toEqual([])
+})
+
+it('shows the recorded delivery plan, remote head and result beside the pull request, plus the checks of the latest report', () => {
+  const host = views()
+  live('t1')
+  const ticket = store.tickets.get('t1')!
+  const checks = [{ name: 'pnpm test', state: 'pass' as const, detail: '42 passed' }, { name: 'pnpm typecheck', state: 'unknown' as const }]
+  store.tickets.save({ ...ticket, assignments: [{ id: 'a1', state: 'running' as const, createdAt: at,
+    report: { state: 'ready' as const, summary: 'Done', at, checks } }] })
+  store.set(KV.executor.delivery('t1'), { action: 'pr', branch: 'agent/t1', base: 'main', expected: 'a'.repeat(40), at,
+    result: { at, outcome: 'applied', branchSha: 'b'.repeat(40), pr: 7, state: 'open' } })
+  const detail = ticketDetail(host, 't1')!
+  expect(detail.delivery).toMatchObject({ plan: { action: 'pr', branch: 'agent/t1', base: 'main', expected: 'a'.repeat(40) },
+    remoteHead: 'b'.repeat(40), pr: { number: 7, state: 'open' }, result: { outcome: 'applied', pr: 7 } })
+  expect(detail.checks).toEqual(checks)
+  expect(ticketSummary(store.tickets.get('t1')!)).toMatchObject({ checks })
 })

@@ -3,7 +3,9 @@ import { liveTicket, threadKey, ticketStage, type AcceptMode, type AdmissionCell
   type TicketStage } from '../../core/index.ts'
 import { agentRepairHint, agentRunsOf } from '../../executor/agents.ts'
 import { workerSessionId } from '../../executor/dsh.ts'
+import { KV, type DeliveryPlan } from '../../kv.ts'
 import type { Store } from '../store.ts'
+import { channelDelivery, type ChannelDeliveryFact } from '../outbox.ts'
 import { channelLink, decisionView, newestFirst, page, pullFacts, snapshot, threadSummary, ticketLine, type Snapshot,
   type ViewHost } from './records.ts'
 import { markdown, preview } from './text.ts'
@@ -54,7 +56,10 @@ export function executorLoad(store: Store, running: number): ExecutorLoad {
   const queued = (ticket: Ticket) => { const stage = ticketStage(ticket); return stage.stage === 'working' && stage.action === 'queued' }
   return { running, queued: store.tickets.open().filter(queued).length }
 }
-/** The separate delivery facts of a Ticket: code prepared, its pull request, and the message back to the original Channel. */
+/**
+ * The separate delivery facts of a Ticket: code prepared, the plan and what the host did with it, the pull request, and
+ * the message back to the original Channel. GitHub completion and a pending Channel message stay distinct facts.
+ */
 export interface DeliveryView {
   code: 'none' | 'ready'
   pull: 'none' | 'open' | 'merged' | 'closed'
@@ -62,6 +67,16 @@ export interface DeliveryView {
   pullUrl?: string
   channel: 'none' | 'waiting' | 'sent' | 'dropped'
   waiting: number
+  /** The host-recorded plan: branch, base, expected remote head, title/body and the previous result. */
+  plan?: DeliveryPlan
+  /** The remote head the host observed (the pushed sha, or the expected head before a push). */
+  remoteHead?: string
+  /** The pull request this delivery opened or reused. */
+  pr?: { number: number; state: string; url?: string }
+  /** The last host-executed delivery result; `unknown` means query with action=recover before retrying. */
+  result?: DeliveryPlan['result']
+  /** Per-source outbound state, so GitHub's completed delivery and a pending original-Channel message read separately. */
+  channels: ChannelDeliveryFact[]
 }
 export function ticketDetail(host: ViewHost, id: string) {
   const { store } = host
@@ -87,6 +102,10 @@ export function ticketDetail(host: ViewHost, id: string) {
   const channel: DeliveryView['channel'] = pending ? 'waiting'
     : receipts.some(receipt => receipt.status === 'sent') ? 'sent'
       : receipts.some(receipt => receipt.status === 'dropped') ? 'dropped' : 'none'
+  const plan = store.get(KV.executor.delivery(id))
+  const pr = pull ? { number: pull.number, state: pull.state, ...pull.url ? { url: pull.url } : {} }
+    : plan?.result?.pr !== undefined ? { number: plan.result.pr, state: plan.result.state ?? 'unknown' } : undefined
+  const remoteHead = plan?.result?.branchSha || plan?.expected
   const delivery: DeliveryView = {
     code: pull || ticket.assignments.some(assignment => assignment.report?.state === 'ready') ? 'ready' : 'none',
     pull: pull ? pull.state : 'none',
@@ -94,6 +113,11 @@ export function ticketDetail(host: ViewHost, id: string) {
     ...pull?.url ? { pullUrl: pull.url } : {},
     channel,
     waiting: pending,
+    ...plan ? { plan } : {},
+    ...remoteHead ? { remoteHead } : {},
+    ...pr ? { pr } : {},
+    ...plan?.result ? { result: plan.result } : {},
+    channels: channelDelivery(store.receipts, id),
   }
   const worktree = ticket.execution?.worktree
   // The stored run record's `endedAt`/`changes` are projected under the names the run detail shows; `hint` is derived

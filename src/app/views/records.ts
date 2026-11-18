@@ -120,15 +120,18 @@ function ticketNote(ticket: Ticket, stage: TicketStage): { text: string; error: 
 export function ticketSummary(ticket: Ticket) {
   const stage = ticketStage(ticket)
   const note = ticketNote(ticket, stage)
+  const report = latestReport(ticket)
   const state = liveTicket(ticket) ? 'open' as const : 'ended' as const
   return { id: ticket.id, title: ticket.title, state, ...stage, ...note ? { note } : {},
+    // The checks of the latest report, with the evidence the run detail shows for each pass, fail or unknown result.
+    ...report?.checks?.length ? { checks: report.checks } : {},
     actions: { retry: canRetry(ticket), stop: liveTicket(ticket) }, strength: ticket.mandate.strength, ended: ticket.ended,
     attention: ticket.attention && { ...ticket.attention, question: markdown(ticket.attention.question) },
       assignments: ticket.assignments.length, inputs: ticket.inputs.length, undelivered: ticket.undelivered.length,
     // Every started Assignment of a Ticket runs in its one shared worker Session.
     deliveryError: attribute(ticket.delivery?.error), sessionId: ticket.assignments.some(item => item.startedAt)
       ? workerSessionId(ticket.id) : '',
-    directory: attribute(ticket.execution?.directory), summary: latestReport(ticket)?.summary ?? '', createdAt: ticket.createdAt,
+    directory: attribute(ticket.execution?.directory), summary: report?.summary ?? '', createdAt: ticket.createdAt,
     updatedAt: ticket.updatedAt }
 }
 export type TicketSummaryView = ReturnType<typeof ticketSummary>

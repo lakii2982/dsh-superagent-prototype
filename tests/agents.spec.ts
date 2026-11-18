@@ -11,7 +11,8 @@ import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { runningAssignment, type Ticket } from '../src/core/index.ts'
 import { DshExecutor, type ExecutorHost } from '../src/executor/dsh.ts'
-import { AgentRuns, agentCommand, agentEnvironment, agentErrorKind, parseClaude, parseCodex, parseSystemProxy, type AgentRun, type AgentRunsHost } from '../src/executor/agents.ts'
+import { AgentRuns, agentCommand, agentEnvironment, agentErrorKind, parseClaude, parseCodex, parseSystemProxy, probeAgents,
+  type AgentDelegation, type AgentProbe, type AgentRun, type AgentRunsHost } from '../src/executor/agents.ts'
 import { KV } from '../src/kv.ts'
 import { executorTools, type ExecutorToolsHost } from '../src/app/tools/executor.ts'
 import type { Settings } from '../src/policy.ts'
@@ -49,6 +50,8 @@ const fixtureSubprocess = (onExit?: (code: number | null) => void) => {
           onExit?.(code)
           resolve({ exitCode: code, signal })
         })
+        // A spawn whose cwd a finished test already removed reports here instead of throwing into the run loop.
+        child.on('error', () => { resolve({ exitCode: null, signal: null }) })
       })
       return {
         done,
@@ -75,6 +78,9 @@ const memoryStore = (tickets: Ticket[], deleted: string[] = []) => {
 }
 
 interface Delivered { ticketId: string; assignmentId: string; requestId: string; text: string }
+/** What the fixture CLI observed from inside the child process: its argv, its cwd, and the environment boundary. */
+interface Invocation { agent: string; args: string[]; cwd: string; proxy: string | null; home: string | null; tmp: string | null
+  homeMode: number | null; ghToken: string | null; dshHome: string | null; feishu: string | null; sshSock: string | null; awsKey: string | null }
 interface World {
   dir: string
   tickets: Ticket[]
@@ -82,12 +88,12 @@ interface World {
   host: AgentRunsHost
   runs: AgentRuns
   delivered: Delivered[]
-  invocations: () => { agent: string; args: string[]; cwd: string; proxy: string | null }[]
+  invocations: () => Invocation[]
   exits: { argv: readonly string[]; code: number | null }[]
 }
 /** A runner over a fresh temporary workspace, with a host whose delivery, running and refusal checks the test controls. */
 const makeWorld = async (options: { running?: (ticketId: string, assignmentId: string) => boolean
-  writeRefusal?: () => string | undefined } = {}): Promise<World> => {
+  writeRefusal?: () => string | undefined; stopMs?: number; probe?: () => AgentProbe[] } = {}): Promise<World> => {
   const dir = await realpath(await mkdtemp(join(tmpdir(), 'dsh-agents-')))
   directories.push(dir)
   process.env.FAKE_AGENT_LOG = join(dir, 'invocations.ndjson')
@@ -103,11 +109,12 @@ const makeWorld = async (options: { running?: (ticketId: string, assignmentId: s
     ...options.writeRefusal ? { writeRefusal: options.writeRefusal } : {},
     deliver: async (ticketId, assignmentId, requestId, text) => { delivered.push({ ticketId, assignmentId, requestId, text }) },
   }
-  const runs = new AgentRuns(host, { binaries: BINARIES })
+  const runs = new AgentRuns(host, { binaries: BINARIES, ...options.stopMs === undefined ? {} : { stopMs: options.stopMs },
+    ...options.probe ? { probe: options.probe } : {} })
   const invocations = () => {
     try {
       return readFileSync(join(dir, 'invocations.ndjson'), 'utf8').trim().split('\n').filter(Boolean)
-        .map(line => JSON.parse(line) as { agent: string; args: string[]; cwd: string; proxy: string | null })
+        .map(line => JSON.parse(line) as Invocation)
     } catch {
       return []
     }
@@ -137,7 +144,9 @@ describe('agent commands', () => {
       .toEqual(['claude', '-p', 'inspect', '--output-format', 'json', '--permission-mode', 'plan', '--allowedTools', 'Read,Grep,Glob',
         '--session-id', 'session-1'])
     expect(agentCommand({ agent: 'claude', permission: 'write', directory: '/work', prompt: 'fix', sessionId: 'session-1' }))
-      .toEqual(['claude', '-p', 'fix', '--output-format', 'json', '--permission-mode', 'bypassPermissions', '--session-id', 'session-1'])
+      .toEqual(['claude', '-p', 'fix', '--output-format', 'json', '--permission-mode', 'acceptEdits', '--session-id', 'session-1'])
+    expect(agentCommand({ agent: 'claude', permission: 'write', directory: '/work', prompt: 'fix', sessionId: 'session-1' }))
+      .not.toContain('bypassPermissions')
     expect(agentCommand({ agent: 'claude', permission: 'read', directory: '/work', prompt: 'go on', resume: 'external-1' }))
       .toEqual(['claude', '-p', 'go on', '--output-format', 'json', '--permission-mode', 'plan', '--allowedTools', 'Read,Grep,Glob',
         '--resume', 'external-1'])
@@ -164,6 +173,26 @@ describe('agent commands', () => {
     expect(agentErrorKind(parseCodex(proxyError).error ?? '')).toBe('unavailable')
   })
 
+  it('probes each CLI for its binary and for a file-access boundary this host can hold', () => {
+    const missing = probeAgents({ binaries: { claude: ['no-such-cli'], codex: ['no-such-cli'] }, searchPath: '/nonexistent', exists: () => false })
+    expect(missing).toHaveLength(2)
+    expect(missing.every(entry => !entry.available)).toBe(true)
+    expect(missing[0]).toMatchObject({ kind: 'claude', available: false })
+    expect(missing[0]!.detail).toContain('not on PATH')
+    expect(missing[0]!.repair).toContain('Install')
+
+    const unconstrained = probeAgents({ binaries: { claude: ['sh'], codex: ['sh'] }, platform: 'freebsd', searchPath: '/bin', exists: () => true })
+    expect(unconstrained[0]).toMatchObject({ available: false })
+    expect(unconstrained[0]!.detail).toContain('cannot constrain')
+    expect(unconstrained[0]!.repair).toBeTruthy()
+
+    // Linux without bwrap cannot hold the boundary either, even with the CLI installed.
+    const linux = probeAgents({ binaries: { claude: ['sh'] }, platform: 'linux', searchPath: '/bin', exists: path => path === '/bin/sh' })
+    expect(linux[0]!.detail).toContain('cannot constrain')
+
+    const ready = probeAgents({ binaries: { claude: ['sh'], codex: ['sh'] }, platform: 'darwin', searchPath: '/bin', exists: () => true })
+    expect(ready[0]).toMatchObject({ kind: 'claude', available: true })
+  })
   it('gives agent processes the explicit, host, or macOS system proxy in that order', () => {
     expect(agentEnvironment({}, { HTTPS_PROXY: 'http://host:1' }, () => ({ HTTPS_PROXY: 'http://system:2' })))
       .toEqual({ HTTPS_PROXY: 'http://host:1' })
@@ -263,17 +292,136 @@ describe('agent runs', () => {
     expect(world.delivered).toHaveLength(0)
   })
 
-  it('stops a run, marks it stopped, and returns only after the process exited', async () => {
+  it('stops a run, marks it stopped, and reports the stop as confirmed only after the process exited', async () => {
     process.env.FAKE_AGENT_MODE = 'sleep'
     const world = await makeWorld()
     const ticket = world.tickets[0]!
     const run = world.runs.start(ticket, { agent: 'claude', prompt: 'hold on', permission: 'read' })
     await vi.waitFor(() => expect(world.invocations()).toHaveLength(1))
-    await world.runs.stopAll(ticket.id, 'ticket ended')
+    const result = await world.runs.stopAll(ticket.id, 'ticket ended')
+    expect(result.confirmed).toBe(true)
+    expect(result.runs.map(entry => entry.status)).toEqual(['stopped'])
     expect(world.exits.filter(entry => entry.argv.includes(FIXTURE))).toHaveLength(1)
     const stopped = world.runs.status(ticket.id, run.id)
     expect(stopped).toMatchObject({ status: 'stopped' })
     expect((stopped as AgentRun).error).toContain('ticket ended')
+  })
+
+  it('confirms a single stop with the run record it settled', async () => {
+    process.env.FAKE_AGENT_MODE = 'sleep'
+    const world = await makeWorld()
+    const ticket = world.tickets[0]!
+    const run = world.runs.start(ticket, { agent: 'claude', prompt: 'hold on', permission: 'read' })
+    await vi.waitFor(() => expect(world.invocations()).toHaveLength(1))
+    const { run: stopped, confirmed } = await world.runs.stop(ticket.id, run.id, 'stop now')
+    expect(confirmed).toBe(true)
+    expect(stopped).toMatchObject({ id: run.id, status: 'stopped', error: 'Stopped: stop now' })
+    expect(stopped.stopRequestedAt).toBeTruthy()
+    expect(stopped.stopUnconfirmed).toBeUndefined()
+  })
+
+  it('keeps a process that ignores the stop running, and settles it as stopped only when it is really gone', async () => {
+    process.env.FAKE_AGENT_MODE = 'stubborn'
+    process.env.FAKE_AGENT_EXIT_MS = '800'
+    const world = await makeWorld({ stopMs: 100 })
+    const ticket = world.tickets[0]!
+    const run = world.runs.start(ticket, { agent: 'claude', prompt: 'hold on', permission: 'read' })
+    await vi.waitFor(() => expect(world.invocations()).toHaveLength(1))
+    const { run: still, confirmed } = await world.runs.stop(ticket.id, run.id, 'stop now')
+    // The process survived the bound: the run is still running, so its write slot is not released.
+    expect(confirmed).toBe(false)
+    expect(still).toMatchObject({ status: 'running', stopUnconfirmed: true })
+    expect(still.stopRequestedAt).toBeTruthy()
+    const done = await settled(world.runs, ticket.id, run.id, 5000)
+    expect(done).toMatchObject({ status: 'stopped' })
+    expect(done.stopUnconfirmed).toBeUndefined()
+    expect(done.error).toContain('stop now')
+  })
+
+  it('reports stopAll as unconfirmed instead of recording a stop the process did not make', async () => {
+    process.env.FAKE_AGENT_MODE = 'stubborn'
+    process.env.FAKE_AGENT_EXIT_MS = '800'
+    const world = await makeWorld({ stopMs: 100 })
+    const ticket = world.tickets[0]!
+    const run = world.runs.start(ticket, { agent: 'claude', prompt: 'hold on', permission: 'read' })
+    await vi.waitFor(() => expect(world.invocations()).toHaveLength(1))
+    const result = await world.runs.stopAll(ticket.id, 'ticket ended')
+    expect(result.confirmed).toBe(false)
+    expect(result.runs).toHaveLength(1)
+    expect(result.runs[0]).toMatchObject({ id: run.id, status: 'running', stopUnconfirmed: true })
+    expect(world.runs.status(ticket.id, run.id)).toMatchObject({ status: 'running' })
+  })
+
+  it('refuses an agent the host cannot run, for reading as well as writing', async () => {
+    const world = await makeWorld({ probe: () => [{ kind: 'claude', available: false, detail: 'This host cannot constrain claude.',
+      repair: 'Install sandbox-exec.' }] })
+    const ticket = world.tickets[0]!
+    expect(() => world.runs.start(ticket, { agent: 'claude', prompt: 'inspect', permission: 'read' }))
+      .toThrow('This host cannot constrain claude. Install sandbox-exec.')
+    expect(world.invocations()).toHaveLength(0)
+    // A codex run is not in this probe at all, so this runner does not block it.
+    const run = world.runs.start(ticket, { agent: 'codex', prompt: 'inspect', permission: 'read' })
+    expect(run.agent).toBe('codex')
+    await world.runs.stopAll(ticket.id, 'test over')
+  })
+
+  it('gives the agent a private 0700 home and none of the host credentials', async () => {
+    const saved = { GH_TOKEN: process.env.GH_TOKEN, DSH_HOME: process.env.DSH_HOME, FEISHU_APP_ID: process.env.FEISHU_APP_ID,
+      SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK, AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID }
+    process.env.GH_TOKEN = 'ghp_secret'; process.env.DSH_HOME = '/host/dsh-home'; process.env.FEISHU_APP_ID = 'cli_secret'
+    process.env.SSH_AUTH_SOCK = '/tmp/ssh.sock'; process.env.AWS_ACCESS_KEY_ID = 'AKIA_SECRET'
+    try {
+      const world = await makeWorld()
+      const ticket = world.tickets[0]!
+      const run = world.runs.start(ticket, { agent: 'claude', prompt: 'inspect', permission: 'read' })
+      await settled(world.runs, ticket.id, run.id)
+      const call = world.invocations()[0]!
+      expect(call.home).not.toBe(process.env.HOME)
+      expect(call.home).toContain('dsh-agent-home-')
+      expect(call.tmp).toBe(call.home)
+      expect(call.homeMode).toBe(0o700)
+      expect(call.ghToken).toBeNull()
+      expect(call.dshHome).toBeNull()
+      expect(call.feishu).toBeNull()
+      expect(call.sshSock).toBeNull()
+      expect(call.awsKey).toBeNull()
+    } finally {
+      for (const [name, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[name]
+        else process.env[name] = value
+      }
+    }
+  })
+
+  it('records a write run\'s paths outside the ticket scope for approval, and none when the scope covers them', async () => {
+    process.env.FAKE_AGENT_MODE = 'ok'
+    process.env.FAKE_AGENT_WRITE_FILE = 'outside.txt'
+    const world = await makeWorld()
+    await runFile('git', ['init'], { cwd: world.dir, env: gitEnv() })
+    const ticket = world.tickets[0]!
+    ticket.scope = ['src']
+    const run = world.runs.start(ticket, { agent: 'claude', prompt: 'write it', permission: 'write' })
+    const done = await settled(world.runs, ticket.id, run.id)
+    expect(done.status).toBe('done')
+    // The fixture's own invocation log is untracked in the workspace too; the assertion is that the out-of-scope path is listed.
+    expect(world.values.get(KV.executor.overrun(ticket.id))).toMatchObject({ runId: run.id, paths: expect.arrayContaining(['outside.txt']) })
+    expect(world.delivered.at(-1)!.text).toContain('outside this ticket\'s scope')
+    expect(world.delivered.at(-1)!.text).toContain('- outside.txt')
+
+    // Clear the first run's file, so only this run's own writes are judged.
+    await unlink(join(world.dir, 'outside.txt'))
+    process.env.FAKE_AGENT_WRITE_FILE = 'inside.txt'
+    ticket.scope = ['inside.txt', 'invocations.ndjson']
+    const covered = world.runs.start(ticket, { agent: 'claude', prompt: 'write inside', permission: 'write' })
+    await settled(world.runs, ticket.id, covered.id)
+    // A covered run neither creates nor clears an overrun another run still awaits approval for.
+    expect(world.values.get(KV.executor.overrun(ticket.id))).toMatchObject({ runId: run.id })
+
+    ticket.scope = undefined
+    process.env.FAKE_AGENT_WRITE_FILE = 'anywhere.txt'
+    const whole = world.runs.start(ticket, { agent: 'claude', prompt: 'write anywhere', permission: 'write' })
+    await settled(world.runs, ticket.id, whole.id)
+    expect(world.values.get(KV.executor.overrun(ticket.id))).toMatchObject({ runId: run.id })
   })
 
   it('refuses a write run while another ticket writes the repository and allows it once the slot is free', async () => {
@@ -386,6 +534,27 @@ describe('agent runs in the Executor', () => {
 })
 
 describe('orchestrator_agent', () => {
+  /** A stub delegation that records what the tool asked for, so the tool's own choices are testable without a process. */
+  const stubAgents = (calls: string[], probes?: AgentProbe[]): AgentDelegation => {
+    const base: AgentRun = { id: 'run-1', ticketId: 't1', assignmentId: 'a1', agent: 'codex', permission: 'read', prompt: 'x',
+      status: 'running', directory: '/work', startedAt: '2026-05-01T00:00:00.000Z' }
+    return {
+      start: (_ticket, request) => { calls.push(`start:${request.agent}`); return { ...base, agent: request.agent, prompt: request.prompt } },
+      resume: () => base,
+      status: () => base,
+      stop: async () => ({ run: { ...base, status: 'stopped' }, confirmed: true }),
+      stopAll: async () => ({ confirmed: true, runs: [] }),
+      ...probes ? { probe: () => probes } : {},
+    }
+  }
+  const toolOf = (agents: AgentDelegation, agent: string | undefined) => {
+    const settings = { executor: agent ? { agent } : {} } as unknown as Settings
+    const host = { agents, sendReplies: vi.fn(), engine: {}, store: { settings: () => settings }, sessions: {}, resources: {},
+      github: { deployment: { github: { login: 'alice' } } } }
+    return executorTools(host as unknown as ExecutorToolsHost, ticketOf('t1', 'a1', '/work'))
+      .find(candidate => candidate.name === 'orchestrator_agent')!
+  }
+
   it('reports the ticket runs through the worker tool', async () => {
     process.env.FAKE_AGENT_MODE = 'sleep'
     const world = await makeWorld()
@@ -396,8 +565,32 @@ describe('orchestrator_agent', () => {
     const run = await tool.execute({ action: 'run', agent: 'claude', prompt: 'hold on' }, new AbortController().signal) as { run: { run_id: string } }
     const listed = await tool.execute({ action: 'status' }, new AbortController().signal) as { runs: { run_id: string }[] }
     expect(listed.runs.map(entry => entry.run_id)).toContain(run.run.run_id)
-    const stopped = await tool.execute({ action: 'stop', run_id: run.run.run_id }, new AbortController().signal) as { run: { status: string } }
+    const stopped = await tool.execute({ action: 'stop', run_id: run.run.run_id }, new AbortController().signal) as { run: { status: string }; confirmed: boolean }
     expect(stopped.run.status).toBe('stopped')
+    expect(stopped.confirmed).toBe(true)
     await unlink(join(world.dir, 'invocations.ndjson')).catch(() => undefined)
+  })
+
+  it('runs the configured default agent when the caller names none', async () => {
+    const calls: string[] = []
+    const tool = toolOf(stubAgents(calls), 'codex')
+    const answer = await tool.execute({ action: 'run', prompt: 'go' }, new AbortController().signal) as { run: { agent: string } }
+    expect(calls).toEqual(['start:codex'])
+    expect(answer.run.agent).toBe('codex')
+  })
+
+  it('says where to configure a default agent when neither side chose one', async () => {
+    const tool = toolOf(stubAgents([]), undefined)
+    await expect(tool.execute({ action: 'run', prompt: 'go' }, new AbortController().signal))
+      .rejects.toThrow('set the default execution agent in Settings')
+  })
+
+  it('refuses an explicitly chosen agent the host cannot run, with the repair', async () => {
+    const calls: string[] = []
+    const tool = toolOf(stubAgents(calls, [{ kind: 'codex', available: true }, { kind: 'claude', available: false,
+      detail: 'This host cannot constrain claude.', repair: 'Install sandbox-exec.' }]), 'codex')
+    await expect(tool.execute({ action: 'run', agent: 'claude', prompt: 'go' }, new AbortController().signal))
+      .rejects.toThrow('This host cannot constrain claude. Install sandbox-exec.')
+    expect(calls).toEqual([])
   })
 })
