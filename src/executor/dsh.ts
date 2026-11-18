@@ -4,12 +4,15 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { mkdir, rmdir, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import { key, latestAssignment, latestReport, liveTicket, runningAssignment, threadKey, waitsForPerson } from '../core/index.ts'
-import type { AssessmentOutcome, Assignment, EngineForExecutor, Execution, Executor, Mandate, PolicyEffect, Ticket, TicketInput, Trigger }
+import { ScopeQueue, key, latestAssignment, latestReport, liveTicket, normalizeScope, runningAssignment, threadKey, waitsForPerson }
   from '../core/index.ts'
+import type { AssessmentOutcome, Assignment, EngineForExecutor, Execution, Executor, Mandate, PolicyEffect, ScopeBlock, ScopeStatus,
+  Ticket, TicketInput, Trigger } from '../core/index.ts'
 import type { Machine } from '../deployment.ts'
 import { verifyRepository } from '../infra/repository.ts'
 import { runAsWorker, verifyDirectory } from '../infra/environment.ts'
+import { WorktreeConflict, prepareWorktree, repositoryId, worktreeBranch, worktreePath, worktreeRemote, type WorktreePlan }
+  from '../infra/worktree.ts'
 import type { Settings } from '../policy.ts'
 import type { Store } from '../app/store.ts'
 import { KV } from '../kv.ts'
@@ -64,7 +67,7 @@ export interface ExecutorHost {
   /** Where the Executor reports what happened to Assignments and Inputs. */
   readonly engine: Pick<EngineForExecutor, 'assignmentStarted' | 'inputsDelivered' | 'inputsRead' | 'turnEnded' | 'deliveryFailed' | 'report'
     | 'assignmentInterrupted'>
-  readonly store: Pick<Store, 'tickets' | 'triggers' | 'get' | 'set' | 'settings' | 'atomic' | 'afterCommit'>
+  readonly store: Pick<Store, 'tickets' | 'triggers' | 'get' | 'set' | 'delete' | 'settings' | 'atomic' | 'afterCommit'>
   /** Durable effect queue through which launches and input deliveries run. */
   readonly effects: Pick<Effects, 'enqueue' | 'handle'>
   /** The `worker` health entry, which reports whether background worker event handling failed. */
@@ -109,9 +112,21 @@ export function ticketExecution(ticket: Ticket, outcome: Extract<AssessmentOutco
   const assignment = ticket.mandate.strength === 'inferred' && ruleIds
     ? `Proactively accepted under ${ruleIds.join(', ')}. Scope: ${outcome.scope}.${precedence}${note}`
     : note.trim()
-  return settings.executor.workspaceMode === 'current'
-    ? { name, directory: settings.executor.repositoryPath, assignment, workspaceMode: 'current', repository: String(settings.sources.github?.config.repository ?? '') }
-    : { name, directory: join(executionRoot(settings, stateDir), name), assignment }
+  const repository = String(settings.sources.github?.config.repository ?? '')
+  if (settings.executor.workspaceMode === 'current') {
+    return { name, directory: settings.executor.repositoryPath, assignment, workspaceMode: 'current', repository }
+  }
+  // A ticket of a repository we know runs in its own managed worktree; without one it keeps the isolated workspace, which the
+  // settings schema prevents worktree mode from being saved without.
+  if (settings.executor.workspaceMode === 'worktree' && repositoryId(repository)) {
+    const root = executionRoot(settings, stateDir)
+    const id = repositoryId(repository)
+    const path = worktreePath(root, id, name)
+    // `baseRef` and `baseSha` stay empty until preparation resolved them against the remote; see `ensureWorktree`.
+    return { name, directory: path, assignment, workspaceMode: 'worktree', repository,
+      worktree: { path, branch: worktreeBranch(name), baseRef: '', baseSha: '', repositoryId: id } }
+  }
+  return { name, directory: join(executionRoot(settings, stateDir), name), assignment }
 }
 /** Character limits for inline assignment and trigger text in worker messages; longer text is read via its resource. */
 const ASSIGNMENT_CHARS = 1500, TRIGGER_CHARS = 600
@@ -228,6 +243,8 @@ export class DshExecutor implements Executor {
   private readonly personal = new Map<string, string>()
   /** The timers of workers that go on after a passing failure, which dispose clears. */
   private readonly timers = new Set<ReturnType<typeof setTimeout>>()
+  /** Write occupancy of the tickets that write now, claimed before a worktree worker writes and released when it stops. */
+  private readonly scope = new ScopeQueue()
   /** Registers the `launch` and `delivery` effect handlers; both are held (concurrency limit 0) while processing is paused. */
   constructor(private readonly host: ExecutorHost) {
     this.slots = new WorkerSlots(() => this.runningWorkIds(),
@@ -254,7 +271,88 @@ export class DshExecutor implements Executor {
   }
   /** Populates a newly accepted ticket's `execution` attributes (worktree name, workspace directory, and assignment text). */
   prepare(ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>): Ticket {
-    return { ...ticket, execution: ticketExecution(ticket, outcome, this.host.store.settings(), this.host.machine.stateDir) }
+    const execution = ticketExecution(ticket, outcome, this.host.store.settings(), this.host.machine.stateDir)
+    // The preparation state is recorded before any scene exists, so a restart tells a ticket that never started preparing
+    // from one whose preparation was interrupted.
+    if (execution.workspaceMode === 'worktree') this.host.store.set(KV.executor.worktree(ticket.id), { state: 'pending', at: now() })
+    return { ...ticket, execution }
+  }
+  /** The repository identity `ticket` writes in: its worktree's, or the repository it was accepted from. */
+  private repositoryOf(ticket: Ticket): string {
+    return ticket.execution?.worktree?.repositoryId ?? repositoryId(String(ticket.execution?.repository ?? ''))
+  }
+  /**
+   * The tickets whose writes block `ticket` right now: worktree tickets of the same repository whose scope overlaps its own
+   * (an absent scope is the whole repository), and open checkout tickets of the same repository that a person has not taken
+   * over yet. A checkout ticket waiting for a person no longer writes, so it hands the repository over.
+   */
+  private blockersOf(ticket: Ticket): ScopeBlock[] {
+    const repository = this.repositoryOf(ticket)
+    if (!repository) return []
+    const scope = normalizeScope(ticket.scope)
+    const blockers = this.scope.blockers(ticket.id, repository, scope)
+    for (const other of this.host.store.tickets.open()) {
+      if (other.id === ticket.id || other.execution?.workspaceMode !== 'current' || waitsForPerson(other)) continue
+      if (this.repositoryOf(other) !== repository) continue
+      blockers.push({ ticketId: other.id, title: other.title, repositoryId: repository, scope: [], paths: [] })
+    }
+    return blockers
+  }
+  /** Read-only view for the task page: the tickets whose writes block `ticketId`, with the paths that overlap. */
+  scopeBlocks(ticketId: string): ScopeBlock[] {
+    const ticket = this.host.store.tickets.get(ticketId)
+    return ticket ? this.blockersOf(ticket) : []
+  }
+  /**
+   * Register the ticket's write occupancy before its worktree worker writes, or make it wait: overlapping work of the same
+   * repository queues with its blocking source recorded on the ticket (see `scopeBlocks`), while non-overlapping work runs
+   * beside it in its own worktree.
+   * @throws Later when another ticket's writes overlap, which re-queues the launch in the effect queue.
+   */
+  private claimScope(ticket: Ticket): void {
+    const repository = this.repositoryOf(ticket)
+    if (!repository) return
+    const scope = normalizeScope(ticket.scope)
+    const blockers = this.blockersOf(ticket)
+    const status: ScopeStatus = { state: blockers.length ? 'waiting' : 'writing', scope, blockers, at: now() }
+    this.host.store.set(KV.executor.scope(ticket.id), status)
+    if (blockers.length) {
+      throw new Later(`Waiting for the work of ${blockers.map(blocker => `${blocker.title} (${blocker.ticketId})`).join(', ')} to stop writing in ${repository}`)
+    }
+    this.scope.claim({ ticketId: ticket.id, title: ticket.title, repositoryId: repository, scope })
+  }
+  /** Release the ticket's write occupancy and its recorded state; safe for a ticket that holds none. */
+  private releaseScope(ticketId: string): void {
+    this.scope.release(ticketId)
+    this.host.store.delete(KV.executor.scope(ticketId))
+  }
+  /** The worktree plan of a ticket: its root is the directory two levels above the recorded worktree directory. */
+  private worktreePlan(ticket: Ticket): WorktreePlan {
+    const execution = ticket.execution!
+    return { repository: String(execution.repository ?? ''), remote: worktreeRemote(String(execution.repository ?? '')),
+      root: dirname(dirname(dirname(execution.directory))), name: execution.name }
+  }
+  /**
+   * Claim the ticket's write scope, then prepare or verify its managed worktree and record the verified scene on the ticket and
+   * in `KV.executor.worktree`, so a restart resumes the same scene instead of preparing again. A scene that does not match its
+   * record, or a directory or branch someone else created, is reported as a failed ticket and left exactly as it is.
+   */
+  private async ensureWorktree(ticket: Ticket): Promise<void> {
+    const recorded = ticket.execution?.worktree
+    if (!recorded) throw new Error(`Ticket ${ticket.id} has no worktree scene`)
+    this.claimScope(ticket)
+    this.host.store.set(KV.executor.worktree(ticket.id), { state: 'preparing', at: now(), scene: recorded.baseSha ? recorded : undefined })
+    let scene
+    try {
+      scene = await prepareWorktree(this.host.context.subprocess, this.host.lifetime, this.worktreePlan(ticket),
+        recorded.baseSha ? recorded : undefined)
+    } catch (error) {
+      this.host.store.set(KV.executor.worktree(ticket.id), { state: 'failed', error: String(error), at: now() })
+      throw error
+    }
+    const stored = this.host.store.tickets.get(ticket.id)
+    if (stored?.execution) this.host.store.tickets.save({ ...stored, execution: { ...stored.execution, directory: scene.path, worktree: scene } })
+    this.host.store.set(KV.executor.worktree(ticket.id), { state: 'ready', at: now(), scene })
   }
   /**
    * Runs the configured `executor.prepare` command for a new ticket workspace in its parent directory with the ticket's
@@ -389,6 +487,9 @@ export class DshExecutor implements Executor {
       // Its shell jobs and subagents stop with it, also those of a worker that ends its own turn.
       this.stopWork(ticket.id, reason)
       this.left.get(ticket.id)?.collect.abort(); this.left.delete(ticket.id); this.personal.delete(ticket.id)
+      // Its write occupancy is released only after its background work stopped, so a queued overlapping ticket starts writing
+      // once nothing of this one still does; a ticket that wrote in the checkout is released the same way.
+      void this.background(this.stopped(ticket.id).catch(() => {}).then(() => { this.releaseScope(ticket.id) }))
     })
   }
   /** Stop what a ticket's worker runs in the background (see `stopBackground`). */
@@ -435,6 +536,8 @@ export class DshExecutor implements Executor {
   private launchFailed(ticketId: string, assignmentId: string, error: unknown): void {
     const ticket = this.host.store.tickets.get(ticketId)
     if (!ticket || !liveTicket(ticket) || latestAssignment(ticket)?.id !== assignmentId) return
+    // Its launch stopped before the worker wrote anything, so its write occupancy goes to the tickets that waited for it.
+    this.releaseScope(ticketId)
     this.failed(ticketId, String(error))
   }
   /** Records a `failed` report on the ticket and relays the failure to the main Session in one transaction. */
@@ -453,15 +556,22 @@ export class DshExecutor implements Executor {
       return !!stored && liveTicket(stored) && latestAssignment(stored)?.id === assignment.id
     }
     const source = sourceTrigger(this.host, ticket)
-    const workspace = ticket.execution?.directory ?? ''
+    let workspace = ticket.execution?.directory ?? ''
     if (!current()) return
     if (ticket.execution?.workspaceMode === 'current') {
       await verifyRepository(workspace, ticket.execution.repository ?? '', this.host.context.subprocess, this.host.lifetime, this.host.store.get(KV.executor.preparation(ticket.id)) !== 'ready')
       await verifyDirectory(workspace, this.host.context.subprocess, this.host.lifetime)
       this.host.store.set(KV.executor.preparation(ticket.id), 'ready')
-    }
-    // Prepare the workspace directory once; an existing directory counts as already prepared, including worktrees created before `prepare` commands existed.
-    if (ticket.execution?.workspaceMode !== 'current' && (this.host.store.get(KV.executor.preparation(ticket.id)) === 'preparing' || !await stat(workspace).then(() => true, () => false))) {
+    } else if (ticket.execution?.workspaceMode === 'worktree') {
+      // The managed worktree is prepared, or its verified scene reused, before the worker session opens; claiming its write
+      // occupancy there makes overlapping work of the same repository wait instead of writing beside it.
+      await this.ensureWorktree(ticket)
+      if (!current()) return
+      workspace = this.host.store.tickets.get(ticket.id)?.execution?.directory ?? workspace
+      await verifyDirectory(workspace, this.host.context.subprocess, this.host.lifetime)
+    } else if (this.host.store.get(KV.executor.preparation(ticket.id)) === 'preparing' || !await stat(workspace).then(() => true, () => false)) {
+      // Prepare the isolated workspace directory once; an existing directory counts as already prepared, including worktrees
+      // created before `prepare` commands existed.
       await this.prepareDirectory(ticket)
       if (!current()) return
     }

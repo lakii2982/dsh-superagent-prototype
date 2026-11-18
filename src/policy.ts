@@ -91,7 +91,8 @@ const CommandNameSchema = z.string().regex(/^[A-Za-z0-9._-]+$/).refine(name => n
 export const ExecutorConfigSchema = z.object({
   model: RoleModelSchema.nullable().default(null),
   maxWorkers: z.number().int().min(LIMITS.maxWorkers.min).max(LIMITS.maxWorkers.max).default(3),
-  workspaceMode: z.enum(['isolated', 'current']).default('isolated'),
+  /** Where a new ticket's worker writes: a directory of ours, the person's checkout, or a managed worktree of the repository. */
+  workspaceMode: z.enum(['isolated', 'worktree', 'current']).default('isolated'),
   repositoryPath: z.string().trim().refine(path => path === '' || path.startsWith('/'), 'An absolute repository path').default(''),
   directory: z.string().trim().refine(path => path === '' || path.startsWith('/'), 'An absolute path, or empty for <stateDir>/work').default(''),
   prepare: z.string().max(LIMITS.prepareCommand).default(''),
@@ -106,7 +107,14 @@ export const SettingsSchema = z.object({
   policy: PolicyConfigSchema.default(() => PolicyConfigSchema.parse({})),
   eval: EvalConfigSchema.default(() => EvalConfigSchema.parse({})),
   executor: ExecutorConfigSchema.default(() => ExecutorConfigSchema.parse({})),
-}).strict()
+}).strict().superRefine((value, ctx) => {
+  // A worktree ticket branches from the configured repository, so worktree mode needs one; the person's checkout path is not used.
+  if (value.executor.workspaceMode !== 'worktree') return
+  const repository = value.sources.github?.config.repository
+  if (typeof repository !== 'string' || !repository.trim()) {
+    ctx.addIssue({ code: 'custom', path: ['executor', 'workspaceMode'], message: 'Configure the GitHub repository for worktree workspace mode' })
+  }
+})
 export type Settings = z.infer<typeof SettingsSchema>
 export type SettingsBlock = 'policy' | 'eval' | 'executor' | `source:${string}`
 export type SettingsSave = SettingsBlock | 'pause'

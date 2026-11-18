@@ -1,5 +1,6 @@
 /** Probes repository and account CLIs, configures the worker execution environment and command shims, and tracks setup readiness. */
 import { lockSync } from 'proper-lockfile'
+import { mkdir } from 'node:fs/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import { verifyRepository } from '../infra/repository.ts'
 import { UserError } from '../core/index.ts'
@@ -7,6 +8,7 @@ import { SETUP_FIELDS, resolveDeployment, resolveFeishuBot, workerProbe, type De
 import { agentVariables, applyEnvironment, verifyEnvironment, withoutDirectory, workerBin, writeEnvironment } from '../infra/environment.ts'
 import type { Settings, SettingsBlock } from '../policy.ts'
 import { SetupError, type SetupProblem } from '../setup.ts'
+import { executionRoot } from './execution-environment.ts'
 
 export interface SetupHost {
   readonly context: Context
@@ -95,6 +97,12 @@ export class Setup {
     if (settings.executor.workspaceMode === 'current') {
       const directory = await verifyRepository(settings.executor.repositoryPath, resolved.repository, context.subprocess, lifetime).catch(machineProblem)
       try { this.releaseRepository = lockSync(directory, { stale: 30_000, onCompromised: () => this.host.restart() }) } catch (error) { machineProblem(error) }
+    }
+    // Worktree tickets never touch the checkout a person works in: each gets a managed worktree under the execution root, whose
+    // per-repository mirror is cloned from the configured remote on first use.
+    if (settings.executor.workspaceMode === 'worktree') {
+      if (!String(resolved.repository ?? '')) machineProblem(new Error('Worktree workspace mode needs the repository of the GitHub source.'))
+      await mkdir(executionRoot(settings, machine.stateDir), { recursive: true }).catch(machineProblem)
     }
     await writeEnvironment(resolved, settings.executor.blockedCommands).catch((error: unknown) => { this.restore(); machineProblem(error) })
     this.restoreEnvironment = applyEnvironment(this.variables, machine.stateDir, this.path)

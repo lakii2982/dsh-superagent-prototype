@@ -4,6 +4,7 @@ import { UserError } from '../src/core/index.ts'
 import { Commands } from '../src/infra/commands.ts'
 import { Setup } from '../src/app/setup.ts'
 import { SettingsConflict } from '../src/app/settings.ts'
+import type { Ticket } from '../src/core/index.ts'
 import { startRuntime, type Host } from './fixtures/host.ts'
 
 let h: Host | undefined
@@ -98,4 +99,31 @@ it('records nothing for a pause that changes nothing, refuses a sync while setup
   await expect(settings.sync('feishu')).rejects.toThrow(new UserError('nothingToSync', { source: 'feishu' }))
   vi.mocked(Setup.prototype.configured).mockRestore()
   expect(() => settings.block('source:x')).toThrow(new UserError('unknownBlock', { block: 'source:x' }))
+})
+
+it('refuses to change the workspace configuration while a worktree ticket is still preparing its scene', async () => {
+  h = await startRuntime()
+  const { settings, store } = h.runtime
+  vi.spyOn(Setup.prototype, 'checkAccounts').mockResolvedValue(undefined)
+  const path = '/state/work/worktrees/acme--widgets/fix-abc123456789'
+  const ticket = { id: 'ticket-worktree', title: 'Fix the parser', decisionId: 'd1', channels: [],
+    assignments: [{ id: 'a1', state: 'pending', at: '1' }], inputs: [], undelivered: [], createdAt: '1', updatedAt: '1',
+    origin: { triggerId: 'trig-1' }, mandate: { strength: 'explicit', policyVersion: 'v1', basis: {},
+      actor: { source: 'feishu', id: 'ou_alice' }, scope: 'small' },
+    execution: { name: 'fix-abc123456789', directory: path, assignment: '', workspaceMode: 'worktree', repository: 'acme/widgets',
+      worktree: { path, branch: 'dsh-superagent/fix-abc123456789', baseRef: '', baseSha: '', repositoryId: 'acme--widgets' } } } as unknown as Ticket
+  store.tickets.save(ticket)
+  const value = settings.block('executor').value as Record<string, unknown>
+  const save = (mode: 'worktree' | 'isolated') =>
+    settings.save('executor', { ...value, workspaceMode: mode }, store.blockRevision('executor'), 'panel')
+  await expect(save('worktree')).rejects.toThrow(/finish preparing its worktree/)
+  // Once the recorded base commit is there the configuration may move, and the open ticket keeps the scene it recorded.
+  store.tickets.save({ ...ticket, execution: { ...ticket.execution!,
+    worktree: { ...ticket.execution!.worktree!, baseSha: 'a'.repeat(40) } } })
+  await expect(save('worktree')).resolves.toMatchObject({ saved: true })
+  expect(settings.block('executor').value).toMatchObject({ workspaceMode: 'worktree' })
+  // A checkout ticket that still owns the person's directory blocks the move back until it is finished or handed over.
+  store.tickets.save({ ...ticket, id: 'ticket-checkout', title: 'Fix the copy',
+    execution: { name: 'fix-def456789012', directory: '/w/fix', assignment: '', workspaceMode: 'current', repository: 'acme/widgets' } })
+  await expect(save('isolated')).rejects.toThrow('Finish or stop open checkout tickets')
 })

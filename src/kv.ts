@@ -6,6 +6,8 @@ import type { PromptVersion } from './app/prompts.ts'
 import type { SettingsVersion } from './app/store.ts'
 import type { SettingsSave } from './policy.ts'
 import type { Retry } from './sources/github.ts'
+import type { ScopeStatus } from './core/scope.ts'
+import type { WorktreePreparation } from './infra/worktree.ts'
 
 /** Key of a KV record whose value has type `V`; a plain string represents an untyped key. */
 export type Key<V> = string & { readonly __value?: V }
@@ -30,7 +32,11 @@ export const KV = {
     /** The built-in text of a prompt part an override was edited from, by its `base`, which shows what an upgrade changed. */
     builtIn: family<string, [base: string]>('prompt-built-in:') },
   /** Executor: durable preparation state, so a failed command cannot leave a falsely ready directory. */
-  executor: { preparation: family<'preparing' | 'ready', [ticket: string]>('executor-preparation:') },
+  executor: { preparation: family<'preparing' | 'ready', [ticket: string]>('executor-preparation:'),
+    /** Durable worktree preparation phase of a ticket (`pending`, `preparing`, `ready`, `failed`), resumed after a restart. */
+    worktree: family<WorktreePreparation, [ticket: string]>('executor-worktree:'),
+    /** Durable write occupancy of a ticket, with the tickets it waits for, as the task page shows it. */
+    scope: family<ScopeStatus, [ticket: string]>('executor-scope:') },
   /** Runtime: the main Session's ID. */
   runtime: { masterId: record<string>('master-id') },
   /** Sessions: prompt revisions each Session has worked under, ordered oldest first; the last entry (`.at(-1)`) is its active revision. */

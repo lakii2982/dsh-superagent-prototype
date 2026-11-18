@@ -56,6 +56,20 @@ it('requires a path for current mode and preserves isolated defaults for old con
   settings.executor.repositoryPath = '/another'
   expect(result.directory).toBe(directory)
 })
+it('maps worktree mode to a managed worktree per ticket and requires a repository for it', () => {
+  const settings = SettingsSchema.parse({ executor: { workspaceMode: 'worktree' },
+    sources: { github: { config: { repository: 'acme/widgets' } } } })
+  const ticket = { id: 'abc123456789000', origin: { triggerId: 'msg' }, mandate: { strength: 'explicit', basis: {} } } as Ticket
+  const accept = { kind: 'accept', name: 'fix', scope: 'fix' } as never
+  const path = join('/state/work/worktrees/acme--widgets', 'fix-abc123456789')
+  expect(ticketExecution(ticket, accept, settings, '/state')).toEqual({ name: 'fix-abc123456789', directory: path,
+    assignment: expect.any(String), workspaceMode: 'worktree', repository: 'acme/widgets',
+    worktree: { path, branch: 'dsh-superagent/fix-abc123456789', baseRef: '', baseSha: '', repositoryId: 'acme--widgets' } })
+  expect(() => SettingsSchema.parse({ executor: { workspaceMode: 'worktree' } })).toThrow('GitHub repository')
+  // Old tickets are never rewritten: an isolated execution records no workspace mode and keeps its own directory.
+  expect(ticketExecution(ticket, accept, SettingsSchema.parse({}), '/state')).toEqual({ name: 'fix-abc123456789',
+    directory: join('/state/work', 'fix-abc123456789'), assignment: expect.any(String) })
+})
 it('allows no extra human slot in shared checkout mode', () => {
   const running = ['first']
   const slots = new WorkerSlots(() => running, () => 1, () => false)

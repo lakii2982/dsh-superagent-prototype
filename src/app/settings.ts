@@ -165,9 +165,18 @@ export class Settings {
       catch (error) { throw new UserError('modelUnavailable', { block, error: error instanceof Error ? error.message : String(error) }) }
     }
     rules.guard?.(current, candidate, origin)
-    if ((current.executor.repositoryPath !== candidate.executor.repositoryPath || current.executor.workspaceMode !== candidate.executor.workspaceMode)
-      && store.tickets.open().some(ticket => ticket.execution?.workspaceMode === 'current')) {
+    const changing = current.executor.repositoryPath !== candidate.executor.repositoryPath
+      || current.executor.workspaceMode !== candidate.executor.workspaceMode
+    if (changing && store.tickets.open().some(ticket => ticket.execution?.workspaceMode === 'current')) {
       throw new SettingsConflict('Finish or stop open checkout tickets before changing their workspace configuration.')
+    }
+    // A worktree ticket whose preparation has not recorded its base commit yet owns a half-prepared scene: moving the
+    // repository its worktree belongs to would orphan that scene, so the scene is finished first.
+    const preparing = changing
+      ? store.tickets.open().find(ticket => ticket.execution?.workspaceMode === 'worktree' && !ticket.execution.worktree?.baseSha)
+      : undefined
+    if (preparing) {
+      throw new SettingsConflict(`Let ${preparing.title} (${preparing.id}) finish preparing its worktree before changing the workspace configuration.`)
     }
     if ((block === 'executor' || block === 'source:github') && candidate.executor.workspaceMode === 'current') {
       candidate.executor.repositoryPath = await verifyRepository(candidate.executor.repositoryPath, String(candidate.sources.github?.config.repository ?? ''), this.host.context.subprocess, this.host.lifetime)

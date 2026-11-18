@@ -301,6 +301,11 @@ export interface Ticket {
   updatedAt: string
   /** The Triggers it was accepted from: the one that started it, and the batch its Eval held. */
   origin: { triggerId: string; triggerIds: string[] }
+  /**
+   * The repository-relative files or directories it writes, normalized for comparison (see `scope.ts`); absent means the
+   * whole repository, which keeps same-repository work serial until an assessment states a narrower scope.
+   */
+  scope?: string[]
   /** What its Executor chose: its short name, directory and assignment text. */
   execution?: Execution
   /** The latest failed delivery of an Input to its worker, until a delivery succeeds. */
@@ -312,7 +317,15 @@ export interface Ticket {
  * Thread closed; the ticket then ends unless its work has not finished (see `Tickets.unfinished`).
  */
 export interface Follow { thread: string; own: boolean; closed?: { at: string; outcome: 'merged' | 'closed' } }
-export interface Execution { name: string; directory: string; assignment: string; workspaceMode?: 'current'; repository?: string }
+/**
+ * The managed git worktree an Execution runs in: its directory and ticket branch, the remote ref and commit it branched
+ * from, and the repository identity its paths are named after. `baseRef` and `baseSha` are empty until preparation resolved
+ * them against the remote, and stay recorded afterwards so a restart can verify the same scene instead of rebuilding it.
+ */
+export interface WorktreeScene { path: string; branch: string; baseRef: string; baseSha: string; repositoryId: string }
+export interface Execution { name: string; directory: string; assignment: string; workspaceMode?: 'current' | 'worktree'; repository?: string
+  /** Present for `worktree` mode only: the scene preparation created or verified. */
+  worktree?: WorktreeScene }
 
 /** Whether a ticket is open: it has not ended. */
 export const liveTicket = (ticket: Pick<Ticket, 'ended'>): boolean => !ticket.ended
