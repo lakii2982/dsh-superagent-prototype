@@ -1,7 +1,8 @@
 /** Transport-level routing and recovery across repository boundaries. */
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { ManagerStore, type Repository } from '../src/manager/store.ts'
 import { authorized, bridgeOptions, managerUrl } from '../src/manager/protocol.ts'
@@ -15,7 +16,7 @@ beforeEach(() => {
   store.save([a, b], [{ chatId: 'oc_team', repositoryId: a.id, enabled: true, effectiveAt: '2026-01-01T00:00:00Z' },
     { chatId: 'oc_second', repositoryId: b.id, enabled: true, effectiveAt: '2026-01-01T00:00:00Z' }], 0)
 })
-afterEach(() => { store.close(); rmSync(directory, { recursive: true, force: true }); vi.useRealTimers() })
+afterEach(() => { store?.close(); rmSync(directory, { recursive: true, force: true }); vi.useRealTimers() })
 it('routes each group to its repository and persists an unacknowledged delivery across restart', () => {
   const first = feishu('1', 'A request'), second = feishu('2', 'B request', { chat_id: 'oc_second' })
   expect(store.route(first)).toBe('stored'); expect(store.route(second)).toBe('stored'); expect(store.route(first)).toBe('duplicate')
@@ -42,16 +43,87 @@ it('does not admit unbound groups, private chats, unmentioned new topics or pre-
   expect(store.route(feishu('4', 'old history'))).toBe('filtered')
   expect(store.pending()).toEqual([])
 })
-it('holds disabled groups without changing queued ownership and preserves per-repository ordering', () => {
-  const first = feishu('1', 'first'), next = feishu('2', 'second'); store.route(first); store.route(next)
+it('orders delivery per topic so a retried topic never blocks another topic or group', () => {
+  const head = feishu('1', 'first'), follow = feishu('2', 'second', { root_id: 'om_1', mentions: [] }), other = feishu('3', 'other', { chat_id: 'oc_second' })
+  for (const trigger of [head, follow, other]) expect(store.route(trigger)).toBe('stored')
+  // Only the oldest message of each topic is deliverable; the follow-up waits for its own topic head.
+  expect(store.pending().map(item => item.id)).toEqual([head.id, other.id])
+  store.failed(head.id, 'repository offline')
+  expect(store.pending().map(item => item.id)).toEqual([other.id])
+  expect(store.pending(100, false).map(item => item.id)).toEqual([head.id, other.id])
+  store.delivered(head.id)
+  // The same-topic follow-up becomes the head once its predecessor is delivered, without waiting for other groups.
+  expect(store.pending().map(item => item.id)).toEqual([follow.id, other.id])
+})
+it('pauses a disabled group without counting failures and explains why queued messages wait', () => {
+  const first = feishu('1', 'first'), other = feishu('2', 'other', { chat_id: 'oc_second' })
+  store.route(first); store.route(other)
+  store.save([a, b], store.bindings().map(binding => ({ ...binding, enabled: binding.chatId !== 'oc_team' })), store.revision())
+  expect(store.route(feishu('3', 'disabled group'))).toBe('filtered')
+  expect(store.pending().map(item => item.id)).toEqual([other.id])
+  expect(store.outstanding()).toEqual([expect.objectContaining({ id: first.id, repositoryId: a.id, hold: 'group-disabled', attempts: 0 }), expect.objectContaining({ id: other.id })])
+  store.save([{ ...a, enabled: false }, b], store.bindings().map(binding => ({ ...binding, enabled: true })), store.revision())
+  expect(store.pending().map(item => item.id)).toEqual([other.id])
+  expect(store.outstanding()[0]).toMatchObject({ id: first.id, repositoryId: a.id, hold: 'repository-disabled', attempts: 0 })
+})
+it('revalidates the group, topic owner and original repository when a paused group resumes', () => {
+  const root = feishu('1', 'start'); store.route(root)
   store.save([a, b], store.bindings().map(binding => ({ ...binding, enabled: false })), store.revision())
-  expect(store.route(feishu('3', 'disabled'))).toBe('filtered')
-  expect(store.pending()).toHaveLength(1)
-  store.failed(first.id, 'offline')
+  store.save([a, b], store.bindings().map(binding => ({ ...binding, enabled: true })), store.revision())
+  expect(store.pending().map(item => item.id)).toEqual([root.id])
+  // A topic that now points at another repository is withheld instead of being delivered to the wrong one.
+  store.db.prepare('UPDATE routes SET repository=? WHERE thread=?').run(b.id, 'oc_team:om_1')
   expect(store.pending()).toEqual([])
-  expect(store.pending(100, false)[0]).toMatchObject({ id: first.id, repositoryId: a.id, attempts: 1 })
-  store.delivered(first.id)
-  expect(store.pending()[0]!.id).toBe(next.id)
+  expect(store.outstanding()[0]).toMatchObject({ id: root.id, repositoryId: a.id, hold: 'thread-reassigned' })
+  store.db.prepare('UPDATE routes SET repository=? WHERE thread=?').run(a.id, 'oc_team:om_1')
+  // A binding that disappeared while the group was paused never silently drops the message.
+  store.save([a, b], [], store.revision())
+  expect(store.outstanding()[0]).toMatchObject({ id: root.id, repositoryId: a.id, hold: 'binding-missing' })
+})
+it('stores each Trigger once even when an acknowledgement is lost after delivery', () => {
+  const trigger = feishu('1', 'request')
+  expect(store.route(trigger)).toBe('stored'); expect(store.route(trigger)).toBe('duplicate')
+  store.delivered(trigger.id)
+  expect(store.pending()).toEqual([])
+  // A crash between the instance accepting the message and the manager acknowledging it replays the send, not the row.
+  store.db.prepare('UPDATE inbox SET delivered=0 WHERE id=?').run(trigger.id)
+  expect(store.pending().map(item => item.id)).toEqual([trigger.id])
+  expect(store.route(trigger)).toBe('duplicate')
+  expect(store.pending()).toHaveLength(1)
+  store.delivered(trigger.id)
+  expect(store.db.prepare('SELECT COUNT(*) AS count FROM inbox').get()?.count).toBe(1)
+})
+it('counts the delivery backlog per repository and per group', () => {
+  const head = feishu('1', 'first')
+  store.route(head); store.route(feishu('2', 'second', { chat_id: 'oc_second' }))
+  store.route(feishu('3', 'third', { root_id: 'om_1', mentions: [] }))
+  // Counts are ordered by repository and group ids, which are random, so read them per group.
+  const counts = () => Object.fromEntries(store.queueCounts().map(row => [row.chatId, row.count]))
+  expect(counts()).toEqual({ oc_team: 2, oc_second: 1 })
+  store.delivered(head.id)
+  expect(counts()).toEqual({ oc_team: 1, oc_second: 1 })
+})
+it('adds per-topic ordering to a database written before the delivery columns existed', () => {
+  const legacy = join(directory, 'legacy'); mkdirSync(legacy)
+  const db = new DatabaseSync(join(legacy, 'manager.sqlite'))
+  db.exec(`CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE routes (thread TEXT PRIMARY KEY, repository TEXT NOT NULL, chat TEXT NOT NULL);
+    CREATE TABLE inbox (id TEXT PRIMARY KEY, repository TEXT NOT NULL, value TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+      error TEXT, next_at INTEGER NOT NULL DEFAULT 0, delivered INTEGER NOT NULL DEFAULT 0);`)
+  db.prepare('INSERT INTO kv VALUES (?,?)').run('repositories', JSON.stringify([a, b]))
+  db.prepare('INSERT INTO kv VALUES (?,?)').run('bindings', JSON.stringify(store.bindings()))
+  db.prepare('INSERT INTO kv VALUES (?,?)').run('revision', JSON.stringify(store.revision()))
+  const head = feishu('1', 'first'), follow = feishu('2', 'second', { root_id: 'om_1', mentions: [] })
+  for (const trigger of [head, follow]) db.prepare('INSERT INTO inbox (id,repository,value) VALUES (?,?,?)').run(trigger.id, a.id, JSON.stringify(trigger))
+  db.close()
+  const upgraded = new ManagerStore(legacy)
+  try {
+    // The upgrade backfills each row's topic and group from the stored Trigger and keeps the old arrival order.
+    expect(upgraded.pending().map(item => item.id)).toEqual([head.id])
+    expect(upgraded.pending()[0]).toMatchObject({ repositoryId: a.id, chatId: 'oc_team', thread: 'oc_team:om_1' })
+    upgraded.delivered(head.id)
+    expect(upgraded.pending().map(item => item.id)).toEqual([follow.id])
+  } finally { upgraded.close() }
 })
 it('refuses duplicate bindings, checkout registrations, port collisions and stale saves atomically', () => {
   expect(() => store.save([a, b], [...store.bindings(), store.bindings()[0]!], 1)).toThrow('one repository')

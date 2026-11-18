@@ -5,11 +5,25 @@ import type { T } from './text.ts'
 import type { Repository, Binding } from '../manager/store.ts'
 import STYLES from './client.css?raw'
 
-interface RepositoryView extends Omit<Repository, 'token'> { status: { online: boolean; configured?: boolean; error?: string }; starting: boolean; url: string }
+interface ReadinessItem { state: string; detail?: string; repair?: string }
+type DeliveryItem = ReadinessItem & { pending: number; byChat: Record<string, number> }
+interface RepositoryView extends Omit<Repository, 'token'> {
+  status: { online: boolean; configured?: boolean; error?: string }; starting: boolean; url: string
+  pending?: { total: number; byChat: Record<string, number> }
+  readiness?: { instance: ReadinessItem; repository: ReadinessItem; agent: ReadinessItem; feishu: ReadinessItem; delivery: DeliveryItem }
+}
 interface ManagerView {
   revision: number; bot: { name?: string; id: string } | null; botCli: string; workspaces: string[]
   repositories: RepositoryView[]; bindings: Binding[]; chats: Record<string, string>
-  health: Record<string, { state: string; detail: string }>; pending: { id: string; repositoryId: string; error?: string }[]
+  health: Record<string, { state: string; detail: string }>; pending: { id: string; repositoryId: string; chatId?: string; error?: string; hold?: string }[]
+  queues?: { total: number; byRepository: Record<string, number>; byChat: Record<string, number> }
+}
+const DIMENSIONS = [['instance', '实例', 'Instance'], ['repository', '仓库', 'Repository'], ['agent', '执行 Agent', 'Agent'], ['feishu', '飞书', 'Feishu'], ['delivery', '待投递', 'Deliveries']] as const
+const HOLD_TEXT: Record<string, [string, string]> = {
+  'group-disabled': ['群已停用，消息保留待恢复', 'group paused; message kept'],
+  'binding-missing': ['群绑定已移除，消息保留', 'binding removed; message kept'],
+  'repository-disabled': ['原仓库已停用，消息保留', 'original repository disabled; message kept'],
+  'thread-reassigned': ['话题已归属其他仓库，消息保留', 'topic moved to another repository; message kept'],
 }
 async function request<T>(path: string, body?: unknown, method = body === undefined ? 'GET' : 'POST'): Promise<T> {
   const response = await fetch(`/orchestrator/manager/${path}`, { method, headers: { 'x-orchestrator-request': '1', 'content-type': 'application/json' },
@@ -60,7 +74,7 @@ export function ManagerPanel({ t }: { t: T }) {
   if (!state) return <p role={error ? 'alert' : 'status'}>{error || t('loading')}</p>
   return <div className="dt-root dt-manager">
     <style>{STYLES}</style>
-    <style>{`.dt-manager{padding:24px;max-width:1100px;margin:auto}.dt-manager h2{margin-top:24px}.dt-manager label{display:grid;gap:6px;margin:12px 0}.dt-manager select{padding:8px;max-width:100%}.dt-manager table{width:100%;border-collapse:collapse}.dt-manager td,.dt-manager th{padding:10px;text-align:left;border-bottom:1px solid #8883}.dt-manager fieldset{border:1px solid #8884;border-radius:10px;padding:16px;margin-top:16px}.dt-manager .dt-manager-actions{display:flex;gap:8px;flex-wrap:wrap}.dt-manager [role=alert]{white-space:pre-wrap}`}</style>
+    <style>{`.dt-manager{padding:24px;max-width:1100px;margin:auto}.dt-manager h2{margin-top:24px}.dt-manager label{display:grid;gap:6px;margin:12px 0}.dt-manager select{padding:8px;max-width:100%}.dt-manager table{width:100%;border-collapse:collapse}.dt-manager td,.dt-manager th{padding:10px;text-align:left;border-bottom:1px solid #8883}.dt-manager fieldset{border:1px solid #8884;border-radius:10px;padding:16px;margin-top:16px}.dt-manager .dt-manager-actions{display:flex;gap:8px;flex-wrap:wrap}.dt-manager [role=alert]{white-space:pre-wrap}.dt-manager .dt-readiness{list-style:none;padding:0;margin:6px 0;font-size:12px;opacity:.9}.dt-manager .dt-readiness li[data-state=error]{color:#c33}.dt-manager .dt-readiness li[data-state=unknown]{opacity:.7}`}</style>
     <h1>{tr('仓库与飞书群', 'Repositories and Feishu groups')}</h1>
     <p>{tr('一个群对应一个仓库。任务与追问会回到对应仓库的执行会话。', 'Each group belongs to one repository. Tasks and follow-ups return to its repository sessions.')}</p>
     {error && <p className="dt-error" role="alert">{error}</p>}
@@ -103,7 +117,11 @@ export function ManagerPanel({ t }: { t: T }) {
       <h2>{tr('已添加的仓库', 'Registered repositories')}</h2>
       <table><thead><tr><th>{tr('仓库', 'Repository')}</th><th>{tr('工作目录', 'Checkout')}</th><th>{tr('运行状态', 'Status')}</th><th>{tr('操作', 'Actions')}</th></tr></thead><tbody>
         {state.repositories.map(repository => <tr key={repository.id}><td>{repository.name}<br />{repository.remote}</td><td>{repository.directory}</td>
-          <td>{repository.starting ? tr('启动中', 'Starting') : repository.status.online ? repository.status.configured ? tr('已就绪', 'Ready') : tr('需要完成设置', 'Setup needed') : tr('未运行', 'Stopped')}{repository.status.error && <p role="alert">{repository.status.error}</p>}</td>
+          <td>{repository.starting ? tr('启动中', 'Starting') : repository.status.online ? repository.status.configured ? tr('已就绪', 'Ready') : tr('需要完成设置', 'Setup needed') : tr('未运行', 'Stopped')}{repository.status.error && <p role="alert">{repository.status.error}</p>}
+            {repository.readiness && <ul className="dt-readiness">{(DIMENSIONS as readonly (readonly [keyof NonNullable<RepositoryView['readiness']>, string, string])[])
+              .map(([name, zh, en]) => [name, zh, en, repository.readiness![name]] as const).filter(([, , , item]) => item.state !== 'ok')
+              .map(([name, zh, en, item]) => <li key={name} data-state={item.state}>{tr(zh, en)}: {item.detail}{item.repair ? ` · ${tr('修复', 'fix')}: ${item.repair}` : ''}</li>)}</ul>}
+            {!!repository.pending?.total && <p>{tr(`${repository.pending.total} 条待投递`, `${repository.pending.total} queued`)}</p>}</td>
           <td><div className="dt-manager-actions"><Button disabled={busy} onClick={() => { void run(async () => { await request(`repositories/${repository.id}/${repository.status.online ? 'stop' : 'start'}`, {}) }) }}>{repository.status.online ? tr('停止服务', 'Stop service') : tr('启动服务', 'Start service')}</Button>
             <Button disabled={busy} onClick={() => { setEditingId(repository.id); setRepo({ name: repository.name, directory: repository.directory, remote: repository.remote, githubCli: repository.githubCli, allowedGithub: repository.allowedGithub.join(' '), allowedFeishu: repository.allowedFeishu.join(' ') }) }}>{tr('编辑接单权限', 'Edit access')}</Button>
             {repository.status.online && <Button disabled={busy} onClick={() => { void run(async () => { const launch = await request<{ url: string }>(`repositories/${repository.id}/open`, {}); window.open(launch.url, '_blank', 'noopener,noreferrer') }) }}>{tr('打开仓库工作空间', 'Open repository workspace')}</Button>}</div></td></tr>)}
@@ -135,8 +153,10 @@ export function ManagerPanel({ t }: { t: T }) {
     {tab === 'tasks' && <>
       <h2>{tr('待送达消息与系统状态', 'Pending deliveries and health')}</h2>
       {Object.entries(state.health).filter(([, value]) => value.state !== 'ready').map(([name, health]) => <p key={name}>{name}: {health.detail}</p>)}
-      <p>{tr(`${state.pending.length} 个仓库有待送达消息。离线消息保持原目标，不会转投。`, `${state.pending.length} repositories have pending deliveries. Offline messages keep their original destination.`)}</p>
-      {state.pending.filter(item => item.error).map(item => <p key={item.id} role="alert">{state.repositories.find(repository => repository.id === item.repositoryId)?.name}: {item.error}</p>)}
+      <p>{tr(`${state.queues?.total ?? state.pending.length} 条消息待投递。离线消息保持原目标，不会转投。`, `${state.queues?.total ?? state.pending.length} queued messages. Offline messages keep their original destination.`)}</p>
+      {state.queues && <ul>{Object.entries(state.queues.byChat).map(([chat, count]) => <li key={chat}>{state.chats[chat] || chat}: {count}</li>)}</ul>}
+      {state.pending.filter(item => item.error || item.hold).map(item => <p key={item.id} role={item.error ? 'alert' : 'status'}>
+        {state.repositories.find(repository => repository.id === item.repositoryId)?.name}: {item.error ?? tr(HOLD_TEXT[item.hold!]?.[0] ?? item.hold!, HOLD_TEXT[item.hold!]?.[1] ?? item.hold!)}</p>)}
       <Button disabled={busy} onClick={() => { void run(async () => {
         const entries = await Promise.all(state.repositories.map(async repository => {
           try { return [repository.id, await request<{ items: { id: string; title: string; stage?: string }[] }>(`repositories/${repository.id}/tasks`)] as const }

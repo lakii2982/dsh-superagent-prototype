@@ -17,6 +17,7 @@ import { KV } from '../kv.ts'
 import { key, type Trigger } from '../core/index.ts'
 import type { Health } from '../sources/host.ts'
 import { ManagerStore, RepositorySchema, BindingSchema, type Repository } from './store.ts'
+import { readiness } from './readiness.ts'
 import { authorized, bridgeOptions, FeishuTriggerSchema } from './protocol.ts'
 import { instanceHealth, instanceRequest, instanceUiUrl, provision, startInstance } from './instances.ts'
 import type { IncomingMessage, ServerResponse } from 'node:http'
@@ -38,7 +39,7 @@ export class Manager {
   readonly store: ManagerStore
   private readonly lifetime = new AbortController()
   private readonly health = new Map<string, Health>()
-  private readonly instances = new Map<string, { online: boolean; configured?: boolean; error?: string }>()
+  private readonly instances = new Map<string, { online: boolean; configured?: boolean; error?: string; state?: string }>()
   private readonly starting = new Set<string>()
   private bot?: Deployment['feishu']
   private consumer?: { abort: AbortController; done: Promise<unknown> }
@@ -63,6 +64,7 @@ export class Manager {
     this.timer.unref?.()
   }
   async stop(): Promise<void> {
+    if (this.closed) return
     this.closed = true; if (this.timer) clearInterval(this.timer)
     this.disposeHttp?.(); this.lifetime.abort(); this.consumer?.abort.abort()
     await this.consumer?.done; await this.ticking; await Promise.allSettled([...this.requests])
@@ -104,25 +106,33 @@ export class Manager {
     try {
       const repositories = this.store.repositories()
       await Promise.all(repositories.map(async repository => {
-        let status: { configured: boolean }
+        let status: { configured: boolean; state?: string }
         try { status = await instanceHealth(repository) }
         catch { this.instances.set(repository.id, { online: false }); return }
-        this.instances.set(repository.id, { online: true, configured: status.configured })
+        this.instances.set(repository.id, { online: true, configured: status.configured, ...(status.state ? { state: status.state } : {}) })
         if (status.configured && !this.closed) {
           try { await this.syncGroups(repository) }
           catch (error) { this.instances.set(repository.id, { online: true, configured: true, error: errorText(error) }) }
         }
       }))
       if (this.closed) return
-      await Promise.all(this.store.pending().map(async item => {
-        const repository = repositories.find(repo => repo.id === item.repositoryId)
-        const binding = this.store.bindings().find(row => row.chatId === item.trigger.meta.chatId)
-        if (!repository?.enabled || !binding?.enabled || !this.instances.get(repository.id)?.configured || this.instances.get(repository.id)?.error) return
-        try {
-          await instanceRequest(repository, 'receive', { repositoryId: repository.id, trigger: item.trigger })
-          if (!this.closed) this.store.delivered(item.id)
-        } catch (error) { if (!this.closed) this.store.failed(item.id, errorText(error)) }
-      }))
+      // A delivery pass releases the next message of a topic it completed; bounded so a stuck pass cannot spin.
+      for (let pass = 0; pass < 20; pass++) {
+        const items = this.store.pending()
+        if (!items.length || this.closed) return
+        let progress = false
+        await Promise.all(items.map(async item => {
+          const repository = repositories.find(repo => repo.id === item.repositoryId)
+          const status = repository ? this.instances.get(repository.id) : undefined
+          // Offline, unconfigured or paused repositories keep their messages here; nothing is marked failed.
+          if (!repository?.enabled || !status?.configured || status.error) return
+          try {
+            await instanceRequest(repository, 'receive', { repositoryId: repository.id, trigger: item.trigger })
+            if (!this.closed) { this.store.delivered(item.id); progress = true }
+          } catch (error) { if (!this.closed) { this.store.failed(item.id, errorText(error)); progress = true } }
+        }))
+        if (!progress) return
+      }
     } catch (error) { if (!this.closed) this.health.set('delivery', { state: 'error', detail: errorText(error) }) }
   }
   private async syncGroups(repository: Repository): Promise<void> {
@@ -142,11 +152,23 @@ export class Manager {
       value: { ...old, config: { ...old.config, cli, chats: chats.map(chatId => ({ chatId, listen: 'mentions' })), directMessages: false, otherChats: 'none' } } }, 'PUT')
   }
   private view() {
+    const repositories = this.store.repositories(), bindings = this.store.bindings(), counts = this.store.queueCounts()
     return { revision: this.store.revision(), bot: this.bot ? { name: this.bot.name, id: this.bot.botId } : null,
       botCli: this.store.get<string>('bot-cli') ?? '', workspaces: this.ctx.workspaceRegistry.list().map(workspace => workspace.path), health: Object.fromEntries(this.health),
-      repositories: this.store.repositories().map(({ token, ...repo }) => ({ ...repo, status: this.instances.get(repo.id) ?? { online: false }, starting: this.starting.has(repo.id), url: `http://127.0.0.1:${repo.port}` })),
-      bindings: this.store.bindings(), chats: this.store.get<Record<string, string>>(KV.sources.labels('feishu')) ?? {},
-      pending: this.store.pending(100, false).map(({ trigger, ...item }) => ({ ...item, chatId: trigger.meta.chatId })) }
+      repositories: repositories.map(repository => {
+        const { token, ...repo } = repository
+        const status = this.instances.get(repo.id) ?? { online: false }
+        const queued = counts.filter(row => row.repositoryId === repo.id)
+        const pending = { total: queued.reduce((sum, row) => sum + row.count, 0), byChat: Object.fromEntries(queued.map(row => [row.chatId, row.count])) }
+        return { ...repo, status, starting: this.starting.has(repo.id), url: `http://127.0.0.1:${repo.port}`, pending,
+          readiness: readiness({ repository, status, bot: this.bot !== undefined, groups: bindings.filter(binding => binding.repositoryId === repo.id && binding.enabled).length, pending }) }
+      }),
+      bindings, chats: this.store.get<Record<string, string>>(KV.sources.labels('feishu')) ?? {},
+      // Delivery backlog per repository and per group, including messages held by a paused group.
+      queues: { total: counts.reduce((sum, row) => sum + row.count, 0),
+        byRepository: Object.fromEntries(repositories.map(repo => [repo.id, counts.filter(row => row.repositoryId === repo.id).reduce((sum, row) => sum + row.count, 0)])),
+        byChat: Object.fromEntries(counts.reduce<[string, number][]>((rows, row) => { const found = rows.find(([chat]) => chat === row.chatId); if (found) found[1] += row.count; else rows.push([row.chatId, row.count]); return rows }, [])) },
+      pending: this.store.outstanding().map(({ trigger, ...item }) => item) }
   }
   private async http(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', this.origin)
@@ -240,13 +262,13 @@ export class Manager {
         }
         if (action[2] === 'start') {
           if (this.starting.has(repository.id)) throw new Error('Repository is already starting')
-          if (!this.bot) throw new Error('Connect the Feishu bot first')
+          // A repository works through GitHub without Feishu; the bot only adds delivery and replies.
           if (await instanceHealth(repository).then(() => true, () => false)) { json(res, 200, this.view()); return }
           if (this.starting.has(repository.id)) throw new Error('Repository is already starting')
           if (this.starting.size + [...this.instances.values()].filter(value => value.online).length >= 3) throw new Error('At most three repositories may run at once')
           this.starting.add(repository.id)
           try {
-            await provision(repository, this.machine.stateDir, this.origin, this.store.get<string>('bot-cli')!, this.store.chats(repository.id))
+            await provision(repository, this.machine.stateDir, this.origin, this.store.get<string>('bot-cli') ?? '', this.store.chats(repository.id))
             const child = await startInstance(repository, this.machine.stateDir)
             try {
               // Wait for authenticated readiness before releasing the startup reservation.

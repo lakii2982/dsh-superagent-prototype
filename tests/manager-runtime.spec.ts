@@ -1,5 +1,5 @@
-/** Exercises the real local HTTP boundary with an isolated fake bot and repository instance. */
-import { createServer, type Server } from 'node:http'
+/** Exercises the real local HTTP boundary with isolated fake bot and repository instances. */
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -11,17 +11,68 @@ import { testMachine } from './fixtures/deployment.ts'
 import { nativeSubprocess } from './fixtures/subprocess.ts'
 import { feishu } from './fixtures/host.ts'
 
-vi.setConfig({ testTimeout: 15000 })
-let directory: string, manager: Manager, server: Server, instance: Server, origin: string, repository: Repository
-let received: unknown[], failReceive: boolean, replyCalls: number
-const listen = (server: Server) => new Promise<number>(resolve => { server.listen(0, '127.0.0.1', () => { resolve((server.address() as { port: number }).port) }) })
+vi.setConfig({ testTimeout: 20000 })
+type Received = { repositoryId: string; trigger: { id: string; threads: { id: string }[]; meta: { messageId: string; chatId: string } } }
+type Fake = {
+  server: Server; handler: (req: IncomingMessage, res: ServerResponse) => Promise<void>; port: number; id: string; token: string
+  received: Received[]; requests: { messageId: string; result: string }[]; accepted: Set<string>; failing: Set<string>
+}
+type Readiness = { state: string; detail?: string; repair?: string; pending?: number; byChat?: Record<string, number> }
+type State = {
+  repositories: { id: string; status: { online: boolean }; pending: { total: number; byChat: Record<string, number> }; readiness: Record<string, Readiness> }[]
+  queues: { total: number; byRepository: Record<string, number>; byChat: Record<string, number> }
+  pending: { id: string; repositoryId: string; hold?: string }[]
+}
+let directory: string, manager: Manager, server: Server, origin: string, repository: Repository, ctx: Context, botCli: string
+const fakes: Fake[] = []
+const listen = (server: Server, port = 0) => new Promise<number>(resolve => { server.listen(port, '127.0.0.1', () => { resolve((server.address() as { port: number }).port) }) })
 const close = (server: Server) => new Promise<void>(resolve => { server.closeAllConnections(); server.close(() => resolve()) })
-const response = (res: import('node:http').ServerResponse, value: unknown, status = 200) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(value)) }
+const response = (res: ServerResponse, value: unknown, status = 200) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(value)) }
 const request = (path: string, value?: unknown, method = value === undefined ? 'GET' : 'POST', headers: Record<string, string> = { 'x-orchestrator-request': '1' }) =>
   fetch(`${origin}/orchestrator/${path}`, { method, headers: { ...headers, 'content-type': 'application/json' }, ...(value === undefined ? {} : { body: JSON.stringify(value) }) })
+const fakeOf = (repositoryId: string): Fake => fakes.find(item => item.id === repositoryId)!
+const view = async (): Promise<State> => await (await request('manager/state')).json() as State
+const arrived = (fake: Fake): string[] => fake.received.map(item => item.trigger.meta.messageId)
+
+/** A repository instance fixture: authenticated health, settings, tickets and a deduplicating receive. */
+const fakeInstance = async (): Promise<Fake> => {
+  const fake = { received: [], requests: [], accepted: new Set<string>(), failing: new Set<string>(), id: '', token: '' } as unknown as Fake
+  fake.handler = async (req, res) => {
+    if (req.headers.authorization !== `Bearer ${fake.token}`) { response(res, { error: 'auth' }, 403); return }
+    const url = req.url ?? ''
+    if (url.endsWith('/health')) { response(res, { repositoryId: fake.id, pid: process.pid, configured: true }); return }
+    if (url.endsWith('/settings')) { response(res, { blocks: { policy: { revision: 1, value: { sources: { github: { allowed: [] }, feishu: { allowed: [] } } } } },
+      sources: [{ id: 'feishu', revision: 1, value: { enabled: true, config: { cli: 'bot', chats: [] } } }] }); return }
+    if (url.includes('/settings/')) { response(res, { saved: true }); return }
+    if (url.includes('/tickets')) { response(res, { items: [] }); return }
+    if (url.endsWith('/receive')) {
+      const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk))
+      const data = JSON.parse(Buffer.concat(chunks).toString()) as Received
+      const messageId = data.trigger.meta.messageId
+      if (fake.failing.has(messageId)) { fake.requests.push({ messageId, result: 'failed' }); response(res, { error: 'offline' }, 503); return }
+      const result = fake.accepted.has(data.trigger.id) ? 'duplicate' : 'stored'
+      fake.accepted.add(data.trigger.id); fake.requests.push({ messageId, result })
+      if (result === 'stored') fake.received.push(data)
+      response(res, { result }); return
+    }
+    response(res, {})
+  }
+  fake.server = createServer((req, res) => { void fake.handler(req, res) }); fake.port = await listen(fake.server); fakes.push(fake)
+  return fake
+}
+const repositoryFor = (fake: Fake, name: string, remote: string): Repository => {
+  const created: Repository = { ...ManagerStore.identity(), port: fake.port, name, remote, directory: `/repo/${name}`, githubCli: '/bin/false', allowedGithub: [], allowedFeishu: [], enabled: true }
+  fake.id = created.id; fake.token = created.token
+  return created
+}
+const restartManager = async (): Promise<void> => {
+  await manager.stop()
+  manager = new Manager(ctx, testMachine({ stateDir: directory }))
+  await manager.start()
+}
 beforeEach(async () => {
-  directory = mkdtempSync(join(tmpdir(), 'manager-http-')); received = []; failReceive = false; replyCalls = 0
-  const botCli = join(directory, 'bot')
+  directory = mkdtempSync(join(tmpdir(), 'manager-http-'))
+  botCli = join(directory, 'bot')
   writeFileSync(botCli, `#!/usr/bin/env node
 const args=process.argv.slice(2), text=args.join(' ');
 if(args[0]==='event'){process.stderr.write('[event] ready\\n');process.stdin.resume();return;}
@@ -33,31 +84,23 @@ args[1]==='+chat-members-list'?{users:[{member_id:'ou_alice',name:'Alice'}],has_
 args[0]==='api'?{items:[],has_more:false}:{};
 console.log(JSON.stringify({ok:true,data}));
 `); chmodSync(botCli, 0o755)
-  instance = createServer(async (req, res) => {
-    if (req.headers.authorization !== `Bearer ${repository.token}`) { response(res, { error: 'auth' }, 403); return }
-    if (req.url?.endsWith('/health')) { response(res, { repositoryId: repository.id, pid: process.pid, configured: true }); return }
-    if (req.url?.endsWith('/settings')) { response(res, { blocks: { policy: { revision: 1, value: { sources: { github: { allowed: [] }, feishu: { allowed: [] } } } } },
-      sources: [{ id: 'feishu', revision: 1, value: { enabled: true, config: { chats: [{ chatId: 'oc_team', listen: 'mentions' }] } } }] }); return }
-    if (req.url?.includes('/settings/')) { response(res, { saved: true }); return }
-    if (req.url?.includes('/tickets')) { response(res, { items: [] }); return }
-    if (req.url?.endsWith('/receive')) {
-      if (failReceive) { response(res, { error: 'offline' }, 503); return }
-      const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk)); received.push(JSON.parse(Buffer.concat(chunks).toString())); response(res, { result: 'stored' }); return
-    }
-    response(res, {})
-  })
-  const port = await listen(instance)
-  repository = { ...ManagerStore.identity(), port, name: 'Repo', remote: 'acme/widgets', directory: '/repo', githubCli: '/bin/false', allowedGithub: [], allowedFeishu: [], enabled: true }
-  let handler: (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<void>
-  server = createServer((req, res) => { void handler(req, res) }); const managerPort = await listen(server); origin = `http://127.0.0.1:${managerPort}`
-  const ctx = { subprocess: nativeSubprocess, workspaceRegistry: { list: () => [] }, webServer: { host: '127.0.0.1', port: managerPort,
+  let handler: (req: IncomingMessage, res: ServerResponse) => Promise<void> = async () => {}
+  server = createServer((req, res) => { void handler(req, res) })
+  origin = `http://127.0.0.1:${await listen(server)}`
+  ctx = { subprocess: nativeSubprocess, workspaceRegistry: { list: () => [] }, webServer: { host: '127.0.0.1', port: Number(new URL(origin).port),
     register: (value: { handler: typeof handler }) => { handler = value.handler; return () => {} } } } as unknown as Context
   manager = new Manager(ctx, testMachine({ stateDir: directory }))
+  const fake = await fakeInstance()
+  repository = repositoryFor(fake, 'Repo', 'acme/widgets')
   manager.store.save([repository], [{ chatId: 'oc_team', repositoryId: repository.id, enabled: true, effectiveAt: '2026-01-01T00:00:00Z' }], 0)
   manager.store.set('bot-cli', botCli)
   await manager.start()
 })
-afterEach(async () => { await manager.stop(); await close(server); await close(instance); rmSync(directory, { recursive: true, force: true }) })
+afterEach(async () => {
+  await manager.stop(); await close(server)
+  for (const fake of fakes) if (fake.server.listening) await close(fake.server)
+  fakes.length = 0; rmSync(directory, { recursive: true, force: true })
+})
 it('hides instance credentials and rejects cross-origin browser and unauthenticated internal calls', async () => {
   const state = await (await request('manager/state')).text()
   expect(state).not.toContain(repository.token); expect(state).not.toContain('"token"')
@@ -67,23 +110,117 @@ it('hides instance credentials and rejects cross-origin browser and unauthentica
   expect((await request(`internal/${repository.id}/receive`, wrong, 'POST', { authorization: `Bearer ${repository.token}` })).status).toBe(400)
 })
 it('delivers a persisted event only to its authenticated instance and acknowledges duplicate ingress', async () => {
+  const fake = fakeOf(repository.id)
   const trigger = feishu('1', 'request')
   expect(manager.store.route(trigger)).toBe('stored')
-  await vi.waitFor(() => { expect(received).toHaveLength(1) }, { timeout: 7000 })
+  await vi.waitFor(() => { expect(arrived(fake)).toEqual(['om_1']) }, { timeout: 7000 })
   await vi.waitFor(() => { expect(manager.store.pending()).toEqual([]) })
   const duplicate = await request(`internal/${repository.id}/receive`, trigger, 'POST', { authorization: `Bearer ${repository.token}` })
   expect(await duplicate.json()).toEqual({ result: 'duplicate' })
-  expect(received).toHaveLength(1)
+  expect(arrived(fake)).toHaveLength(1)
 })
 it('keeps failed deliveries queued for the original repository', async () => {
-  failReceive = true; const trigger = feishu('1', 'request'); manager.store.route(trigger)
-  await vi.waitFor(() => { expect(manager.store.pending(100, false)[0]?.attempts).toBeGreaterThan(0) }, { timeout: 7000 })
-  expect(manager.store.pending(100, false)[0]).toMatchObject({ repositoryId: repository.id, error: 'offline' })
-  failReceive = false
-  await vi.waitFor(() => { expect(received).toHaveLength(1) }, { timeout: 7000 })
+  const fake = fakeOf(repository.id); fake.failing.add('om_1')
+  manager.store.route(feishu('1', 'request'))
+  await vi.waitFor(() => { expect(manager.store.outstanding()[0]?.attempts).toBeGreaterThan(0) }, { timeout: 7000 })
+  expect(manager.store.outstanding()[0]).toMatchObject({ repositoryId: repository.id, error: 'offline' })
+  fake.failing.clear()
+  await vi.waitFor(() => { expect(arrived(fake)).toEqual(['om_1']) }, { timeout: 7000 })
+})
+it('keeps same-topic order while another topic retries in parallel', async () => {
+  const fake = fakeOf(repository.id)
+  const head = feishu('1', 'first'), follow = feishu('2', 'second', { root_id: 'om_1', mentions: [] }), other = feishu('3', 'other topic')
+  fake.failing.add('om_1')
+  for (const trigger of [head, follow, other]) expect(manager.store.route(trigger)).toBe('stored')
+  // The retrying topic head blocks only its own follow-up; the other topic is delivered meanwhile.
+  await vi.waitFor(() => { expect(arrived(fake)).toEqual(['om_3']) }, { timeout: 7000 })
+  expect(manager.store.outstanding().find(item => item.id === follow.id)).toMatchObject({ attempts: 0 })
+  fake.failing.clear()
+  await vi.waitFor(() => { expect(arrived(fake)).toEqual(['om_3', 'om_1', 'om_2']) }, { timeout: 10000 })
+})
+it('keeps two groups on two repositories on their own routes without cross delivery', async () => {
+  const first = fakeOf(repository.id), second = await fakeInstance()
+  const other = repositoryFor(second, 'Other', 'acme/other')
+  manager.store.save([repository, other], [...manager.store.bindings(),
+    { chatId: 'oc_second', repositoryId: other.id, enabled: true, effectiveAt: '2026-01-01T00:00:00Z' }], manager.store.revision())
+  const triggers = [feishu('1', 'a1'), feishu('2', 'a2', { root_id: 'om_1', mentions: [] }),
+    feishu('3', 'b1', { chat_id: 'oc_second' }), feishu('4', 'b2', { chat_id: 'oc_second', root_id: 'om_3', mentions: [] })]
+  for (const trigger of triggers) expect(manager.store.route(trigger)).toBe('stored')
+  await vi.waitFor(() => { expect(arrived(first)).toEqual(['om_1', 'om_2']); expect(arrived(second)).toEqual(['om_3', 'om_4']) }, { timeout: 10000 })
+  expect(first.received.every(item => item.repositoryId === repository.id)).toBe(true)
+  expect(second.received.every(item => item.repositoryId === other.id)).toBe(true)
+})
+it('pauses a disabled group while another group continues and revalidates before resuming', async () => {
+  const fake = fakeOf(repository.id)
+  manager.store.save([repository], [...manager.store.bindings(),
+    { chatId: 'oc_second', repositoryId: repository.id, enabled: true, effectiveAt: '2026-01-01T00:00:00Z' }], manager.store.revision())
+  const paused = feishu('1', 'paused group'), active = feishu('2', 'active group', { chat_id: 'oc_second' })
+  manager.store.route(paused); manager.store.route(active)
+  manager.store.save([repository], manager.store.bindings().map(binding => binding.chatId === 'oc_team' ? { ...binding, enabled: false } : binding), manager.store.revision())
+  await vi.waitFor(() => { expect(arrived(fake)).toEqual(['om_2']) }, { timeout: 7000 })
+  // A paused group keeps its message and never counts a failure; the reason is visible to the operator.
+  expect(manager.store.outstanding().find(item => item.id === paused.id)).toMatchObject({ repositoryId: repository.id, hold: 'group-disabled', attempts: 0 })
+  manager.store.save([repository], manager.store.bindings().map(binding => ({ ...binding, enabled: true })), manager.store.revision())
+  await vi.waitFor(() => { expect(arrived(fake).sort()).toEqual(['om_1', 'om_2']) }, { timeout: 7000 })
+  expect(fake.received.every(item => item.repositoryId === repository.id)).toBe(true)
+})
+it('keeps messages while their repository is disabled and resumes to the original repository', async () => {
+  const fake = fakeOf(repository.id)
+  manager.store.route(feishu('1', 'request'))
+  manager.store.save([{ ...repository, enabled: false }], manager.store.bindings(), manager.store.revision())
+  await new Promise(resolve => setTimeout(resolve, 2500))
+  expect(arrived(fake)).toEqual([])
+  expect(manager.store.outstanding()[0]).toMatchObject({ repositoryId: repository.id, hold: 'repository-disabled', attempts: 0 })
+  manager.store.save([repository], manager.store.bindings(), manager.store.revision())
+  await vi.waitFor(() => { expect(arrived(fake)).toEqual(['om_1']) }, { timeout: 7000 })
+  expect(fake.received[0]!.repositoryId).toBe(repository.id)
+})
+it('rediscovers a surviving instance after a manager restart and keeps the original target while offline', async () => {
+  const fake = fakeOf(repository.id)
+  await vi.waitFor(async () => { expect((await view()).repositories[0]?.status.online).toBe(true) }, { timeout: 7000 })
+  await manager.stop()
+  await close(fake.server)
+  await restartManager()
+  const stopped = (await view()).repositories
+  expect(stopped).toHaveLength(1); expect(stopped[0]!.id).toBe(repository.id); expect(stopped[0]!.status.online).toBe(false)
+  manager.store.route(feishu('1', 'offline request'))
+  await new Promise(resolve => setTimeout(resolve, 2500))
+  // Nothing is delivered or marked failed while the original repository is offline.
+  expect(arrived(fake)).toEqual([])
+  expect(manager.store.outstanding()[0]).toMatchObject({ repositoryId: repository.id, attempts: 0 })
+  fake.server = createServer((req, res) => { void fake.handler(req, res) }); await listen(fake.server, fake.port)
+  await vi.waitFor(() => { expect(arrived(fake)).toEqual(['om_1']) }, { timeout: 10000 })
+  expect(fake.received[0]!.repositoryId).toBe(repository.id)
+  expect(manager.store.pending()).toEqual([])
+  await vi.waitFor(async () => { expect((await view()).repositories[0]?.status.online).toBe(true) }, { timeout: 7000 })
+})
+it('reports every readiness dimension with a repair entry and the delivery backlog', async () => {
+  const fake = fakeOf(repository.id)
+  await vi.waitFor(async () => { expect((await view()).repositories[0]?.status.online).toBe(true) }, { timeout: 7000 })
+  const ready = (await view()).repositories[0]!
+  expect(ready.readiness.instance!.state).toBe('ok')
+  expect(ready.readiness.repository!.state).toBe('ok')
+  // The instance does not report an execution-agent verdict yet, so readiness says so instead of guessing.
+  expect(ready.readiness.agent).toMatchObject({ state: 'unknown', repair: 'agent' })
+  expect(ready.readiness.feishu!.state).toBe('ok')
+  expect(ready.readiness.delivery!.state).toBe('ok')
+  fake.failing.add('om_1'); manager.store.route(feishu('1', 'request'))
+  await vi.waitFor(async () => {
+    const state = await view()
+    expect(state.queues.total).toBe(1); expect(state.queues.byRepository[repository.id]).toBe(1)
+    expect(state.repositories[0]!.readiness.delivery).toMatchObject({ state: 'pending', pending: 1, byChat: { oc_team: 1 } })
+  }, { timeout: 10000 })
+  await close(fake.server)
+  await vi.waitFor(async () => {
+    const state = (await view()).repositories[0]!
+    expect(state.readiness.instance!.state).toBe('pending'); expect(state.readiness.repository!.state).toBe('pending')
+    expect(state.readiness.instance!.repair).toBe('repository')
+  }, { timeout: 7000 })
+  manager.store.save([repository], manager.store.bindings().map(binding => ({ ...binding, enabled: false })), manager.store.revision())
+  expect((await view()).repositories[0]!.readiness.feishu).toMatchObject({ state: 'pending', repair: 'feishu' })
 })
 it('refuses arbitrary shared-bot commands and enforces group disable on pending replies', async () => {
-  const trigger = feishu('1', 'request'); manager.store.route(trigger)
+  manager.store.route(feishu('1', 'request'))
   const call = (args: string[]) => request(`internal/${repository.id}/lark`, { args }, 'POST', { authorization: `Bearer ${repository.token}` })
   expect((await call(['api', 'POST', '/open-apis/im/v1/messages'])).status).toBe(400)
   expect((await call(['im', '+messages-reply', '--message-id', 'om_unknown', '--markdown', 'hello', '--idempotency-key', 'r'])).status).toBe(400)

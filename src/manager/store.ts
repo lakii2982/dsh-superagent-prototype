@@ -16,7 +16,11 @@ export const RepositorySchema = z.object({
 export type Repository = z.infer<typeof RepositorySchema>
 export const BindingSchema = z.object({ chatId: z.string().regex(/^oc_[a-zA-Z0-9]+$/), repositoryId: z.string().uuid(), enabled: z.boolean(), effectiveAt: z.string().datetime() })
 export type Binding = z.infer<typeof BindingSchema>
-export interface JournalItem { id: string; repositoryId: string; trigger: Trigger; attempts: number; error?: string }
+export interface JournalItem { id: string; repositoryId: string; chatId: string; thread: string; trigger: Trigger; attempts: number; nextAt: number; error?: string }
+/** Why a queued message is withheld: its group is paused, its repository is disabled, its binding vanished, or its topic moved. */
+export type HoldReason = 'binding-missing' | 'group-disabled' | 'repository-disabled' | 'thread-reassigned'
+export interface QueuedItem extends JournalItem { hold?: HoldReason }
+export interface QueueCount { repositoryId: string; chatId: string; count: number }
 
 /** Stores only management configuration and transport records; repository Engines own their work. */
 export class ManagerStore {
@@ -29,8 +33,22 @@ export class ManagerStore {
       CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS routes (thread TEXT PRIMARY KEY, repository TEXT NOT NULL, chat TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS inbox (id TEXT PRIMARY KEY, repository TEXT NOT NULL, value TEXT NOT NULL,
-        attempts INTEGER NOT NULL DEFAULT 0, error TEXT, next_at INTEGER NOT NULL DEFAULT 0, delivered INTEGER NOT NULL DEFAULT 0);
+        attempts INTEGER NOT NULL DEFAULT 0, error TEXT, next_at INTEGER NOT NULL DEFAULT 0, delivered INTEGER NOT NULL DEFAULT 0,
+        thread TEXT, chat TEXT);
       CREATE TABLE IF NOT EXISTS replies (id TEXT PRIMARY KEY, repository TEXT NOT NULL, chat TEXT NOT NULL, value TEXT NOT NULL, sent INTEGER NOT NULL DEFAULT 0);`)
+    this.migrate()
+  }
+  /** Add the topic columns to databases written before delivery was ordered per topic; safe to repeat. */
+  private migrate(): void {
+    const columns = new Set(this.db.prepare('PRAGMA table_info(inbox)').all().map(row => String(row.name)))
+    if (!columns.has('thread')) this.db.exec('ALTER TABLE inbox ADD COLUMN thread TEXT')
+    if (!columns.has('chat')) this.db.exec('ALTER TABLE inbox ADD COLUMN chat TEXT')
+    // Rows written earlier kept the topic and group inside the Trigger JSON, so the upgrade never loses their order.
+    this.db.exec(`UPDATE inbox SET thread=COALESCE(json_extract(value,'$.threads[0].id'),''),
+        chat=COALESCE(json_extract(value,'$.meta.chatId'),'') WHERE thread IS NULL OR chat IS NULL;
+      CREATE INDEX IF NOT EXISTS inbox_topic ON inbox(delivered, thread);
+      CREATE INDEX IF NOT EXISTS inbox_repository ON inbox(delivered, repository);
+      CREATE INDEX IF NOT EXISTS inbox_group ON inbox(delivered, chat);`)
   }
   close(): void { this.db.close() }
   get<T>(key: string): T | undefined {
@@ -75,16 +93,34 @@ export class ManagerStore {
       // An existing topic remains eligible after a binding change; new topics start at activation time.
       if (!pinned && (Date.parse(trigger.at) < Date.parse(binding.effectiveAt) || trigger.addressed !== 'mention')) return 'filtered'
       this.db.prepare('INSERT OR IGNORE INTO routes VALUES (?,?,?)').run(thread, repositoryId, chat)
-      this.db.prepare('INSERT INTO inbox (id,repository,value) VALUES (?,?,?)').run(trigger.id, repositoryId, JSON.stringify({ ...trigger, meta: { ...trigger.meta, managerBindingRevision: this.revision() } }))
+      this.db.prepare('INSERT INTO inbox (id,repository,value,thread,chat) VALUES (?,?,?,?,?)').run(trigger.id, repositoryId, JSON.stringify({ ...trigger, meta: { ...trigger.meta, managerBindingRevision: this.revision() } }), thread, chat)
       return 'stored'
     })
   }
+  /** Topic heads only: the oldest due message of each topic, skipping paused groups and disabled repositories. */
   pending(limit = 100, due = true): JournalItem[] {
-    return this.db.prepare(`SELECT * FROM inbox WHERE delivered=0 AND next_at<=${due ? Date.now() : Number.MAX_SAFE_INTEGER} AND id IN
-      (SELECT id FROM inbox i WHERE delivered=0 AND NOT EXISTS
-        (SELECT 1 FROM inbox p WHERE p.delivered=0 AND p.repository=i.repository AND p.rowid<i.rowid))
-      ORDER BY rowid LIMIT ?`).all(limit).map(row => ({ id: String(row.id), repositoryId: String(row.repository),
-      trigger: JSON.parse(String(row.value)) as Trigger, attempts: Number(row.attempts), ...(row.error ? { error: String(row.error) } : {}) }))
+    const routes = this.routes()
+    const chats = [...routes.chats].filter(([, owner]) => owner !== undefined).map(([chat]) => chat)
+    const repositories = [...routes.repositories].filter(([, enabled]) => enabled).map(([id]) => id)
+    if (!chats.length || !repositories.length) return []
+    const marks = (items: string[]): string => items.map(() => '?').join(',')
+    return this.db.prepare(`SELECT * FROM inbox i WHERE delivered=0 AND next_at<=? AND chat IN (${marks(chats)}) AND repository IN (${marks(repositories)})
+      AND NOT EXISTS (SELECT 1 FROM inbox p WHERE p.delivered=0 AND p.thread=i.thread AND p.rowid<i.rowid)
+      ORDER BY rowid LIMIT ?`).all(due ? Date.now() : Number.MAX_SAFE_INTEGER, ...chats, ...repositories, limit)
+      .map(row => this.item(row)).filter(item => !this.holdOf(item, routes))
+  }
+  /** Every undelivered message with its hold reason; the management view explains work that waits in a paused group. */
+  outstanding(limit = 200): QueuedItem[] {
+    const routes = this.routes()
+    return this.db.prepare('SELECT * FROM inbox WHERE delivered=0 ORDER BY rowid LIMIT ?').all(limit).map(row => {
+      const item = this.item(row), hold = this.holdOf(item, routes)
+      return hold ? { ...item, hold } : item
+    })
+  }
+  /** Undelivered message counts per repository and group. */
+  queueCounts(): QueueCount[] {
+    return this.db.prepare('SELECT repository,chat,COUNT(*) AS count FROM inbox WHERE delivered=0 GROUP BY repository,chat ORDER BY repository,chat')
+      .all().map(row => ({ repositoryId: String(row.repository), chatId: String(row.chat), count: Number(row.count) }))
   }
   delivered(id: string): void { this.db.prepare('UPDATE inbox SET delivered=1,error=NULL WHERE id=?').run(id) }
   failed(id: string, error: string): void { this.db.prepare('UPDATE inbox SET attempts=attempts+1,error=?,next_at=? WHERE id=?').run(error.slice(0, 1000), Date.now() + Math.min(60000, 2000 * 2 ** Math.min(5, Number(this.db.prepare('SELECT attempts FROM inbox WHERE id=?').get(id)?.attempts ?? 0))), id) }
@@ -99,5 +135,26 @@ export class ManagerStore {
   static identity(): Pick<Repository, 'id' | 'token' | 'profile'> {
     const id = randomUUID()
     return { id, token: randomBytes(32).toString('hex'), profile: `superagent-${id.slice(0, 8)}` }
+  }
+  private item(row: Record<string, unknown>): JournalItem {
+    const trigger = JSON.parse(String(row.value)) as Trigger
+    return { id: String(row.id), repositoryId: String(row.repository), chatId: String(row.chat ?? trigger.meta.chatId ?? ''),
+      thread: String(row.thread ?? trigger.threads[0]?.id ?? ''), trigger, attempts: Number(row.attempts), nextAt: Number(row.next_at),
+      ...(row.error ? { error: String(row.error) } : {}) }
+  }
+  private routes(): { chats: Map<string, string | undefined>; repositories: Map<string, boolean>; pins: Map<string, string> } {
+    const chats = new Map<string, string | undefined>()
+    for (const binding of this.bindings()) chats.set(binding.chatId, binding.enabled ? binding.repositoryId : undefined)
+    const repositories = new Map(this.repositories().map(item => [item.id, item.enabled]))
+    const pins = new Map(this.db.prepare('SELECT thread,repository FROM routes').all().map(row => [String(row.thread), String(row.repository)]))
+    return { chats, repositories, pins }
+  }
+  private holdOf(item: JournalItem, routes: ReturnType<ManagerStore['routes']>): HoldReason | undefined {
+    if (!routes.chats.has(item.chatId)) return 'binding-missing'
+    if (routes.chats.get(item.chatId) === undefined) return 'group-disabled'
+    if (routes.repositories.get(item.repositoryId) === false) return 'repository-disabled'
+    const pinned = routes.pins.get(item.thread)
+    if (pinned && pinned !== item.repositoryId) return 'thread-reassigned'
+    return undefined
   }
 }

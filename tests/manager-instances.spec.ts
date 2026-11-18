@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { instanceHome, provision } from '../src/manager/instances.ts'
 import { ManagerStore, type Repository } from '../src/manager/store.ts'
+import { readiness } from '../src/manager/readiness.ts'
 import { Store } from '../src/app/store.ts'
 
 let directory: string, repository: Repository
@@ -45,6 +46,30 @@ it('preserves settings and avoids reprovisioning an initialized instance on rest
   const reopened = new Store(join(directory, 'repositories', repository.id, 'orchestrator.sqlite'))
   try { expect(reopened.settings().executor.maxWorkers).toBe(2) } finally { reopened.close() }
   expect(readFileSync(join(instanceHome(directory, repository.id), 'calls.jsonl'), 'utf8').trim().split('\n')).toHaveLength(2)
+})
+it('provisions a repository that works through GitHub before Feishu is connected', async () => {
+  // No bot CLI and no groups: the repository must still start and pick up GitHub work.
+  await provision(repository, directory, 'http://127.0.0.1:3082', '', [])
+  const store = new Store(join(directory, 'repositories', repository.id, 'orchestrator.sqlite'))
+  try {
+    const settings = store.settings()
+    expect(settings.sources.github).toMatchObject({ enabled: true, config: { repository: repository.remote } })
+    expect(settings.sources.feishu?.config).toMatchObject({ cli: '', chats: [] })
+  } finally { store.close() }
+  expect(existsSync(join(instanceHome(directory, repository.id), 'profiles', repository.profile, '.superagent-ready'))).toBe(true)
+})
+it('reports Feishu readiness as a repair instead of blocking a GitHub-only repository', () => {
+  const pending = { total: 0, byChat: {} }
+  const offline = readiness({ repository, status: { online: true, configured: true }, bot: false, groups: 0, pending })
+  expect(offline.repository).toMatchObject({ state: 'ok' })
+  expect(offline.feishu).toMatchObject({ state: 'pending', repair: 'feishu' })
+  expect(offline.agent).toMatchObject({ state: 'unknown', repair: 'agent' })
+  expect(offline.delivery).toMatchObject({ state: 'ok', pending: 0 })
+  const connected = readiness({ repository, status: { online: true, configured: true }, bot: true, groups: 2, pending: { total: 3, byChat: { oc_team: 3 } } })
+  expect(connected.feishu).toMatchObject({ state: 'ok', detail: '2 个飞书群' })
+  expect(connected.delivery).toMatchObject({ state: 'pending', detail: '3 条消息待投递', byChat: { oc_team: 3 } })
+  const disabled = readiness({ repository: { ...repository, enabled: false }, status: { online: true, configured: true }, bot: true, groups: 1, pending })
+  expect(disabled.repository).toMatchObject({ state: 'error', repair: 'repository' })
 })
 it('refuses to overwrite an unowned profile', async () => {
   mkdirSync(join(instanceHome(directory, repository.id), 'profiles', repository.profile), { recursive: true })
