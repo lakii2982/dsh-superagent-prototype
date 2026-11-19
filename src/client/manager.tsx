@@ -7,7 +7,7 @@ import { createContext, useCallback, useContext, useEffect, useState, type FormE
 import { usePoll } from './api.ts'
 import { usePanelMode } from './mode.ts'
 import { Content, Header, NavRail, Rail, ShellFrame, titleOf, type NavGroup } from './app.tsx'
-import { Button, Icon, Input, Switch, Tag } from './controls.tsx'
+import { Button, Icon, Input, Tag } from './controls.tsx'
 import { PanelProvider, usePanel, usePanelData } from './provider.tsx'
 import { MANAGER_HOME, initialLocation, lastSettingsGroup, remember, routeLabel, type Location, type ManagerArea, type RepoRoute,
   type Route } from './route.ts'
@@ -186,7 +186,7 @@ export function ManagerPanel({ t }: { t: T }) {
   if (!view) return <ShellFrame rail={<NavRail brand={{ name: t('panel'), subtitle: tr('管理', 'Manager') }} groups={[]}
     label={t('pagesLabel')} />}>
     <style>{STYLES}</style>
-    <header className="dt-head"><h1 className="dt-title">{t('manager.repositories')}</h1></header>
+    <header className="dt-head"><h1 className="dt-title">{t('manager.manageRepositories')}</h1></header>
     <p className={error ? 'dt-error' : 'dt-hint'} role={error ? 'alert' : undefined}>{error ? errorText(error) : t('loading')}</p>
   </ShellFrame>
   const manager: ManagerApi = { t, tr, view, busy, error: actionError, stateError: error ? errorText(error) : '', navigate, run, reload }
@@ -194,7 +194,7 @@ export function ManagerPanel({ t }: { t: T }) {
   if (!repo) return <ShellFrame rail={<NavRail brand={{ name: t('panel'), subtitle: tr('管理', 'Manager') }} groups={[]}
     label={t('pagesLabel')} />}>
     <style>{STYLES}</style>
-    <header className="dt-head"><h1 className="dt-title">{t('manager.repositories')}</h1></header>
+    <header className="dt-head"><h1 className="dt-title">{t('manager.manageRepositories')}</h1></header>
     <p className="dt-hint">{t('loading')}</p>
   </ShellFrame>
   return <PanelProvider key={repo.id} t={t} apiBase={`/orchestrator/manager/repositories/${encodeURIComponent(repo.id)}/api/`}
@@ -364,7 +364,8 @@ function BindingsPage() {
         <div className="dt-card-head"><div className="dt-row-main"><div className="dt-row-title">{view.chats[binding.chatId] || binding.chatId}</div>
           <div className="dt-row-meta">→ {view.repositories.find(repository => repository.id === binding.repositoryId)?.name
             ?? binding.repositoryId}</div></div>
-          <Switch label={tr('启用群接单与回复', 'Enable group intake and replies')} checked={binding.enabled} onChange={() => { void toggle(binding.chatId) }} />
+          <Button variant="outline" size="sm" disabled={busy} onClick={() => { void toggle(binding.chatId) }}>{binding.enabled
+            ? tr('停用群接单与回复', 'Disable group intake and replies') : tr('恢复群接单与回复', 'Enable group intake and replies')}</Button>
         </div>
       </div>)}</div> : <Hint>{tr('还没有绑定。', 'No binding yet.')}</Hint>}
     </Section>

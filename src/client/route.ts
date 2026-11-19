@@ -27,7 +27,7 @@ export const settingsRoute = (group: SettingsGroup, query: { source?: string; ve
 export const setupPage = (place: SetupPlace): Route =>
   place === 'deployment' ? settingsRoute('deployment') : settingsRoute('source', { source: place })
 export const routeLabel = (t: T, route: Route): string => {
-  if (route.page === 'manager') return t(`manager.${route.query.area}`)
+  if (route.page === 'manager') return t(route.query.area === 'repositories' ? 'manager.manageRepositories' : `manager.${route.query.area}`)
   return route.id ? t(route.page === 'trigger' ? 'term.thread' : 'term.ticket')
     : route.page === 'repository' ? t('nav.repository') : t(`tab.${route.page}`)
 }
