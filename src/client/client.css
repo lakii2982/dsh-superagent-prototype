@@ -370,12 +370,19 @@ a.dt-btn, a.dt-btn:hover { text-decoration: none; }
 .dt-rail-brand { display: flex; align-items: center; gap: 9px; padding: 0 6px 18px; color: var(--dsw-alias-label-primary); font-size: 13px; line-height: 20px; font-weight: 600; }
 .dt-rail-mark { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 7px; background: var(--dsw-alias-label-primary); color: var(--dsw-alias-bg-base); font-size: 12px; line-height: 1; }
 .dt-rail-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dt-rail-ident { display: flex; flex-direction: column; min-width: 0; }
+.dt-rail-sub { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dsw-alias-label-tertiary); font-size: 11px; line-height: 16px; font-weight: 400; }
+.dt-rail-dot { margin-left: auto; flex: none; }
+.dt-rail-count + .dt-rail-dot { margin-left: 4px; }
+.dt-checks { display: flex; flex-wrap: wrap; gap: 8px 16px; }
+.dt-check { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; line-height: 20px; }
 .dt-rail-nav { display: flex; flex-direction: column; gap: 22px; }
 .dt-rail-group { display: flex; flex-direction: column; gap: 2px; }
 .dt-rail-group-title { margin: 0 8px 6px; color: var(--dsw-alias-label-tertiary); font-size: 11px; line-height: 16px; font-weight: 500; letter-spacing: 0.02em; }
 .dt-rail-item { display: flex; align-items: center; gap: 10px; width: 100%; height: 32px; padding: 0 8px; border: 0; border-radius: 8px; background: transparent; color: var(--dsw-alias-label-secondary); font: inherit; font-size: 13px; line-height: 20px; text-align: left; cursor: pointer; }
 .dt-rail-item:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
 .dt-rail-item[aria-current='page'] { background: var(--dsw-alias-interactive-bg-active); color: var(--dsw-alias-label-primary); font-weight: 500; }
+.dt-rail-item[data-selected] { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
 .dt-rail-item:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: -2px; }
 .dt-rail-icon { display: inline-flex; flex: none; }
 .dt-rail-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
