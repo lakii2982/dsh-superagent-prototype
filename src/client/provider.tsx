@@ -13,6 +13,8 @@ export interface PanelContext {
   back: () => void
   backLabel: string
   openSession: (sessionId: string) => Promise<void>
+  /** The Session lives in a managed repository's own DSH instance, so an open action opens that workspace instead. */
+  remote: boolean
   notify: (text: string) => void
   restart: () => void
 }
@@ -71,15 +73,17 @@ function Toast({ text, onDone, holdMs = 3000 }: { text: string; onDone: () => vo
 }
 const stay = () => {}
 const noSession = async () => {}
-export function PanelProvider({ t, interval = 5000, openSession = noSession, navigate = stay, back = stay, backLabel = '', children }: {
-  t: T; interval?: number; openSession?: (sessionId: string) => Promise<void>; navigate?: PanelContext['navigate']; back?: () => void
+export function PanelProvider({ t, interval = 5000, apiBase, remote = false, openSession = noSession, navigate = stay, back = stay,
+  backLabel = '', children }: {
+  t: T; interval?: number; apiBase?: string; remote?: boolean; openSession?: (sessionId: string) => Promise<void>
+  navigate?: PanelContext['navigate']; back?: () => void
   backLabel?: string
   children: ReactNode
 }) {
   // Read the current translator via ref so locale changes do not recreate `call` and restart polling.
   const copy = useRef(t)
   copy.current = t
-  const call = useMemo(() => caller(() => messages(copy.current)), [])
+  const call = useMemo(() => caller(() => messages(copy.current), apiBase), [apiBase])
   const [toast, setToast] = useState<{ text: string; id: number }>()
   const notify = useCallback((text: string) => setToast({ text, id: Date.now() }), [])
   // Poll at 1s during a restart until the server goes down and answers again, or time out after 30s if the restart completed between polls.
@@ -96,8 +100,8 @@ export function PanelProvider({ t, interval = 5000, openSession = noSession, nav
     const timer = setTimeout(() => setRestarting(undefined), 30_000)
     return () => clearTimeout(timer)
   }, [restarting])
-  const context = useMemo(() => ({ t, call, navigate, back, backLabel, openSession, notify, restart }), [t, call, navigate, back, backLabel,
-    openSession, notify, restart])
+  const context = useMemo(() => ({ t, call, navigate, back, backLabel, openSession, remote, notify, restart }), [t, call, navigate, back, backLabel,
+    openSession, remote, notify, restart])
   const data = useMemo(() => ({ state, error, reload, setup: state?.setup, running: state?.load.running ?? 0, restarts }), [state, error,
     reload, restarts])
   return <Panel.Provider value={context}><PanelState.Provider value={data}>

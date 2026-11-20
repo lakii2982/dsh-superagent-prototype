@@ -110,6 +110,39 @@ it('hides instance credentials and rejects cross-origin browser and unauthentica
   const wrong = feishu('1', 'wrong group', { chat_id: 'oc_second' })
   expect((await request(`internal/${repository.id}/receive`, wrong, 'POST', { authorization: `Bearer ${repository.token}` })).status).toBe(400)
 })
+it('forwards a managed repository panel request with its own credential and keeps that credential in the manager', async () => {
+  const seen: { method: string; url: string; auth: string; body: string }[] = []
+  const upstream = createServer(async (req, res) => {
+    let body = ''
+    for await (const chunk of req) body += chunk
+    seen.push({ method: req.method ?? 'GET', url: req.url ?? '', auth: req.headers.authorization ?? '', body })
+    response(res, { ok: true, method: req.method, body: body ? JSON.parse(body) as unknown : null })
+  })
+  const port = await listen(upstream)
+  const proxy = { ...ManagerStore.identity(), port, name: 'Proxy', remote: 'acme/proxy', directory: '/repo/proxy', githubCli: '/bin/false',
+    allowedGithub: [], allowedFeishu: [], enabled: true }
+  manager.store.save([...manager.store.repositories(), proxy], manager.store.bindings(), manager.store.revision())
+  try {
+    const get = await request(`manager/repositories/${proxy.id}/api/state?scope=1`)
+    expect(get.status).toBe(200)
+    expect(await get.json()).toEqual({ ok: true, method: 'GET', body: null })
+    expect(seen.find(item => item.url === '/orchestrator/instance/state?scope=1')).toMatchObject({ method: 'GET',
+      auth: `Bearer ${proxy.token}` })
+    const body = { revision: 2, value: { sources: {} } }
+    const put = await request(`manager/repositories/${proxy.id}/api/settings/policy`, body, 'PUT')
+    expect(put.status).toBe(200)
+    expect(await put.json()).toEqual({ ok: true, method: 'PUT', body })
+    expect(seen.find(item => item.url === '/orchestrator/instance/settings/policy')).toMatchObject({ method: 'PUT',
+      auth: `Bearer ${proxy.token}`, body: JSON.stringify(body) })
+    // Traversal, an unknown repository and an unsupported method never reach an instance.
+    expect((await request(`manager/repositories/${proxy.id}/api/..%2f..%2fetc/passwd`)).status).toBe(400)
+    expect((await request('manager/repositories/not-a-repository/api/state')).status).toBe(404)
+    expect((await request(`manager/repositories/${proxy.id}/api/state`, undefined, 'DELETE')).status).toBe(405)
+    // An offline instance answers with its own reason instead of exposing or reusing the token elsewhere.
+    await close(upstream)
+    expect((await request(`manager/repositories/${proxy.id}/api/state`)).status).toBe(502)
+  } finally { if (upstream.listening) await close(upstream) }
+})
 it('delivers a persisted event only to its authenticated instance and acknowledges duplicate ingress', async () => {
   const fake = fakeOf(repository.id)
   const trigger = feishu('1', 'request')

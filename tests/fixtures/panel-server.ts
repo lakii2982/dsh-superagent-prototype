@@ -13,6 +13,7 @@ import type { DroppedReply, HistoryView, Problem, PromptsView, SetupView, Source
   TicketRow, TicketStage,
   TriggerRow } from '../../src/client/api.ts'
 import { SETUP_FIELDS } from '../../src/deployment.ts'
+import type { ManagerView } from '../../src/client/manager.tsx'
 import { EvalConfigSchema, ExecutorConfigSchema, PolicyConfigSchema, SettingsSchema } from '../../src/policy.ts'
 import { SetupError, type SetupCode } from '../../src/setup.ts'
 import { feishuChannel } from '../../src/sources/feishu-trigger.ts'
@@ -96,6 +97,8 @@ export interface PanelServer {
   threadPages: (key: string, query: { before?: string; around?: string }) => ThreadPageView | undefined
   person: TicketRow[]; search: Pick<ApiResponse<'GET search'>, 'items' | 'threads'>; history: HistoryView
   requests: { path: string; method: string; body?: unknown }[]
+  /** Requests the manager forwarded to a registered repository's panel API, by repository and API path. */
+  proxied: { repository: string; path: string }[]
   /** Requests with undeclared query params or invalid body presence; asserted empty after each test. */
   misuse: string[]
   queued: Set<string>
@@ -252,7 +255,7 @@ function initial(): PanelServer {
     en: 'Feishu message' } }
   const defaults = { revision: 0, previousRevision: null, savedAt: '', source: 'defaults' }
   return {
-    health: {}, down: false, pending: 0, opened: [], requests: [], misuse: [], queued: new Set(), dropped: [], failing: [],
+    health: {}, down: false, pending: 0, opened: [], requests: [], proxied: [], misuse: [], queued: new Set(), dropped: [], failing: [],
     setup: { machine: MACHINE, problem: null, feishuProblem: null,
       accounts: { repository: 'acme/widgets', agent: 'agent-bot', feishu: { appId: 'cli_bot', brand: 'feishu', botId: 'ou_bot',
         name: 'Widgets Bot' } } },
@@ -445,15 +448,19 @@ class Reply extends Response {
   override async text() { server.pending--; return super.text() }
 }
 
-export function usePanelServer(cleanup: () => void) {
+export function usePanelServer(cleanup: () => void, manager?: ManagerView) {
   beforeEach(() => {
     sessionStorage.clear()
     server = initial()
     vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit): Promise<Response> => {
       if (server.down) return new Response(null, { status: 404 })
       const address = new URL(url, 'http://127.0.0.1:3082')
-      if (address.pathname === '/orchestrator/mode') return Response.json({ mode: 'standalone' })
-      const path = address.pathname.replace('/orchestrator/api/', '')
+      if (address.pathname === '/orchestrator/mode') return Response.json({ mode: manager ? 'manager' : 'standalone' })
+      if (manager && address.pathname === '/orchestrator/manager/state') return Response.json(manager)
+      // In manager mode the repository panel talks to the manager's authenticated proxy, not to a local engine.
+      const proxy = /^\/orchestrator\/manager\/repositories\/([^/]+)\/api\/(.*)$/.exec(address.pathname)
+      if (proxy) server.proxied.push({ repository: proxy[1]!, path: decodeURIComponent(proxy[2]!) })
+      const path = proxy ? proxy[2]! : address.pathname.replace('/orchestrator/api/', '')
       const method = init?.method ?? 'GET'
       const body: unknown = init?.body ? JSON.parse(String(init.body)) : undefined
       server.requests.push({ path: decodeURIComponent(`${path}${address.search}`), method, ...body === undefined ? {} : { body } })

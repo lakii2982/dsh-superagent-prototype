@@ -1,7 +1,7 @@
 /** Root panel shell: one left rail of work areas and a single scrolling detail column, without page tabs. */
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { usePoll, type SearchView } from './api.ts'
-import { Button, Dot, Icon, Input, Modal, type IconName } from './controls.tsx'
+import { Button, Dot, Icon, Input, Modal, StateDot, type DotState, type IconName } from './controls.tsx'
 import type { DeploymentForm } from './deployment.tsx'
 import { EvalStatus } from './eval.tsx'
 import { ExecutionStatus } from './execution.tsx'
@@ -10,7 +10,8 @@ import { GLOSSARY, GLOSSARY_VALUES, en, zh, type DshSuperagentKey } from './loca
 import { OverviewPage } from './overview.tsx'
 import { RepositoryPage } from './repository.tsx'
 import { PanelProvider, usePanel, usePanelData } from './provider.tsx'
-import { HOME, initialLocation, lastSettingsGroup, remember, routeLabel, settingsRoute, type Location, type Route, type SettingsGroup } from './route.ts'
+import { HOME, initialLocation, lastSettingsGroup, remember, routeLabel, settingsRoute, type Location, type RepoRoute, type Route,
+  type SettingsGroup } from './route.ts'
 import { SettingsPage } from './settings.tsx'
 import { SourceStatus } from './source.tsx'
 import { actorName, errorText, reasonLabel, valueLabel, type T, readableMarkers } from './text.ts'
@@ -99,8 +100,8 @@ function SearchResults({ result, query, onClose }: { result: SearchView; query: 
 }
 
 /** The detail column's title area: the work area's name, global search, the glossary and the main Session shortcut. */
-function Header({ title, masterId }: { title: string | undefined; masterId: string | undefined }) {
-  const { t, call, openSession, notify } = usePanel()
+export function Header({ title, masterId }: { title: string | undefined; masterId: string | undefined }) {
+  const { t, call, openSession, notify, remote } = usePanel()
   const [glossary, setGlossary] = useState(false)
   const [query, setQuery] = useState('')
   const [result, setResult] = useState<{ query: string; value: SearchView }>()
@@ -133,7 +134,8 @@ function Header({ title, masterId }: { title: string | undefined; masterId: stri
       <Button variant="ghost" size="sm" icon={<Icon name="question" />} aria-label={t('glossary')} title={t('glossary')} aria-haspopup="dialog"
         onClick={() => setGlossary(true)} />
       <Button variant="outline" size="sm" icon={<Icon name="session" size={14} />} disabled={!masterId}
-        onClick={() => { if (masterId) openSession(masterId).catch(failure => notify(errorText(failure))) }}>{t('openMaster')}</Button>
+        onClick={() => { if (masterId) openSession(masterId).catch(failure => notify(errorText(failure))) }}>{t(remote
+          ? 'manager.openWorkspace' : 'openMaster')}</Button>
     </div>
     <Glossary open={glossary} onClose={() => setGlossary(false)} />
   </header>
@@ -141,7 +143,7 @@ function Header({ title, masterId }: { title: string | undefined; masterId: stri
 
 /** The work area a route belongs to, used for the rail's current item and for its title. */
 type Area = 'inbox' | 'tasks' | 'repository' | 'source' | 'trigger' | 'eval' | 'prompts' | 'settings'
-function areaOf(route: Route): Area {
+function areaOf(route: RepoRoute): Area {
   switch (route.page) {
     case 'overview': return 'inbox'
     case 'execution': return 'tasks'
@@ -154,54 +156,90 @@ const AREA_LABEL: Record<Area, DshSuperagentKey> = {
   inbox: 'nav.inbox', tasks: 'nav.tasks', repository: 'nav.repository', source: 'tab.source', trigger: 'tab.trigger',
   eval: 'tab.eval', prompts: 'nav.prompts', settings: 'tab.settings',
 }
+const isRepoRoute = (route: Route): route is RepoRoute => route.page !== 'manager'
 /**
  * The detail title names the work area, except while a Thread or Ticket is open: that page carries its own title and a back
  * button, so the header only keeps the global tools.
  */
-function titleOf(t: T, route: Route): string | undefined {
+export function titleOf(t: T, route: RepoRoute): string | undefined {
   const detail = (route.page === 'trigger' || route.page === 'execution') && route.id !== undefined
   return detail ? undefined : t(AREA_LABEL[areaOf(route)])
 }
 
-interface RailItem { area: Area; label: string; icon: IconName; route: Route; count?: number }
-function Rail({ route, settingsGroup }: { route: Route; settingsGroup: SettingsGroup }) {
-  const { t, call, navigate } = usePanel()
-  const { state } = usePanelData()
-  const { data: overview } = usePoll(() => call('GET overview'), [])
-  const active = areaOf(route)
-  const groups: { title: DshSuperagentKey; items: RailItem[] }[] = [
-    { title: 'nav.groupWork', items: [
-      { area: 'inbox', label: t('nav.inbox'), icon: 'inbox', route: { page: 'overview' }, count: overview?.person.length },
-      { area: 'tasks', label: t('nav.tasks'), icon: 'queue', route: { page: 'execution' }, count: state?.load.running },
-      { area: 'repository', label: t('nav.repository'), icon: 'hash', route: { page: 'repository' } },
-    ] },
-    { title: 'nav.groupFlow', items: [
-      { area: 'source', label: t('tab.source'), icon: 'hash', route: { page: 'source' } },
-      { area: 'trigger', label: t('tab.trigger'), icon: 'message', route: { page: 'trigger' } },
-      { area: 'eval', label: t('tab.eval'), icon: 'decision', route: { page: 'eval' } },
-    ] },
-    { title: 'nav.groupConfigure', items: [
-      { area: 'prompts', label: t('nav.prompts'), icon: 'review', route: settingsRoute('prompts') },
-      { area: 'settings', label: t('tab.settings'), icon: 'settings', route: settingsRoute(route.page === 'settings' ? 'source' : settingsGroup) },
-    ] },
-  ]
+/** One navigation row, shared by the standalone rail and the manager's control rail. */
+export interface NavItem {
+  key: string; label: string; icon: IconName; active: boolean; selected?: boolean; count?: number; dot?: DotState
+  onSelect: () => void
+}
+/** A titled group of navigation rows. */
+export interface NavGroup { title: string; items: NavItem[] }
+/** The one left rail used by every panel context; the detail column decides the page, the rail only navigates. */
+export function NavRail({ brand, groups, label }: { brand: { name: string; subtitle?: string }; groups: NavGroup[]; label: string }) {
   return <aside className="dt-rail">
-    <div className="dt-rail-brand"><span className="dt-rail-mark">S</span><span className="dt-rail-name">{t('panel')}</span></div>
-    <nav className="dt-rail-nav" aria-label={t('pagesLabel')}>
-      {groups.map(group => <div key={group.title} className="dt-rail-group">
-        <p className="dt-rail-group-title">{t(group.title)}</p>
-        {group.items.map(item => <button key={item.area} type="button" className="dt-rail-item"
-          aria-current={active === item.area ? 'page' : undefined} onClick={() => navigate(item.route)}>
+    <div className="dt-rail-brand"><span className="dt-rail-mark">S</span><span className="dt-rail-ident">
+      <span className="dt-rail-name">{brand.name}</span>{brand.subtitle && <span className="dt-rail-sub">{brand.subtitle}</span>}
+    </span></div>
+    <nav className="dt-rail-nav" aria-label={label}>
+      {groups.filter(group => group.items.length).map(group => <div key={group.title} className="dt-rail-group">
+        <p className="dt-rail-group-title">{group.title}</p>
+        {group.items.map(item => <button key={item.key} type="button" className="dt-rail-item"
+          aria-current={item.active ? 'page' : undefined} data-selected={item.selected || undefined} onClick={item.onSelect}>
           <span className="dt-rail-icon"><Icon name={item.icon} size={16} /></span>
           <span className="dt-rail-label">{item.label}</span>
           {item.count ? <span className="dt-rail-count">{item.count}</span> : null}
+          {item.dot && <StateDot state={item.dot} className="dt-rail-dot" />}
         </button>)}
       </div>)}
     </nav>
   </aside>
 }
 
-function Content({ route, deploymentForm }: { route: Route; deploymentForm: DeploymentForm }) {
+/** The repository panel's areas, shared with the manager so a managed repository keeps the same nine work areas. */
+export function useRepoNav(route: RepoRoute, settingsGroup: SettingsGroup): NavGroup[] {
+  const { t, call, navigate } = usePanel()
+  const { state } = usePanelData()
+  const { data: overview } = usePoll(() => call('GET overview'), [])
+  const active = areaOf(route)
+  const item = (area: Area, label: string, icon: IconName, target: Route, count?: number): NavItem =>
+    ({ key: area, label, icon, active: active === area, count, onSelect: () => navigate(target) })
+  return [
+    { title: t('nav.groupWork'), items: [
+      item('inbox', t('nav.inbox'), 'inbox', { page: 'overview' }, overview?.person.length),
+      item('tasks', t('nav.tasks'), 'queue', { page: 'execution' }, state?.load.running),
+      item('repository', t('nav.repository'), 'hash', { page: 'repository' }),
+    ] },
+    { title: t('nav.groupFlow'), items: [
+      item('source', t('tab.source'), 'hash', { page: 'source' }),
+      item('trigger', t('tab.trigger'), 'message', { page: 'trigger' }),
+      item('eval', t('tab.eval'), 'decision', { page: 'eval' }),
+    ] },
+    { title: t('nav.groupConfigure'), items: [
+      item('prompts', t('nav.prompts'), 'review', settingsRoute('prompts')),
+      item('settings', t('tab.settings'), 'settings', settingsRoute(route.page === 'settings' ? 'source' : settingsGroup)),
+    ] },
+  ]
+}
+
+/** The repository rail: the standard areas, with the manager's groups prepended when the repository is managed. */
+export function Rail({ route, settingsGroup, extraGroups = [], subtitle }: {
+  route: RepoRoute; settingsGroup: SettingsGroup; extraGroups?: NavGroup[]; subtitle?: string
+}) {
+  const { t } = usePanel()
+  return <NavRail brand={{ name: t('panel'), ...subtitle ? { subtitle } : {} }} groups={[...extraGroups, ...useRepoNav(route, settingsGroup)]}
+    label={t('pagesLabel')} />
+}
+
+/** The shared shell frame: one left rail and one scrolling detail column. */
+export function ShellFrame({ rail, children }: { rail: ReactNode; children: ReactNode }) {
+  return <div className="dt-shell">
+    {rail}
+    <main className="dt-workspace" id="dt-page">
+      <div className="dt-workspace-inner">{children}</div>
+    </main>
+  </div>
+}
+
+export function Content({ route, deploymentForm }: { route: RepoRoute; deploymentForm: DeploymentForm }) {
   const { t } = usePanel()
   const { state, error, reload } = usePanelData()
   const waiting = error ? <p className="dt-error" role="alert">{error.message}</p> : <p className="dt-hint">{t('loading')}</p>
@@ -220,25 +258,23 @@ function Content({ route, deploymentForm }: { route: Route; deploymentForm: Depl
   }
 }
 
-/** The global shell: a grouped left rail and one scrolling detail column. */
-function Shell({ route, deploymentForm, settingsGroup }: { route: Route; deploymentForm: DeploymentForm; settingsGroup: SettingsGroup }) {
+/** The standalone shell: a grouped left rail and one scrolling detail column. */
+function Shell({ route, deploymentForm, settingsGroup }: { route: RepoRoute; deploymentForm: DeploymentForm; settingsGroup: SettingsGroup }) {
   const { t } = usePanel()
   const { state, error } = usePanelData()
-  return <div className="dt-shell">
-    <Rail route={route} settingsGroup={settingsGroup} />
-    <main className="dt-workspace" id="dt-page">
-      <div className="dt-workspace-inner">
-        <Header title={titleOf(t, route)} masterId={state?.masterId} />
-        {error && state && <p className="dt-error" role="status">{error.message}</p>}
-        <Content route={route} deploymentForm={deploymentForm} />
-      </div>
-    </main>
-  </div>
+  return <ShellFrame rail={<Rail route={route} settingsGroup={settingsGroup} />}>
+    <Header title={titleOf(t, route)} masterId={state?.masterId} />
+    {error && state && <p className="dt-error" role="status">{error.message}</p>}
+    <Content route={route} deploymentForm={deploymentForm} />
+  </ShellFrame>
 }
 
 /** Root panel component managing route history and shared panel state. */
 export function App({ t, openSession, deploymentForm }: AppProps) {
-  const [location, setLocation] = useState(initialLocation)
+  const [location, setLocation] = useState<Location>(() => {
+    const stored = initialLocation()
+    return isRepoRoute(stored.route) ? { ...stored, stack: stored.stack.filter(isRepoRoute) } : { route: HOME, stack: [] }
+  })
   useEffect(() => { remember(location) }, [location])
   // Preserve the last opened settings group across navigation so the Settings area reopens where it was.
   const move = useCallback((next: (current: Location) => Pick<Location, 'route' | 'stack'>) =>
@@ -246,8 +282,12 @@ export function App({ t, openSession, deploymentForm }: AppProps) {
   /** Navigates to `route`; `replace` swaps the current entry (filters, paging) instead of pushing a back step. */
   const navigate = useCallback((route: Route, replace = false) => move(current => ({ route,
     stack: replace ? current.stack : [...current.stack, current.route].slice(-20) })), [move])
-  const back = useCallback(() => move(current => ({ route: current.stack.at(-1) ?? HOME, stack: current.stack.slice(0, -1) })), [move])
+  const back = useCallback(() => move(current => {
+    const previous = current.stack.at(-1)
+    return { route: previous && isRepoRoute(previous) ? previous : HOME, stack: current.stack.slice(0, -1) }
+  }), [move])
+  const route: RepoRoute = isRepoRoute(location.route) ? location.route : { page: 'overview' }
   return <PanelProvider t={t} openSession={openSession} navigate={navigate} back={back} backLabel={routeLabel(t, location.stack.at(-1) ?? HOME)}>
-    <Shell route={location.route} deploymentForm={deploymentForm} settingsGroup={lastSettingsGroup(location)} />
+    <Shell route={route} deploymentForm={deploymentForm} settingsGroup={lastSettingsGroup(location)} />
   </PanelProvider>
 }

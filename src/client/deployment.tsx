@@ -5,7 +5,7 @@
 import { useCallback, useMemo, useSyncExternalStore } from 'react'
 import type { ConfigForm } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { ConfigPageForm } from '@deepseek-ai/dsh-client-ui-plugin-manager/client'
-import { ModePanel } from './manager.tsx'
+import { usePanelMode } from './mode.ts'
 import { LIMITS } from '../limits.ts'
 import type { SetupView } from './api.ts'
 import { InfoTip, Input } from './controls.tsx'
@@ -95,5 +95,9 @@ function PluginPage({ form }: { form: DeploymentForm }) {
 }
 /** DSH Plugin Manager config view entry; renders nothing in `summary` mode because DSH displays the package description. */
 export function PluginConfig({ t, view, form }: { t: T; view: 'page' | 'summary'; form: DeploymentForm }) {
-  return view === 'page' ? <ModePanel t={t}><PanelProvider t={t} interval={10_000}><PluginPage form={form} /></PanelProvider></ModePanel> : null
+  const { mode } = usePanelMode()
+  if (view !== 'page') return null
+  if (mode === 'manager') return <p className="dt-hint">{t('manager.usePanel')}</p>
+  if (!mode) return <p className="dt-hint">{t('loading')}</p>
+  return <PanelProvider t={t} interval={10_000}><PluginPage form={form} /></PanelProvider>
 }

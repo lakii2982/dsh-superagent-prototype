@@ -29,6 +29,19 @@ window does:
 The rail marks the current area. A Thread or Ticket page carries its own title and back button, so the detail header then
 shows only the global tools.
 
+### Manager mode
+
+A deployment started with `mode: manager` uses the same shell, not a second product. Its rail adds a **Manager** group
+(Repositories, Deliveries and status, Group bindings, Feishu bot) and a **Repositories** group listing the registered
+repositories. Selecting one keeps the manager's groups and adds that repository's own Workspace, Flow and Configuration
+areas, so Inbox through Settings are the same pages as in a standalone deployment. The manager forwards those pages'
+requests to the repository's isolated DSH instance with the credential it keeps, so the browser never receives it.
+
+Sessions and workspaces belong to the repository's own DSH instance. Session buttons in a managed repository's pages open
+that repository's workspace in a new tab instead. The repository list marks the selected repository;
+starting, stopping, editing access and opening a workspace stay on the manager's Repositories page. The manager control
+pages use headed sections for their forms and lists, so no horizontal page tabs remain anywhere in the panel.
+
 ### Reading individual records
 
 A dropped message links to its Ticket, or to its Thread when it has no Ticket. The Source page explains whether its conversation disappeared or the Source stopped listening to it.

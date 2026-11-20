@@ -380,11 +380,12 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/admission-context.ts` | The bounded window an assessment starts from: the first pages of a Trigger's Thread, read through its kind, and the messages around the Trigger |
 | `src/sources/feishu-image.ts` | Reads a Feishu message's image as an attachment for the assessing Session |
 | `src/client/index.tsx` | The client plugin entry: the sidebar entry, the main panel and the page in DeepSeek Harness's Plugin Manager |
-| `src/client/app.tsx` | The panel: the grouped left rail, the detail header with search and glossary, and the page of the current route |
+| `src/client/mode.ts` | `usePanelMode`: reads whether this deployment is standalone or the multi-repository manager, so the panel and the Plugin Manager config view choose their own content |
+| `src/client/app.tsx` | The shared panel shell: the grouped left rail (`NavRail`, `useRepoNav`), the detail header with search and glossary, the page of the current route, and the standalone route memory |
 | `src/client/repository.tsx` | The repository page of the global shell: current repository, health, and links into each work area |
-| `src/client/provider.tsx` | What every page reads from its host: copy, calls, navigation, notices, the state poll, and `restart`, which reads the state quickly while dsh-superagent restarts |
+| `src/client/provider.tsx` | What every page reads from its host: copy, calls (`apiBase` selects this deployment or a managed repository's proxy), navigation, notices, the state poll, `remote` for a managed repository, and `restart`, which reads the state quickly while dsh-superagent restarts |
 | `src/client/api.ts` | Calls and polls of the management API, typed by `src/app/api.ts`, and the Decision filters of the Eval status |
-| `src/client/route.ts` | The settings groups, the typed routes that `parseRoute` reads, and the route memory with the settings group opened last |
+| `src/client/route.ts` | The settings groups, the manager areas, the typed routes that `parseRoute` reads (a route may name the repository it belongs to), and the route memory with the settings group opened last |
 | `src/client/overview.tsx` | The overview |
 | `src/client/source.tsx`, `trigger.tsx`, `eval.tsx`, `execution.tsx` | One file per stage: its status, and its settings where it has some |
 | `src/client/thread.tsx`, `ticket.tsx` | The record pages: a Thread with its timeline, and a Ticket with its authorization, Inputs and Assignments |
@@ -405,12 +406,12 @@ Some generic modules still refer directly to GitHub or Feishu:
 
 `src/sources/github.ts` and `src/sources/feishu.ts` are also the entries of the two Source plugins, built by `tsdown.config.ts` and exported in `package.json` as `./github-watch` and `./feishu-watch`. The bundle's `cordis.patch.yml` inserts the three plugins, with Feishu disabled.
 
-| `src/client/manager.tsx` | Multi-repository management, deterministic Feishu routing and isolated execution |
+| `src/client/manager.tsx` | Manager mode in the unified panel: the control pages, the manager groups above the selected repository's own areas, and the mode switch |
 | `src/manager/protocol.ts` | Multi-repository management, deterministic Feishu routing and isolated execution |
 | `src/manager/store.ts` | Multi-repository management, deterministic Feishu routing and isolated execution |
 | `src/manager/instances.ts` | Multi-repository management, deterministic Feishu routing and isolated execution |
 | `src/manager/readiness.ts` | `readiness`: the five readiness dimensions of one Repository, instance, checkout, agent, Feishu and queued deliveries, each with its state, its detail and where an operator repairs it |
-| `src/manager/runtime.ts` | Multi-repository management, deterministic Feishu routing and isolated execution |
+| `src/manager/runtime.ts` | Multi-repository management, deterministic Feishu routing and isolated execution; forwards a registered repository's panel API with its credential |
 
 ## Tests
 
@@ -455,6 +456,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/client.spec.tsx`, `tests/navigation.spec.ts`, `tests/controls.spec.tsx` | The client plugin's registration and polling, Session navigation and route memory, the local controls, and the panel's imports, which have no cycle |
 | `tests/panel-overview.spec.tsx`, `panel-source.spec.tsx`, `panel-trigger.spec.tsx`, `panel-eval.spec.tsx`, `panel-execution.spec.tsx` | Each page of the panel, against a fake management API answered by route |
 | `tests/panel-settings.spec.tsx`, `panel-prompts.spec.tsx`, `panel-deployment.spec.tsx`, `panel-panel.spec.tsx` | The settings groups, drafts and history, the prompts, the Deployment page, and the panel's search, glossary and route memory |
+| `tests/panel-manager.spec.tsx` | Manager mode in the unified shell: the control rail, selecting a repository, its own pages through the manager's proxy, and every control form |
 | `tests/draft.spec.ts`, `tests/prompt-config.spec.ts`, `tests/markdown.spec.ts`, `tests/marks.spec.ts` | Draft states, merges and the save bar's line; the prompt configuration by section and the line diff; the Markdown subset and its links; the mark of every state the views classify |
 | `tests/locales.spec.ts`, `tests/styles.spec.ts` | The copy in both languages, the stylesheet |
 | `tests/class-docs.spec.ts` | Every class in `src` has a JSDoc block before it |

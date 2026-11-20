@@ -196,6 +196,14 @@ export class Manager {
       if (!sameOrigin(req, this.ctx.webServer.port)) { json(res, 403, { error: 'Same-origin management request required' }); return }
       const route = url.pathname.slice('/orchestrator/manager/'.length)
       if (!url.pathname.startsWith('/orchestrator/manager/')) { json(res, 404, { error: 'Unknown manager operation' }); return }
+      // The browser sees one panel: a managed repository's own API is forwarded with the credential the manager keeps.
+      const proxy = /^repositories\/([^/]+)\/api\/(.+)$/.exec(route)
+      if (proxy) {
+        const target = this.store.repositories().find(repository => repository.id === proxy[1])
+        if (!target) { json(res, 404, { error: 'Repository not found' }); return }
+        await this.forward(target, req, res, proxy[2]!, url.search)
+        return
+      }
       if (route === 'state' && req.method === 'GET') { json(res, 200, this.view()); return }
       if (route === 'bot' && req.method === 'PUT') {
         const { cli } = z.object({ cli: z.string().min(1) }).parse(await body(req))
@@ -299,6 +307,35 @@ export class Manager {
       const code = (error as { code?: number }).code
       json(res, 400, { error: errorText(error), ...(code ? { code } : {}) })
     }
+  }
+  /**
+   * Forward one panel request to a managed repository instance. Only the manager's own origin reaches this, and only a
+   * loopback port registered in the store; the repository token stays in this process and never reaches the browser.
+   */
+  private async forward(repository: Repository, req: IncomingMessage, res: ServerResponse, path: string, search: string): Promise<void> {
+    const method = req.method ?? 'GET'
+    if (method !== 'GET' && method !== 'POST' && method !== 'PUT') { json(res, 405, { error: 'Unsupported method' }); return }
+    let segments: string[]
+    try { segments = path.split('/').map(segment => decodeURIComponent(segment)) }
+    catch { json(res, 400, { error: 'A path segment has a malformed escape' }); return }
+    if (!segments.length || segments.some(segment => !segment || segment === '.' || segment === '..' || segment.includes('/') || segment.includes('\\'))) {
+      json(res, 400, { error: 'Invalid repository API path' }); return
+    }
+    let payload: string | undefined
+    if (method !== 'GET') payload = JSON.stringify(await body(req))
+    let upstream: Response
+    try {
+      upstream = await fetch(new URL(`/orchestrator/instance/${path}${search}`, `http://127.0.0.1:${repository.port}`), {
+        method, headers: { authorization: `Bearer ${repository.token}`, 'content-type': 'application/json' },
+        ...payload === undefined ? {} : { body: payload }, signal: AbortSignal.timeout(60_000), redirect: 'error',
+      })
+    } catch (error) {
+      json(res, 502, { error: `Repository instance is not reachable: ${errorText(error)}` }); return
+    }
+    const text = await upstream.text()
+    res.writeHead(upstream.status, { 'content-type': upstream.headers.get('content-type') ?? 'application/json; charset=utf-8',
+      'cache-control': 'no-store', 'x-content-type-options': 'nosniff' })
+    res.end(text)
   }
   private async lark(repository: Repository, args: string[], cwd?: string): Promise<unknown> {
     if (!this.commands) throw new Error('Feishu bot is not connected')
