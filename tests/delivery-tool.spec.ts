@@ -122,6 +122,26 @@ it('pushes only after the remote head matches, and records the applied branch sh
   expect(savedPlan()!.result).toMatchObject({ outcome: 'applied', branchSha: local })
 })
 
+it('creates a new remote branch from its expected base, without force', async () => {
+  store.tickets.save(ticketOf())
+  const { host, calls } = fake({ git: args => args[0] === 'ls-remote' ? ''
+    : args[0] === 'rev-parse' ? `${local}\n` : args[0] === 'merge-base' ? '' : '' })
+  const result = await call(host, { action: 'push', expected: base })
+  expect(result).toMatchObject({ ok: true, action: 'push', branch: 'agent/t1', branch_sha: local, remote_head: local,
+    forced: false, created: true })
+  expect(calls.git.find(args => args[0] === 'push')).toEqual(['push', 'origin', 'agent/t1'])
+  expect(savedPlan()!.result).toMatchObject({ outcome: 'applied', branchSha: local })
+})
+
+it('refuses to create a new remote branch from a base it does not descend from', async () => {
+  store.tickets.save(ticketOf())
+  const { host, calls } = fake({ git: args => args[0] === 'ls-remote' ? ''
+    : args[0] === 'rev-parse' ? `${local}\n` : args[0] === 'merge-base' ? (() => { throw new Error('not an ancestor') })() : '' })
+  const result = await call(host, { action: 'push', expected: base })
+  expect(result).toMatchObject({ ok: false, reason: 'base_mismatch', remote_head: null })
+  expect(calls.git.some(args => args[0] === 'push')).toBe(false)
+})
+
 it('reuses the existing pull request instead of creating a second one, and binds it to the ticket', async () => {
   store.tickets.save(ticketOf())
   const bind = vi.fn()
@@ -216,6 +236,32 @@ it('pushes a real commit to a real remote once the checked head matches', async 
   store.tickets.save(ticket)
   const result = await call(host, { action: 'push', expected: checked }, ticket)
   expect(result).toMatchObject({ ok: true, action: 'push', branch: 'agent/t1', branch_sha: head, remote_head: head, forced: false })
+  expect(git('ls-remote', 'origin', 'refs/heads/agent/t1')).toContain(head)
+  expect(savedPlan()!.result).toMatchObject({ outcome: 'applied', branchSha: head })
+})
+
+it('creates a real new remote branch from its base when no remote branch exists yet', async () => {
+  // The first push of a ticket: the branch exists only locally. The recorded expected head is the base commit the branch
+  // was cut from, and the tool must create the remote branch from it without force.
+  const remote = join(directory, 'remote.git'), work = join(directory, 'work')
+  const environment = { GIT_CONFIG_GLOBAL: join(directory, 'gitconfig'), GIT_CONFIG_SYSTEM: '/dev/null', GIT_TERMINAL_PROMPT: '0' }
+  const git = (...args: string[]) => execFileSync('git', ['-c', 'user.name=agent', '-c', 'user.email=agent@users.noreply.github.com', ...args],
+    { cwd: work, env: { ...process.env, ...environment }, stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim()
+  execFileSync('git', ['init', '--bare', remote], { stdio: 'ignore' })
+  execFileSync('git', ['clone', remote, work], { stdio: 'ignore' })
+  writeFileSync(join(work, 'README.md'), '# base\n')
+  git('add', 'README.md'); git('commit', '-m', 'base'); git('branch', '-M', 'main'); git('push', 'origin', 'main')
+  const base = git('rev-parse', 'HEAD')
+  git('checkout', '-b', 'agent/t1'); writeFileSync(join(work, 'fix.ts'), 'export const fix = 1\n')
+  git('add', 'fix.ts'); git('commit', '-m', 'fix')
+  const head = git('rev-parse', 'HEAD')
+  const commands = new Commands(deployment, environment, new AbortController().signal)
+  const host = { store, commands, github: { deployment: deployment(), commands } as unknown as SourceContext }
+  const ticket = ticketOf({ execution: { name: 't1', directory: work, assignment: 'a1', repository: 'acme/widgets',
+    worktree: { path: work, branch: 'agent/t1', baseRef: 'main', baseSha: base, repositoryId: 'acme/widgets' } } })
+  store.tickets.save(ticket)
+  const result = await call(host, { action: 'push', expected: base }, ticket)
+  expect(result).toMatchObject({ ok: true, action: 'push', branch: 'agent/t1', branch_sha: head, created: true, forced: false })
   expect(git('ls-remote', 'origin', 'refs/heads/agent/t1')).toContain(head)
   expect(savedPlan()!.result).toMatchObject({ outcome: 'applied', branchSha: head })
 })

@@ -38,7 +38,8 @@ interface Skill { name: string; description: string; content: string }
  * Lower this limit when shrinking model-facing text; raise it only intentionally and explain why in the commit message.
  */
 // Worker grew with orchestrator_delivery (the host-executed GitHub delivery contract) and the report's check evidence.
-const BUDGET: Record<Role, number> = { orchestrator: 59_000, worker: 43_500 }
+// It grew again with the local-agent delegation section, which gives a worker the same plugin backends as commander mode.
+const BUDGET: Record<Role, number> = { orchestrator: 59_000, worker: 45_500 }
 const PROMPTS = 'prompts/, skills/', TOOLS = 'src/app/tools/', SESSIONS = 'src/app/sessions.ts'
 const NOTICES = 'src/app/notices.ts', LINKS = 'src/app/links.ts', ASSESSMENT = 'src/app/assessment.ts'
 const EXECUTOR = 'src/executor/dsh.ts', ERRORS = 'src/core/errors.ts'
