@@ -50,3 +50,19 @@ export class Outbox implements OutboxPort {
     store.receipts.settle(receipt, result === 'gone' ? 'channelGone' : 'sent')
   }
 }
+
+/** Per-source outbound facts of one Ticket; a pending message on its original Channel is a different fact from a completed GitHub delivery. */
+export interface ChannelDeliveryFact { source: string; pending: number; sent: number; dropped: number }
+/**
+ * Read-only projection of a Ticket's receipts grouped by Channel source, so the task page reads "GitHub delivery done"
+ * and "Feishu message still pending" separately. It never changes delivery semantics.
+ */
+export function channelDelivery(receipts: Pick<Store['receipts'], 'ticket'>, ticketId: string): ChannelDeliveryFact[] {
+  const bySource = new Map<string, ChannelDeliveryFact>()
+  for (const receipt of receipts.ticket(ticketId)) {
+    const fact = bySource.get(receipt.channel.source) ?? { source: receipt.channel.source, pending: 0, sent: 0, dropped: 0 }
+    fact[receipt.status] += 1
+    bySource.set(receipt.channel.source, fact)
+  }
+  return [...bySource.values()]
+}

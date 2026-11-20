@@ -6,7 +6,38 @@ import type { PromptVersion } from './app/prompts.ts'
 import type { SettingsVersion } from './app/store.ts'
 import type { SettingsSave } from './policy.ts'
 import type { Retry } from './sources/github.ts'
+import type { ScopeStatus } from './core/scope.ts'
+import type { WorktreePreparation } from './infra/worktree.ts'
+import type { AgentRun } from './executor/agents.ts'
 
+/**
+ * A write run whose real workspace change left the ticket's declared scope. The ticket's delivery is blocked until a
+ * person approves the extension, which merges the approved paths into the ticket's scope.
+ */
+export interface ScopeOverrun {
+  runId: string
+  /** The changed paths outside the declared scope, as `git status` reports them. */
+  paths: string[]
+  at: string
+  approval?: { at: string; by: string; paths: string[] }
+}
+/**
+ * What the worker intends to deliver, recorded before the host acts so an unknown result can be recovered by querying
+ * the repository instead of repeating a push or a pull request.
+ */
+export interface DeliveryPlan {
+  action: 'push' | 'pr'
+  branch: string
+  base: string
+  /** The remote head the worker expects before it pushes; a different remote head means another writer got there first. */
+  expected: string
+  title?: string
+  body?: string
+  /** The pull request this plan opens or updates, when known in advance. */
+  pr?: number
+  at: string
+  result?: { at: string; outcome: 'applied' | 'unknown' | 'failed'; branchSha?: string; pr?: number; state?: string; detail?: string }
+}
 /** Key of a KV record whose value has type `V`; a plain string represents an untyped key. */
 export type Key<V> = string & { readonly __value?: V }
 /** Family of KV records sharing a prefix: callable to build a key from its name parts, and exposing `prefix` for listing. */
@@ -29,6 +60,20 @@ export const KV = {
   prompts: { revision: record<number>('prompt-revision'), version: family<PromptVersion, [revision: number]>('prompt-version:'),
     /** The built-in text of a prompt part an override was edited from, by its `base`, which shows what an upgrade changed. */
     builtIn: family<string, [base: string]>('prompt-built-in:') },
+  /** Executor: durable preparation state, so a failed command cannot leave a falsely ready directory. */
+  executor: { preparation: family<'preparing' | 'ready', [ticket: string]>('executor-preparation:'),
+    /** Durable worktree preparation phase of a ticket (`pending`, `preparing`, `ready`, `failed`), resumed after a restart. */
+    worktree: family<WorktreePreparation, [ticket: string]>('executor-worktree:'),
+    /** Durable write occupancy of a ticket, with the tickets it waits for, as the task page shows it. */
+    scope: family<ScopeStatus, [ticket: string]>('executor-scope:'),
+    /** Durable delegation run of a ticket to a local agent CLI, by run id. */
+    agentRun: family<AgentRun, [ticket: string, run: string]>('executor-agent-run:'),
+    /** A ticket's recent delegation runs, oldest first, bounded to its last 20. */
+    agentRuns: family<string[], [ticket: string]>('executor-agent-runs:'),
+    /** A write run that changed paths outside the ticket's scope, blocking delivery until a person approves. */
+    overrun: family<ScopeOverrun, [ticket: string]>('executor-overrun:'),
+    /** The delivery the worker intends and what the host observed, so an unknown result can be recovered. */
+    delivery: family<DeliveryPlan, [ticket: string]>('executor-delivery:') },
   /** Runtime: the main Session's ID. */
   runtime: { masterId: record<string>('master-id') },
   /** Sessions: prompt revisions each Session has worked under, ordered oldest first; the last entry (`.at(-1)`) is its active revision. */

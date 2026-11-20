@@ -10,18 +10,37 @@ Opening the panel answers three questions, in this order:
 2. Is the system healthy and doing the right things?
 3. What is the history of one piece of work, from Trigger through Eval to Ticket?
 
-## Tabs
+## Navigation
 
-The tabs follow the workflow: **Overview**, **Source**, **Trigger**, **Eval**, **Execution**, and **Settings**. Until repository and account setup succeeds, Overview shows what is missing and links to the relevant setting.
+The panel has one left rail and one detail column, and no page tabs. The rail groups the work areas the way a settings
+window does:
 
-| Tab | Shows |
-| --- | --- |
-| Overview | Tickets needing action, system problems, activity counts for the last 24 hours, and Executor load. Each block links to its detailed page |
-| Source | Source state, setup problems and non-zero counts. Filtered Triggers and dropped messages cover the same 24-hour window as Overview |
-| Trigger | Threads filtered by Subscribed, Evaluating, New Triggers in 24 h, or All Threads. Each Thread shows its Triggers newest first, Decisions and Subscriptions |
-| Eval | Decisions with their reason and matched rules |
-| Execution | Executor state, Pause processing, and Tickets filtered by Open, Pending, Working, Waiting for a Trigger or Ended. Ticket details show actions, authorization, waiting Inputs, Subscriptions and Assignments |
-| Settings | Sources, Eval, Execution, Prompts and Deployment. Each group includes its save history |
+| Group | Area | Shows |
+| --- | --- | --- |
+| Workspace | Inbox | Tickets needing action, system problems, activity counts for the last 24 hours, and Executor load. Each block links to its detailed page |
+| Workspace | Tasks | Executor state, Pause processing, and Tickets filtered by Open, Pending, Working, Waiting for a Trigger or Ended |
+| Workspace | Repository | The single repository this deployment serves, its accounts, health and Executor load |
+| Flow | Source | Source state, setup problems and non-zero counts. Filtered Triggers and dropped messages cover the same 24-hour window as Inbox |
+| Flow | Trigger | Threads filtered by Subscribed, Evaluating, New Triggers in 24 h, or All Threads. Each Thread shows its Triggers newest first, Decisions and Subscriptions |
+| Flow | Eval | Decisions with their reason and matched rules |
+| Configuration | Prompts | Team sections, built-in parts and skills; the full composed prompt and its history |
+| Configuration | Settings | Sources, Eval, Execution and Deployment as headed sections in one column |
+
+The rail marks the current area. A Thread or Ticket page carries its own title and back button, so the detail header then
+shows only the global tools.
+
+### Manager mode
+
+A deployment started with `mode: manager` uses the same shell, not a second product. Its rail adds a **Manager** group
+(Repositories, Deliveries and status, Group bindings, Feishu bot) and a **Repositories** group listing the registered
+repositories. Selecting one keeps the manager's groups and adds that repository's own Workspace, Flow and Configuration
+areas, so Inbox through Settings are the same pages as in a standalone deployment. The manager forwards those pages'
+requests to the repository's isolated DSH instance with the credential it keeps, so the browser never receives it.
+
+Sessions and workspaces belong to the repository's own DSH instance. Session buttons in a managed repository's pages open
+that repository's workspace in a new tab instead. The repository list marks the selected repository;
+starting, stopping, editing access and opening a workspace stay on the manager's Repositories page. The manager control
+pages use headed sections for their forms and lists, so no horizontal page tabs remain anywhere in the panel.
 
 ### Reading individual records
 
@@ -31,14 +50,17 @@ A human follow-up still owned by an Executor is marked **Delivered to Ticket**, 
 
 Ticket details show the originating Trigger, Decision and reason, scope and Policy version. Assignments and secondary details are folded below the immediate actions. **Retry** is available for failed Input delivery or a Ticket waiting for a person after a blocked or failed Report. Ended Tickets show outcomes such as **Pull request merged** or **Stopped by a person**.
 
-## Settings groups
+## Settings sections
+
+The Settings area is one column of sections, each opened by a small heading; a stage's **Settings** button opens the area
+at its own section, and the rail remembers the last one opened.
 
 - **Sources:** one card per Source with its switch, fields and verified account facts. GitHub also offers receive-all switches for new Issues, pull requests, comments and default-branch CI. Polling and read limits are under Advanced.
-- **Eval:** the Policy version and rules, followed by **On each Source** and the Eval settings. Each Source tab contains its allowed list, membership sync, admission table and bot list. Sync runs at startup and on **Sync now**. The admission table distinguishes receiving scope, sender membership and whether the message addresses the agent. Eval settings select the accept mode, timeout and assessment model.
+- **Eval:** the Policy version and rules, followed by **On each Source** and the Eval settings. The Source selector chooses one Source's allowed list, membership sync, admission table and bot list. Sync runs at startup and on **Sync now**. The admission table distinguishes receiving scope, sender membership and whether the message addresses the agent. Eval settings select the accept mode, timeout and assessment model.
 - **Execution:** worker model, concurrency, directory root, prepare command and blocked commands. Clicking an available variable inserts it into the prepare command.
-- **Prompts:** **Edit** changes team sections, built-in parts and skills. **Full prompt** shows the assembled text and compares it with saved text or defaults. **History** lists versions. Edited built-in parts are marked changed and can be reset; templates list their required placeholders.
+- **Prompts:** **Edit** changes team sections, built-in parts and skills. **Full prompt** shows the assembled text and compares it with saved text or defaults. **History** lists versions; a labelled select chooses the view. Edited built-in parts are marked changed and can be reset; templates list their required placeholders.
 
-  An upgrade that changes an overridden default marks it **Default updated** (默认内容已更新). The panel compares the old and new defaults above the team's text. If the old default was not recorded, it compares the team's text with the new default instead. Choose **Keep my text** or **Use the new default**. Overrides for removed parts are listed below the tab bar and dropped on the next save.
+  An upgrade that changes an overridden default marks it **Default updated** (默认内容已更新). The panel compares the old and new defaults above the team's text. If the old default was not recorded, it compares the team's text with the new default instead. Choose **Keep my text** or **Use the new default**. Overrides for removed parts are listed below the view select and dropped on the next save.
 - **Deployment:** startup problems with **Check again**, the state directory and machine limits. Saved limits apply without restart. The DeepSeek Harness Plugin Manager exposes the same page.
 
 ## Search

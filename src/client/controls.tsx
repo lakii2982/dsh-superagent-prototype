@@ -78,7 +78,7 @@ function walk<V extends string>(event: KeyboardEvent, values: readonly V[], valu
   const target = values[(next + values.length) % values.length]!
   if (target !== value) onChange(target)
   const list = event.currentTarget as HTMLElement
-  requestAnimationFrame(() => list.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')?.focus())
+  requestAnimationFrame(() => list.querySelector<HTMLElement>('[role="tab"][aria-selected="true"], [role="radio"][aria-checked="true"]')?.focus())
 }
 interface TabItem<V extends string> { value: V; label: string; id: string; panelId: string }
 /** Page-level tab bar that re-emits `onChange` when clicking the active tab so callers can reset to the tab root. */
@@ -114,10 +114,11 @@ export function SegmentedControl<V extends string>({ options, value, onChange, l
   options: readonly { value: V; label: string; title?: string }[]; value: V; onChange: (next: V) => void; label: string; disabled?: boolean
   className?: string
 }) {
-  return <div role="tablist" aria-label={label} className={cx('dt-segmented', className)}
+  // A value choice, not navigation: radio semantics keep the panel's only tab-like rows out of forms.
+  return <div role="radiogroup" aria-label={label} className={cx('dt-segmented', className)}
     style={{ gridTemplateColumns: `repeat(${options.length}, minmax(0, 1fr))` }}
     onKeyDown={event => { if (!disabled) walk(event, options.map(option => option.value), value, onChange) }}>
-    {options.map(option => <button key={option.value} type="button" role="tab" aria-selected={option.value === value}
+    {options.map(option => <button key={option.value} type="button" role="radio" aria-checked={option.value === value}
       tabIndex={option.value === value ? 0 : -1}
       title={option.title} disabled={disabled} className="dt-segment"
         onClick={() => { if (option.value !== value) onChange(option.value) }}>{option.label}</button>)}

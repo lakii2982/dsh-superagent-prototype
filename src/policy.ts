@@ -87,14 +87,21 @@ export const EvalConfigSchema = z.object({
 }).strict()
 const CommandNameSchema = z.string().regex(/^[A-Za-z0-9._-]+$/).refine(name => name !== '.' && name !== '..', 'Not a command name')
   .refine(name => !WORKER_COMMANDS.includes(name), `${WORKER_COMMANDS.join(', ')} cannot be blocked`)
-/** Executor settings: worker model, concurrency, ticket directory root (empty defaults to `<stateDir>/work`), `prepare` command, and blocked commands. */
+/** Executor settings: worker model, concurrency, ticket directory root (empty defaults to `<stateDir>/work`), `prepare` command, blocked commands, and the default execution agent. */
 export const ExecutorConfigSchema = z.object({
   model: RoleModelSchema.nullable().default(null),
   maxWorkers: z.number().int().min(LIMITS.maxWorkers.min).max(LIMITS.maxWorkers.max).default(3),
+  /** Where a new ticket's worker writes; null follows the repository: a managed worktree once a GitHub source names one, else an isolated directory. */
+  workspaceMode: z.enum(['isolated', 'worktree', 'current']).nullable().default(null),
+  repositoryPath: z.string().trim().refine(path => path === '' || path.startsWith('/'), 'An absolute repository path').default(''),
   directory: z.string().trim().refine(path => path === '' || path.startsWith('/'), 'An absolute path, or empty for <stateDir>/work').default(''),
   prepare: z.string().max(LIMITS.prepareCommand).default(''),
   blockedCommands: z.array(CommandNameSchema).default([]),
-}).strict()
+  /** The repository's default agent CLI; a worker may name the other connected agent for one run. Unset means choose per run. */
+  agent: z.enum(['codex', 'claude']).optional(),
+}).strict().superRefine((value, ctx) => {
+  if (value.workspaceMode === 'current' && !value.repositoryPath) ctx.addIssue({ code: 'custom', path: ['repositoryPath'], message: 'Choose a local repository for current workspace mode' })
+})
 export const SourceInstanceSchema = z.object({ enabled: z.boolean().default(true), config: z.record(z.string(), z.unknown()).default({}) }).strict()
 export const SettingsSchema = z.object({
   paused: z.boolean().default(false),
@@ -102,8 +109,31 @@ export const SettingsSchema = z.object({
   policy: PolicyConfigSchema.default(() => PolicyConfigSchema.parse({})),
   eval: EvalConfigSchema.default(() => EvalConfigSchema.parse({})),
   executor: ExecutorConfigSchema.default(() => ExecutorConfigSchema.parse({})),
-}).strict()
+}).strict().superRefine((value, ctx) => {
+  // A worktree ticket branches from the configured repository, so an explicit worktree choice needs one; leaving the mode unset needs
+  // none, because it falls back to isolated directories until a repository is configured.
+  if (value.executor.workspaceMode !== 'worktree') return
+  if (!managedRepository(value)) {
+    ctx.addIssue({ code: 'custom', path: ['executor', 'workspaceMode'], message: 'Configure the GitHub repository for worktree workspace mode' })
+  }
+})
 export type Settings = z.infer<typeof SettingsSchema>
+/** Where a ticket's worker writes: its own directory of ours, a managed worktree of the repository, or the person's checkout. */
+export type WorkspaceMode = NonNullable<Settings['executor']['workspaceMode']>
+
+/** The GitHub repository the source is configured for, or '' while none is set. */
+export function managedRepository(settings: Pick<Settings, 'sources'>): string {
+  const repository = settings.sources.github?.config.repository
+  return typeof repository === 'string' ? repository.trim() : ''
+}
+
+/**
+ * Resolve where a new ticket writes. Without an explicit choice, a configured GitHub repository is hosted as a managed worktree;
+ * everything else keeps the isolated-directory behaviour of earlier versions, so an installation without a repository is unchanged.
+ */
+export function workspaceMode(settings: Pick<Settings, 'executor' | 'sources'>): WorkspaceMode {
+  return settings.executor.workspaceMode ?? (managedRepository(settings) ? 'worktree' : 'isolated')
+}
 export type SettingsBlock = 'policy' | 'eval' | 'executor' | `source:${string}`
 export type SettingsSave = SettingsBlock | 'pause'
 export type SettingsOrigin = 'panel' | 'tool' | 'sync'

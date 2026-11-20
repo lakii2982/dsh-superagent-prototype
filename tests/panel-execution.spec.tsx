@@ -3,7 +3,7 @@
 import { act } from 'react'
 import { expect, it } from 'vitest'
 import { en, zh } from '../src/client/locales.ts'
-import { usePanel, mount, remount, all, find, tab, click, type, text, field, at } from './fixtures/panel.tsx'
+import { usePanel, mount, remount, all, find, rail, activeRail, click, type, text, field, at } from './fixtures/panel.tsx'
 import { MEMBER, server, ticketSummary, threadSummary } from './fixtures/panel-server.ts'
 
 usePanel()
@@ -12,7 +12,7 @@ it('lists Tickets under Execution by who they wait on, with the Executor state a
     source: 'github', title: '#7 x', facts: { number: { value: '#7' }, autoMerge: { label: { zh: '自动合并', en: 'Auto-merge' },
       value: { zh: '已开启', en: 'on' } } } }] })]
   await mount()
-  await click(zh['tab.execution'])
+  await click(rail(zh['nav.tasks']))
   expect(document.querySelector('.dt-status-title')?.textContent).toBe(zh.statusTitle)
   expect(server.requests.some(request => request.path === 'tickets?state=open&limit=20')).toBe(true)
   expect(text()).toContain(zh.executorRunning)
@@ -26,16 +26,16 @@ it('lists Tickets under Execution by who they wait on, with the Executor state a
   expect(all('.dt-status-line .dt-lv').map(item => item.textContent)).toEqual(['执行中 2 / 3', '排队 0'])
   // The pause is its own action: an Execution settings draft started before it still saves.
   await click(find(zh['tab.settings'], '.dt-status-head button'))
-  expect(tab(zh['tab.settings']).getAttribute('aria-selected')).toBe('true')
-  expect(document.querySelector('.dt-settings-link[aria-current="page"]')?.textContent).toBe(zh['promptPart.runtime/work'])
+  expect(activeRail()).toBe(zh['tab.settings'])
+  expect(document.querySelector('.dt-settings')?.getAttribute('data-active')).toBe('execution')
   await type(field<HTMLInputElement>(zh.maxWorkers), '4')
-  await click(tab(zh['tab.execution']))
+  await click(rail(zh['nav.tasks']))
   await click(zh.pauseProcessing)
   await click(zh.confirm)
   expect(server.requests.find(request => request.path === 'executor/pause')).toMatchObject({ method: 'POST', body: { paused: true } })
   expect(text()).toContain(zh.processingPaused)
   expect(find(zh.resumeProcessing).textContent).toBe(zh.resumeProcessing)
-  await click(tab(zh['tab.settings']))
+  await click(rail(zh['tab.settings']))
   await click(zh.save)
   expect(server.settings).toMatchObject({ paused: true, executor: { maxWorkers: 4 } })
 })
@@ -72,7 +72,7 @@ it('shows a Ticket with its stage, its Mandate details with the Trigger and Deci
   expect(all('.dt-disclosure-body .dt-table tr').map(row => row.textContent)).toEqual(['DSH_SUPERAGENT_DIR/w/t1',
     'DSH_SUPERAGENT_GITHUB_NUMBER—'])
   await click(document.querySelector<HTMLElement>('.dt-trigger-link')!)
-  expect(tab(zh['tab.trigger']).getAttribute('aria-selected')).toBe('true')
+  expect(activeRail()).toBe(zh['tab.trigger'])
 })
 
 it('reports a missing Ticket instead of rendering an empty page', async () => {
@@ -119,9 +119,22 @@ it('offers a Ticket awaiting review its review place and Session in the page hea
     'https://github.com/acme/widgets/pull/42']])
 })
 
+it('lets the workspace mode follow the repository again after a mode was chosen', async () => {
+  await mount()
+  await click(rail(zh['nav.tasks']))
+  await click(find(zh['tab.settings'], '.dt-status-head button'))
+  expect(field<HTMLInputElement>(zh.executionDirectory).value).toBe('')
+  // The default option clears the stored choice, so the configured repository decides again instead of the panel pinning a mode.
+  await click(find(zh.workspaceAuto, 'button'))
+  expect(text()).toContain(zh.workspaceAutoHint)
+  await click(zh.save)
+  expect(server.requests.find(request => request.path === 'settings/executor')?.body).toMatchObject({ value: { workspaceMode: null } })
+  expect(server.settings.executor.workspaceMode).toBeNull()
+})
+
 it('keeps what a person types in the Execution settings, converting it once on save', async () => {
   await mount()
-  await click(zh['tab.execution'])
+  await click(rail(zh['nav.tasks']))
   await click(find(zh['tab.settings'], '.dt-status-head button'))
   const blocked = () => field<HTMLInputElement>(zh.blockedCommands), root = () => field<HTMLInputElement>(zh.executionDirectory),
     workers = () => field<HTMLInputElement>(zh.maxWorkers)
@@ -201,7 +214,7 @@ it('words an ended Ticket by its outcome, on its row and its page, with a person
   server.tickets.ended = [ticketSummary(fields, { stage: 'ended' }), ...server.tickets.ended]
   server.ticketDetails.t3 = { ...server.ticketDetails.t1!, ...fields, stage: 'ended' }
   await mount()
-  await click(zh['tab.execution'])
+  await click(rail(zh['nav.tasks']))
   await click(zh['ticket.ended'])
   expect(all('.dt-ticket-stage').map(stage => stage.textContent)).toEqual([zh['outcome.merged'], zh['outcome.stopped']])
   await click('已合并的工单')
@@ -221,4 +234,35 @@ it('sends one stop for a double click on Confirm', async () => {
   const confirm = find(zh.confirm)
   await act(async () => { confirm.click(); confirm.click() })
   expect(server.requests.filter(request => request.path === 'tickets/t1/stop')).toHaveLength(1)
+})
+
+it('shows the Ticket\'s delivery facts as separate labels, linking an open pull request', async () => {
+  const t1 = server.ticketDetails.t1!
+  server.ticketDetails.t1 = { ...t1, delivery: { code: 'ready', pull: 'open', pullNumber: 42,
+    pullUrl: 'https://github.com/acme/widgets/pull/42', channel: 'waiting', waiting: 1, channels: [{ source: 'feishu', pending: 1, sent: 0, dropped: 0 }] } }
+  await mount()
+  await click(all('.dt-open').find(button => button.textContent === '修复回归')!)
+  expect(all('.dt-status-line .dt-lv').slice(0, 3).map(item => item.textContent)).toEqual([`${zh.ticketCodeLabel} ${zh.ticketCodeReady}`,
+    `${zh.ticketPullLabel} ${zh.ticketPullOpen}`, `${zh.ticketReceiptLabel} ${zh.ticketReceiptWaiting.replace('{count}', '1')}`])
+  expect(all('.dt-status-line a').map(link => link.getAttribute('href'))).toEqual(['https://github.com/acme/widgets/pull/42'])
+})
+
+it('shows a Ticket\'s repository, Agent and pull request in the Execution task list', async () => {
+  await mount()
+  await click(rail(zh['nav.tasks']))
+  const row = all('.dt-ticket').find(item => item.textContent?.includes('修复回归'))!
+  expect(row.querySelector('.dt-ticket-meta')?.textContent).toContain('acme/widgets')
+  expect(row.querySelector('.dt-ticket-meta')?.textContent).toContain(zh.ticketAgentLabel)
+  expect(row.textContent).toContain(zh.ticketPullOpen)
+  expect(Array.from(row.querySelectorAll('a')).map(link => link.getAttribute('href')))
+    .toContain('https://github.com/acme/widgets/pull/42')
+})
+
+it('shows the worktree path, branch and base commit in the Ticket page\'s Run details', async () => {
+  await mount()
+  await click(all('.dt-open').find(button => button.textContent === '修复回归')!)
+  await click(zh.runDetails)
+  expect(text()).toContain('/srv/work/t1')
+  expect(text()).toContain('dsh/t1')
+  expect(text()).toContain('abc1234')
 })

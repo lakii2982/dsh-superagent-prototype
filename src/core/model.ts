@@ -214,6 +214,13 @@ export type AssignmentState = 'pending' | 'running' | 'ended'
  * ready (`ready`), a person must act to unblock or recover it (`blocked` or `failed`), or nothing is left to do (`dropped`).
  */
 export type ReportState = 'progress' | 'waiting' | 'ready' | 'blocked' | 'failed' | 'dropped'
+/** One check a worker ran for a report, with its evidence: the run detail shows pass, fail and unknown checks separately. */
+export interface CheckEvidence {
+  name: string
+  state: 'pass' | 'fail' | 'unknown'
+  /** What was run or observed, such as the failing test name or "no test covers this path". */
+  detail?: string
+}
 /** Binding between a ticket and one executor instance. */
 export interface Assignment {
   id: string
@@ -222,7 +229,7 @@ export interface Assignment {
   startedAt?: string
   endedAt?: string
   endedReason?: string
-  report?: { state: ReportState; summary: string; at: string }
+  report?: { state: ReportState; summary: string; at: string; checks?: CheckEvidence[] }
   /** When Inputs last reached the worker; one at or after `report.at` means the worker has been busy with Inputs since that report. */
   deliveredAt?: string
   /**
@@ -301,6 +308,11 @@ export interface Ticket {
   updatedAt: string
   /** The Triggers it was accepted from: the one that started it, and the batch its Eval held. */
   origin: { triggerId: string; triggerIds: string[] }
+  /**
+   * The repository-relative files or directories it writes, normalized for comparison (see `scope.ts`); absent means the
+   * whole repository, which keeps same-repository work serial until an assessment states a narrower scope.
+   */
+  scope?: string[]
   /** What its Executor chose: its short name, directory and assignment text. */
   execution?: Execution
   /** The latest failed delivery of an Input to its worker, until a delivery succeeds. */
@@ -312,7 +324,15 @@ export interface Ticket {
  * Thread closed; the ticket then ends unless its work has not finished (see `Tickets.unfinished`).
  */
 export interface Follow { thread: string; own: boolean; closed?: { at: string; outcome: 'merged' | 'closed' } }
-export interface Execution { name: string; directory: string; assignment: string }
+/**
+ * The managed git worktree an Execution runs in: its directory and ticket branch, the remote ref and commit it branched
+ * from, and the repository identity its paths are named after. `baseRef` and `baseSha` are empty until preparation resolved
+ * them against the remote, and stay recorded afterwards so a restart can verify the same scene instead of rebuilding it.
+ */
+export interface WorktreeScene { path: string; branch: string; baseRef: string; baseSha: string; repositoryId: string }
+export interface Execution { name: string; directory: string; assignment: string; workspaceMode?: 'current' | 'worktree'; repository?: string
+  /** Present for `worktree` mode only: the scene preparation created or verified. */
+  worktree?: WorktreeScene }
 
 /** Whether a ticket is open: it has not ended. */
 export const liveTicket = (ticket: Pick<Ticket, 'ended'>): boolean => !ticket.ended

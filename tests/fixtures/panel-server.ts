@@ -13,6 +13,7 @@ import type { DroppedReply, HistoryView, Problem, PromptsView, SetupView, Source
   TicketRow, TicketStage,
   TriggerRow } from '../../src/client/api.ts'
 import { SETUP_FIELDS } from '../../src/deployment.ts'
+import type { ManagerView } from '../../src/client/manager.tsx'
 import { EvalConfigSchema, ExecutorConfigSchema, PolicyConfigSchema, SettingsSchema } from '../../src/policy.ts'
 import { SetupError, type SetupCode } from '../../src/setup.ts'
 import { feishuChannel } from '../../src/sources/feishu-trigger.ts'
@@ -39,6 +40,8 @@ const TICKET = {
   id: 't1', title: '修复回归', state: 'open', actions: { retry: false, stop: true }, strength: 'explicit', ended: undefined,
   attention: undefined, assignments: 1, inputs: 2, undelivered: 0, deliveryError: undefined, sessionId: 'worker-t1', directory: '/w/t1',
   summary: 'working on it', createdAt: '2026-09-22T00:00:00Z', updatedAt: '2026-09-23T00:00:00Z',
+  repository: { id: 'acme/widgets' }, agent: 'claude' as const,
+  pull: { number: 42, state: 'open' as const, url: 'https://github.com/acme/widgets/pull/42' },
   threads: [{ key: 'github:42', source: 'github', title: '#42 Fix login', url: 'https://github.com/acme/widgets/pull/42',
     facts: { number: { value: '#42' }, ci: { label: { zh: 'CI 失败', en: 'CI failed' }, value: '1', problem: true } } }],
 } satisfies TicketFields
@@ -94,6 +97,8 @@ export interface PanelServer {
   threadPages: (key: string, query: { before?: string; around?: string }) => ThreadPageView | undefined
   person: TicketRow[]; search: Pick<ApiResponse<'GET search'>, 'items' | 'threads'>; history: HistoryView
   requests: { path: string; method: string; body?: unknown }[]
+  /** Requests the manager forwarded to a registered repository's panel API, by repository and API path. */
+  proxied: { repository: string; path: string }[]
   /** Requests with undeclared query params or invalid body presence; asserted empty after each test. */
   misuse: string[]
   queued: Set<string>
@@ -205,7 +210,9 @@ export const acceptDecision = (): NonNullable<TicketPageView['decision']> => ({ 
   reason: [{ code: 'explicitRouted' }], at: '2026-09-22T00:00:00Z', strength: 'explicit', ticketId: undefined,
   triggerIds: ['e1'], thread: 'feishu:oc_1:om_root', rules: [], preview: '@bot 修一下', ticketTitle: undefined })
 const ticketDetail = (): TicketPageView => ({
-  ...ticketSummary(), paused: false, decision: acceptDecision(), threads: [threadSummary()],
+  ...ticketSummary(), delivery: { code: 'none', pull: 'none', channel: 'none', waiting: 0, channels: [] },
+  worktree: { path: '/srv/work/t1', branch: 'dsh/t1', baseRef: 'origin/main', baseSha: 'abc1234def5678' }, runs: [],
+  paused: false, decision: acceptDecision(), threads: [threadSummary()], scope: [], scopeStatus: null, overrun: null,
   mandate: { strength: 'explicit', policyVersion: 'abcdef1234567890', basis: { via: 'addressed', sender: 'Alice', addressed: 'mention' },
     actor: actor('feishu', MEMBER), scope: '修复登录页回归' },
   basis: { facts: [{ name: 'sender', value: 'Alice' }, { name: 'addressed', value: 'mention' }], legacy: false },
@@ -239,7 +246,8 @@ function initial(): PanelServer {
     sources: { feishu: { enabled: true, config: { cli: 'lark-bot', chats: [{ chatId: 'oc_team', listen: 'mentions' }],
       directMessages: true } },
       github: { enabled: true, config: { repository: 'acme/widgets', cli: 'gh-agent' } } },
-    executor: { blockedCommands: ['gh-personal'] },
+    // The panel tests the isolated-directory fields; the follow-the-repository default has its own test.
+    executor: { workspaceMode: 'isolated', blockedCommands: ['gh-personal'] },
   })
   const ended = ticketSummary({ id: 't0', title: '旧工单', state: 'ended', actions: { retry: false, stop: false },
     ended: { at: '2026-09-21T00:00:00Z', by: 'human', reason: 'Human asked to stop', outcome: 'stopped' } }, { stage: 'ended' })
@@ -247,7 +255,7 @@ function initial(): PanelServer {
     en: 'Feishu message' } }
   const defaults = { revision: 0, previousRevision: null, savedAt: '', source: 'defaults' }
   return {
-    health: {}, down: false, pending: 0, opened: [], requests: [], misuse: [], queued: new Set(), dropped: [], failing: [],
+    health: {}, down: false, pending: 0, opened: [], requests: [], proxied: [], misuse: [], queued: new Set(), dropped: [], failing: [],
     setup: { machine: MACHINE, problem: null, feishuProblem: null,
       accounts: { repository: 'acme/widgets', agent: 'agent-bot', feishu: { appId: 'cli_bot', brand: 'feishu', botId: 'ou_bot',
         name: 'Widgets Bot' } } },
@@ -337,6 +345,17 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
     if (!ticketOf(params.id)) return refuse(404, 'Ticket not found')
     server.tickets.open = []; server.person = server.person.filter(ticket => ticket.id !== params.id)
     return { stopped: true }
+  } },
+  'POST tickets/:id/scope-approval': { body: true, answer: ({ params, body }) => {
+    const ticket = server.ticketDetails[params.id]
+    if (!ticketOf(params.id)) return refuse(404, 'Ticket not found')
+    if (!ticket?.overrun) return refuse(400, 'The ticket has no scope overrun waiting for approval')
+    const paths = body.paths?.length ? body.paths : ticket.overrun.paths
+    const approval = { at: '2026-09-22T00:05:00Z', by: 'panel', paths: [...(ticket.overrun.approval?.paths ?? []), ...paths] }
+    // An empty declared scope is the whole repository, which approving paths must not narrow.
+    const scope = ticket.scope.length ? [...new Set([...ticket.scope, ...paths])] : []
+    server.ticketDetails[params.id] = { ...ticket, scope, overrun: { ...ticket.overrun, approval } }
+    return { scope, overrun: { ...ticket.overrun, approval } }
   } },
   'POST executor/pause': { body: true, answer: ({ body }) => {
     server.settings = { ...server.settings, paused: body.paused }
@@ -429,14 +448,19 @@ class Reply extends Response {
   override async text() { server.pending--; return super.text() }
 }
 
-export function usePanelServer(cleanup: () => void) {
+export function usePanelServer(cleanup: () => void, manager?: ManagerView) {
   beforeEach(() => {
     sessionStorage.clear()
     server = initial()
     vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit): Promise<Response> => {
       if (server.down) return new Response(null, { status: 404 })
       const address = new URL(url, 'http://127.0.0.1:3082')
-      const path = address.pathname.replace('/orchestrator/api/', '')
+      if (address.pathname === '/orchestrator/mode') return Response.json({ mode: manager ? 'manager' : 'standalone' })
+      if (manager && address.pathname === '/orchestrator/manager/state') return Response.json(manager)
+      // In manager mode the repository panel talks to the manager's authenticated proxy, not to a local engine.
+      const proxy = /^\/orchestrator\/manager\/repositories\/([^/]+)\/api\/(.*)$/.exec(address.pathname)
+      if (proxy) server.proxied.push({ repository: proxy[1]!, path: decodeURIComponent(proxy[2]!) })
+      const path = proxy ? proxy[2]! : address.pathname.replace('/orchestrator/api/', '')
       const method = init?.method ?? 'GET'
       const body: unknown = init?.body ? JSON.parse(String(init.body)) : undefined
       server.requests.push({ path: decodeURIComponent(`${path}${address.search}`), method, ...body === undefined ? {} : { body } })

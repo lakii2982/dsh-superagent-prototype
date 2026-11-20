@@ -2,6 +2,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { authorized, FeishuTriggerSchema } from '../manager/protocol.ts'
 import { z } from 'zod'
 import { THREAD_FILTERS, TICKET_FILTERS, type Api, type ApiResponse, type RouteParams } from './api.ts'
 import { sourceSkills } from './context.ts'
@@ -11,8 +12,10 @@ import { PromptConflict, SKILL_NAME, SKILL_PREFIX, TEAM_SECTIONS, builtInBase, b
 import { policyVersion } from '../policy.ts'
 import { SettingsConflict, type Settings } from './settings.ts'
 import { SetupError, type SetupProblem } from '../setup.ts'
-import { UserError, type EngineForPeople, type Ticket } from '../core/index.ts'
+import { UserError, covers, normalizeScope, type EngineForPeople, type Ticket } from '../core/index.ts'
+import { KV } from '../kv.ts'
 import type { Deployment, Machine } from '../deployment.ts'
+import type { AgentProbe } from '../executor/agents.ts'
 import type { DshExecutor } from '../executor/dsh.ts'
 import type { Health } from '../sources/host.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
@@ -29,6 +32,7 @@ import { decisionList, search, threadDetail, threadList } from './views/threads.
 import { executorLoad, ticketDetail, ticketList } from './views/tickets.ts'
 
 export interface HttpHost {
+  ingestManaged?(trigger: import('../core/index.ts').Trigger): unknown
   readonly store: Store
   /** Feishu message links resolved since startup, used by search to match AppLink URLs. */
   readonly sourceLinks: Pick<TextCache, 'entries'>
@@ -37,7 +41,9 @@ export interface HttpHost {
   readonly sessions: Pick<Sessions, 'status' | 'notify' | 'delivery'>
   readonly settings: Pick<Settings, 'view' | 'save' | 'pause' | 'sync' | 'refreshLabels'>
   readonly engine: EngineForPeople
-  readonly executor: Pick<DshExecutor, 'activeCount'>
+  readonly executor: Pick<DshExecutor, 'activeCount' | 'refreshScope'>
+  /** The probe of the agent CLIs this host can run, reported on the instance health the manager reads. */
+  readonly agentStatus: AgentProbe[]
   readonly health: Record<string, Health>
   readonly machine: Machine
   readonly masterId: string
@@ -112,11 +118,19 @@ const views = (runtime: HttpHost): ViewHost => ({ store: runtime.store, sources:
 const setupState = (runtime: HttpHost): SetupState => ({ deployment: runtime.configured() ? runtime.deployment : undefined,
   problem: runtime.setupProblem, feishuProblem: runtime.feishuProblem })
 export type StateView = ReturnType<typeof stateView>
-/** Builds a ticket's detail view; `environment` is empty while waiting for setup because it requires the resolved deployment. */
+/** The scope a run wrote outside the ticket's declared scope, and whether a person already approved it. */
+export interface ScopeOverrunView { runId: string; paths: string[]; at: string; approval?: { at: string; by: string; paths: string[] } }
+/**
+ * Builds a ticket's detail view; `environment` is empty while waiting for setup because it requires the resolved deployment.
+ * The declared scope, the durable scope state and a waiting overrun are added here, because the task page shows them beside the
+ * actions that answer them (approving paths, and a stop that is still settling).
+ */
 function ticketPage(runtime: HttpHost, id: string) {
   const detail = ticketDetail(views(runtime), id), ticket = runtime.store.tickets.get(id)
   if (!detail || !ticket) throw new RouteError(404, 'Ticket not found')
-  return { ...detail, environment: runtime.configured() ? runtime.ticketEnvironment(ticket) : [] }
+  return { ...detail, environment: runtime.configured() ? runtime.ticketEnvironment(ticket) : [], scope: normalizeScope(ticket.scope),
+    scopeStatus: runtime.store.get(KV.executor.scope(id)) ?? null,
+    overrun: runtime.store.get(KV.executor.overrun(id)) ?? null }
 }
 export type TicketPageView = ReturnType<typeof ticketPage>
 function promptsView(runtime: HttpHost, revision: number | undefined, offset: number) {
@@ -147,6 +161,7 @@ const PromptsQuery = z.object({ revision: count.optional(), offset: count.defaul
 const SourceBlock = z.templateLiteral(['source:', z.string().regex(/^[a-z][a-z0-9-]*$/)])
 const SettingsBlockSchema = z.union([z.enum(['policy', 'eval', 'executor']), SourceBlock])
 const SaveRequest = z.object({ value: z.unknown(), revision: z.number().int().nonnegative() })
+const ScopeApproval = z.object({ paths: z.array(z.string()).optional() })
 
 function routes(runtime: HttpHost): Routes {
   const { store } = runtime
@@ -192,6 +207,30 @@ function routes(runtime: HttpHost): Routes {
     'GET tickets/:id': ({ params }) => ticketPage(runtime, params.id),
     'POST tickets/:id/retry': ({ params }) => { const id = ticket(params.id); runtime.engine.retryTicket(id); return { retried: true } },
     'POST tickets/:id/stop': ({ params }) => { const id = ticket(params.id); runtime.engine.stopTicket(id); return { stopped: true } },
+    // A person approves the paths a run wrote outside the ticket's scope: they join the declared scope, and the record says
+    // who approved them, so delivery stops refusing and later tickets wait for the widened scope instead.
+    'POST tickets/:id/scope-approval': async ({ params, body }) => {
+      const id = ticket(params.id)
+      const current = store.tickets.get(id)!
+      const overrun = store.get(KV.executor.overrun(id))
+      if (!overrun) throw new RouteError(400, 'The ticket has no scope overrun waiting for approval')
+      const request = ScopeApproval.parse(await body())
+      const reported = normalizeScope(overrun.paths)
+      const approved = normalizeScope(request.paths?.length ? request.paths : reported)
+      const unknown = approved.filter(path => !reported.some(known => covers(known, path)))
+      if (unknown.length) throw new RouteError(400, `The paths ${unknown.join(', ')} were not part of the overrun`)
+      // An empty declared scope is the whole repository, which approving paths must not narrow; the approval is recorded either way.
+      const scope = current.scope?.length ? normalizeScope([...current.scope, ...approved]) : []
+      const record: ScopeOverrunView = { ...overrun, approval: { at: new Date().toISOString(), by: 'panel',
+        paths: normalizeScope([...(overrun.approval?.paths ?? []), ...approved]) } }
+      store.atomic(() => {
+        store.tickets.save({ ...current, ...scope.length ? { scope } : {}, updatedAt: record.approval!.at })
+        store.set(KV.executor.overrun(id), record)
+      })
+      // A running ticket that now holds a wider scope keeps its write occupancy true to it.
+      runtime.executor.refreshScope(id)
+      return { scope, overrun: record }
+    },
     'POST executor/pause': async ({ body }) => runtime.settings.pause(z.object({ paused: z.boolean() }).parse(await body()).paused, 'panel'),
     'PUT settings/:block': async ({ params, body }) => {
       const block = SettingsBlockSchema.parse(params.block)
@@ -233,6 +272,26 @@ export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
   const disposers = [
     ctx.webServer.register({ kind: 'prefix', path: '/orchestrator', handler: async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://localhost')
+      if (url.pathname === '/orchestrator/mode') { json(res, 200, { mode: 'standalone' }); return }
+      if (url.pathname.startsWith('/orchestrator/instance/')) {
+        const bridge = runtime.machine.managed
+        if (!bridge || !authorized(req.headers.authorization, bridge.token)) { json(res, 403, { error: 'Instance authorization required' }); return }
+        try {
+          const path = url.pathname.slice('/orchestrator/instance/'.length)
+          if (path === 'health' && req.method === 'GET') { json(res, 200, { repositoryId: bridge.repositoryId, pid: process.pid, configured: runtime.configured(),
+            state: runtime.health.runtime?.state, agent: runtime.agentStatus }); return }
+          await runtime.ready
+          if (path === 'receive' && req.method === 'POST') {
+            if (!runtime.configured()) throw new RouteError(400, 'Repository setup is incomplete')
+            const request = z.object({ repositoryId: z.string(), trigger: FeishuTriggerSchema }).parse(await readBody(req, 1048576))
+            if (request.repositoryId !== bridge.repositoryId) throw new RouteError(400, 'Repository mismatch')
+            json(res, 200, { result: runtime.ingestManaged?.(request.trigger) }); return
+          }
+          const route = match(table, req.method ?? 'GET', path.split('/'))
+          if (!route) throw new RouteError(404, 'Unknown instance operation')
+          json(res, 200, await route.run({ params: route.params as never, query: Object.fromEntries(url.searchParams), body: maxBytes => readBody(req, maxBytes) })); return
+        } catch (error) { json(res, ...failure(error)); return }
+      }
       if (!url.pathname.startsWith('/orchestrator/api/')) { res.writeHead(404); res.end(); return }
       if (!sameOrigin(req, ctx.webServer.port)) { json(res, 403, { error: 'Same-origin management request required' }); return }
       try {

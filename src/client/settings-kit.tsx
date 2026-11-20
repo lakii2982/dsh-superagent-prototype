@@ -104,12 +104,18 @@ export function ModelField({ id, value, onChange }: { id: string; value: RoleMod
 }
 
 type HistoryChange = NonNullable<HistoryView['items'][number]['changes']>[number]
+/** Label a stored workspace mode; `default` is the unset value that follows the configured repository. */
+function workspaceLabel(t: T, value: string): string {
+  return value === 'isolated' ? t('workspaceIsolated') : value === 'worktree' ? t('workspaceWorktree')
+    : value === 'current' ? t('workspaceCurrent') : t('workspaceDefault')
+}
 function changeText(t: T, change: HistoryChange, sources: SourceView[]): string {
   const source = sources.find(item => item.id === change.source)
   const field = (change.part ? source?.policy?.fields : source?.fields)?.find(item => item.key === change.field)
   const shown = (value: unknown) => value === undefined || value === null || value === '' ? t('unsetValue') : typeof value === 'boolean'
     ? t(value ? 'yes' : 'no')
-    : change.code === 'mode' ? valueLabel(t, 'mode', String(value)) : String(value)
+    : change.code === 'mode' ? valueLabel(t, 'mode', String(value))
+      : change.code === 'workspaceMode' ? workspaceLabel(t, String(value)) : String(value)
   return t(`change.${change.code}`,
     { items: (change.items ?? []).map(item => source?.labels[item] ?? item).join(t('listSeparator')),
     from: shown(change.from), to: shown(change.to), name: change.name ?? '', source: source ? localized(t, source.title)

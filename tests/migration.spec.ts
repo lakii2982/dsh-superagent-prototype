@@ -5,7 +5,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { afterEach, beforeEach, expect, it } from 'vitest'
 import { SCHEMA_VERSION, Store } from '../src/app/store.ts'
 import { KV } from '../src/kv.ts'
-import { basisOf, reasonsOf, withoutCopies } from '../src/app/migration.ts'
+import { basisOf, reasonsOf, ticketOf, withoutCopies } from '../src/app/migration.ts'
 import { Prompts, composePrompt, defaultPrompts } from '../src/app/prompts.ts'
 import { masterPrompt } from '../src/app/context.ts'
 
@@ -536,4 +536,16 @@ it('delivers the candidate of an Eval in progress at the upgrade again, so its d
   const effects = store.db.prepare("SELECT key, value FROM effect WHERE kind = 'assessment'").all().map(row => [row.key, JSON.parse(String(row.value))])
   expect(effects).toEqual([['e9', { triggerId: 'issue-9' }]])
   store.close()
+})
+
+it('leaves the execution of a legacy ticket without a workspace mode, and keeps a recorded one as it is', () => {
+  const legacy = { id: 't3', title: 'Fix', decisionId: 'd1', channels: [], assignments: [], inputs: [], undelivered: [],
+    createdAt: '1', updatedAt: '2', mandate: mandate({ chatId: 'oc_team', direct: true }),
+    meta: { workspace: '/w/fix-1', name: 'fix-1', assignment: 'Read trigger/t1.' } }
+  // A schema 10 ticket becomes an isolated ticket, the mode old workers ran in.
+  expect(ticketOf(legacy as never).execution).toEqual({ name: 'fix-1', directory: '/w/fix-1', assignment: 'Read trigger/t1.' })
+  // A ticket that recorded a checkout keeps exactly that mode; the upgrade does not rewrite it.
+  const checkout = { ...legacy, meta: undefined,
+    execution: { name: 'fix-1', directory: '/w/fix-1', assignment: '', workspaceMode: 'current', repository: 'acme/widgets' } }
+  expect(ticketOf(checkout as never).execution).toEqual(checkout.execution)
 })

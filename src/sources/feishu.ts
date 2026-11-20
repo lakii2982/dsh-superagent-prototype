@@ -4,7 +4,8 @@ import { z } from 'zod'
 import { FeishuBotSchema } from '../deployment.ts'
 import { feishuLink, sendFeishu } from './feishu-channel.ts'
 import { feishuThreadContext } from './feishu-read.ts'
-import { refreshChatNames, runFeishu } from './feishu-loops.ts'
+import { pause } from './poll.ts'
+import { pollThreads, refreshChatNames, runFeishu } from './feishu-loops.ts'
 import { SOURCE, feishuTriggerId } from './feishu-trigger.ts'
 import { sourceContext } from './host.ts'
 import type { Localized, SourceKind } from './kind.ts'
@@ -133,7 +134,17 @@ export function apply(ctx: Context): void {
   ctx.effect(() => ctx.orchestrator.sources.register(feishuKind), 'feishu: source kind')
   ctx.effect(() => {
     const controller = new AbortController()
-    const running = runFeishu(sourceContext(ctx.orchestrator, feishuKind), controller.signal)
+    const source = sourceContext(ctx.orchestrator, feishuKind)
+    const running = !ctx.orchestrator.managed ? runFeishu(source, controller.signal) : source.ready.then(async () => {
+      if (!source.configured()) return
+      source.report('feishu', { state: 'ready', detail: 'Events delivered by the shared manager' })
+      // Only the manager consumes events and group history; instances retain their subscribed-topic recovery.
+      while (!controller.signal.aborted) {
+        try { await pollThreads(source, controller.signal); source.report('history', { state: 'ready', detail: 'Subscribed topics checked' }) }
+        catch (error) { source.report('history', { state: 'error', detail: String(error) }) }
+        await pause(60_000, controller.signal)
+      }
+    })
     return async () => { controller.abort(); await running }
   })
 }

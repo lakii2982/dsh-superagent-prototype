@@ -3,6 +3,7 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { expect, vi } from 'vitest'
 import { App } from '../../src/client/app.tsx'
+import { ModePanel, type ManagerView } from '../../src/client/manager.tsx'
 import { usePageForm } from '../../src/client/deployment.tsx'
 import { zh } from '../../src/client/locales.ts'
 import type { T } from '../../src/client/text.ts'
@@ -16,7 +17,7 @@ export const translator = (dictionary: Record<string, string>): T => ((key: stri
   return params ? template.replace(/\{(\w+)\}/g, (match, name: string) => name in params ? String(params[name]) : match) : template
 }) as T
 function Panel({ t }: { t: T }) {
-  return <App t={t} openSession={async id => { server.opened.push(id) }} deploymentForm={usePageForm(server.form)} />
+  return <ModePanel t={t}><App t={t} openSession={async id => { server.opened.push(id) }} deploymentForm={usePageForm(server.form)} /></ModePanel>
 }
 let root: Root | undefined
 let container: HTMLElement | undefined
@@ -25,7 +26,7 @@ function unmount() {
   root = undefined
   container?.remove()
 }
-export const usePanel = () => usePanelServer(unmount)
+export const usePanel = (manager?: ManagerView) => usePanelServer(unmount, manager)
 
 /** Flush pending fake-server responses and React state updates. */
 export async function settle() {
@@ -51,6 +52,14 @@ export function find(name: string, selector = CONTROLS): HTMLElement {
   return match
 }
 export const tab = (name: string) => find(name, '[role="tab"]')
+/** A page in the panel's single left rail, by its label rather than its count badge. */
+export const rail = (name: string) => {
+  const match = all('.dt-rail-item').find(item => item.querySelector('.dt-rail-label')?.textContent === name)
+  if (!match) throw new Error(`No rail item named ${name}`)
+  return match
+}
+/** The work area the rail marks as current, by its label. */
+export const activeRail = () => document.querySelector('.dt-rail-item[aria-current="page"] .dt-rail-label')?.textContent
 export async function click(target: string | HTMLElement) {
   const element = typeof target === 'string' ? find(target) : target
   await act(async () => { element.click() })

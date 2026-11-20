@@ -3,9 +3,11 @@ import { z } from 'zod'
 import { canRetry, followupOwners, latestReport, liveTicket, settled, threadKey, ticketStage, type ActorRef, type ChannelRef, type Decision,
   type DecisionKind, type Thread, type ThreadFacts, type Ticket, type TicketStage, type Trigger } from '../../core/index.ts'
 import { allowedSender, listedBot } from '../../policy.ts'
+import { agentRunsOf } from '../../executor/agents.ts'
+import { workerSessionId } from '../../executor/dsh.ts'
+import { githubPage } from '../../sources/github-trigger.ts'
 import type { ChannelLink, Localized } from '../../sources/kind.ts'
 import type { SourceRegistry } from '../../sources/registry.ts'
-import { workerSessionId } from '../../executor/dsh.ts'
 import type { Store } from '../store.ts'
 import { attribute, markdown, plain, preview, readable } from './text.ts'
 
@@ -118,15 +120,18 @@ function ticketNote(ticket: Ticket, stage: TicketStage): { text: string; error: 
 export function ticketSummary(ticket: Ticket) {
   const stage = ticketStage(ticket)
   const note = ticketNote(ticket, stage)
+  const report = latestReport(ticket)
   const state = liveTicket(ticket) ? 'open' as const : 'ended' as const
   return { id: ticket.id, title: ticket.title, state, ...stage, ...note ? { note } : {},
+    // The checks of the latest report, with the evidence the run detail shows for each pass, fail or unknown result.
+    ...report?.checks?.length ? { checks: report.checks } : {},
     actions: { retry: canRetry(ticket), stop: liveTicket(ticket) }, strength: ticket.mandate.strength, ended: ticket.ended,
     attention: ticket.attention && { ...ticket.attention, question: markdown(ticket.attention.question) },
       assignments: ticket.assignments.length, inputs: ticket.inputs.length, undelivered: ticket.undelivered.length,
     // Every started Assignment of a Ticket runs in its one shared worker Session.
     deliveryError: attribute(ticket.delivery?.error), sessionId: ticket.assignments.some(item => item.startedAt)
       ? workerSessionId(ticket.id) : '',
-    directory: attribute(ticket.execution?.directory), summary: latestReport(ticket)?.summary ?? '', createdAt: ticket.createdAt,
+    directory: attribute(ticket.execution?.directory), summary: report?.summary ?? '', createdAt: ticket.createdAt,
     updatedAt: ticket.updatedAt }
 }
 export type TicketSummaryView = ReturnType<typeof ticketSummary>
@@ -138,8 +143,41 @@ export function threadFacts(store: Store, thread: Thread) {
   return { key: thread.key, source: thread.ref.source, title: threadTitle(store, thread), ...url ? { url } : {}, facts: (thread.meta.facts ?? {}) as ThreadFacts }
 }
 export type ThreadFactsView = ReturnType<typeof threadFacts>
-export const ticketLine = (view: Snapshot, ticket: Ticket) => ({ ...ticketSummary(ticket),
-  threads: view.threadsOf(ticket.id).map(thread => threadFacts(view.store, thread)) })
+/** The Ticket's GitHub pull request: an open one wins (the newest number), else the most recently closed. */
+function followedPull(ticket: Ticket): { thread: string; number: number; closed?: { at: string; outcome: 'merged' | 'closed' } } | undefined {
+  const pulls = (ticket.follows ?? []).flatMap(follow => {
+    const match = /^github:(\d+)$/.exec(follow.thread)
+    return match ? [{ thread: follow.thread, number: Number(match[1]), ...follow.closed ? { closed: follow.closed } : {} }] : []
+  })
+  const open = pulls.filter(pull => !pull.closed).sort((a, b) => b.number - a.number)[0]
+  return open ?? pulls.filter(pull => pull.closed).sort((a, b) => b.closed!.at.localeCompare(a.closed!.at))[0]
+}
+/**
+ * The pull request a Ticket follows as the views read it. The link prefers the followed thread's own URL, falling back
+ * to the GitHub page of the Ticket's repository; it is never constructed without one.
+ */
+export function pullFacts(view: Snapshot, ticket: Ticket): { number: number; state: 'open' | 'merged' | 'closed'; url?: string } | undefined {
+  const pull = followedPull(ticket)
+  if (!pull) return undefined
+  const url = attribute(view.store.threads.get(pull.thread)?.meta.url)
+    ?? (ticket.execution?.repository ? githubPage(ticket.execution.repository, pull.number, true) : undefined)
+  return { number: pull.number, state: pull.closed?.outcome ?? 'open', ...url ? { url } : {} }
+}
+/**
+ * The row shared by the Ticket lists and the Ticket page: its delivery-relevant summary, followed threads, the
+ * repository it works in, the pull request it follows and the agent of its newest run.
+ */
+export const ticketLine = (view: Snapshot, ticket: Ticket) => {
+  const repository = ticket.execution?.repository
+  const pull = pullFacts(view, ticket)
+  const runs = agentRunsOf(view.store, ticket.id)
+  const newest = runs[runs.length - 1]
+  return { ...ticketSummary(ticket),
+    ...repository ? { repository: { id: repository } } : {},
+    ...pull ? { pull } : {},
+    ...newest ? { agent: newest.agent } : {},
+    threads: view.threadsOf(ticket.id).map(thread => threadFacts(view.store, thread)) }
+}
 export function threadTitle(store: Pick<Store, 'read'>, thread: Thread): string {
   const label = attribute(thread.meta.label)
   if (label) return label

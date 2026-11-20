@@ -312,6 +312,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/core/reasons.ts` | `Reason`, `REASONS` and `reasonText`: why the core recorded a Decision or set a Trigger aside, by code |
 | `src/core/ids.ts` | `key`: ids derived from their inputs, equal for equal inputs |
 | `src/core/memory.ts` | `MemoryRepositories`: the Store's repositories in memory, in the Store's order and with its nested rollback, for domain tests |
+| `src/core/scope.ts` | The write scope of a Ticket in one repository: `ScopeClaim` and `ScopeBlock`, `normalizeScopePath`, `covers`, `overlaps` and `overlappingPaths`, and the in-memory `ScopeQueue` of running claims, whose holders a Ticket with an overlapping scope waits for |
 | `src/core/index.ts` | The core's exports |
 | `src/app/runtime.ts` | The Runtime, the composition root, with its start and stop |
 | `src/app/setup.ts` | Setup, and `setupChanged`, whether a save changes a field setup reads |
@@ -342,19 +343,23 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/tools/tool.ts` | The `Tool` type, `readTool`, the `orchestrator_read` of both roles, and `AcknowledgementSchema` |
 | `src/app/tools/main.ts` | The main Session's tools |
 | `src/app/tools/executor.ts` | An Executor Session's tools |
+| `src/app/tools/delivery.ts` | The Worker's delivery tool: record the plan, verify the remote head before pushing, open or reuse the pull request, and recover an unknown result by querying the repository |
 | `src/app/http.ts` | The `/orchestrator/api` routes: the same-origin check, request limits and one status per kind of failure |
 | `src/app/api.ts` | `Api`, every route with its parameters, query, body and response, and the filters of the lists; it imports only types, so the panel bundles it |
 | `src/app/views/text.ts` | The two forms of a view's text: `preview`, plain text on one line, and `markdown` without HTML; `plain` and `readable` |
-| `src/app/views/records.ts` | The rows the views share: Triggers, Tickets, Threads, Decisions and Channel links, and `ownersOf`, the owners of follow-ups as one request reads them |
-| `src/app/views/tickets.ts` | The Ticket lists by stage, a Ticket's page, the Mandate basis facts and the Executor's load |
+| `src/app/views/records.ts` | The rows the views share: Triggers, Tickets (with the repository, the followed pull request and the newest run's agent), Threads, Decisions and Channel links, and `ownersOf`, the owners of follow-ups as one request reads them |
+| `src/app/views/tickets.ts` | The Ticket lists by stage, a Ticket's page with its delivery facts (code, pull request, original-Channel receipt), its worktree and run records, the Mandate basis facts and the Executor's load |
 | `src/app/views/threads.ts` | The Thread lists, a Thread's timeline, the search and the Decision list |
 | `src/app/views/sources.ts` | The Source status: each Source instance's state, its last day's counts, and what it filtered and dropped in that day |
 | `src/app/views/settings.ts` | The settings page's view: each block with its revision, each Source's settings with its kind's form, and the execution environment |
 | `src/app/views/overview.ts` | The overview: Tickets that need a person, problems, the last day's flow and the Executor's load |
+| `src/executor/agents.ts` | Delegation to the local `codex` and `claude` CLIs, the `AgentRuns` the Executor owns: command building, the proxy a CLI needs, the parsers of their output, durable run records, `agentRunsOf` as the views' read model of them, `continue` and `stopAll`, and the note a finished run delivers only to its own Assignment |
 | `src/executor/dsh.ts` | The DshExecutor, `WorkerSlots`, `ticketExecution`, `inputMessage` and `mandateInstructions` |
 | `src/executor/background.ts` | A worker's background work in DeepSeek Harness, the shell jobs its Session owns (`ctx.jobs`) and its subagents (`ctx.subagents`): `runningJobs`, `untilQuiet`, `killJobs`, `collectJobs`, `stopSubagents`, `stopBackground`, `until`, and `cancelled`, the workers whose turn a stop of their subagents cancelled |
 | `src/infra/commands.ts` | `Commands`, the CLI transport: `run`; `api` and `pages`, limited to the configured repository and validated; `lark` as the bot; `git`. `CliError` carries the code a command's output reports, such as a GitHub HTTP status, and a command that prints nothing fails with how it ended, never with its arguments; `validItems` skips and counts the malformed items of a list |
 | `src/infra/environment.ts` | The agent's process environment: command shims, the git configuration and credential helper, `runAsWorker`, and the checks of the environment and of a Ticket's directory |
+| `src/infra/repository.ts` | Validates checkout roots, remote identity, unfinished Git operations and existing changes without modifying files |
+| `src/infra/worktree.ts` | Managed worktrees, one directory and ticket branch per Ticket, from a bare mirror per repository: `prepareWorktree`, which is resumable and never repairs by force, `inspectWorktree`, `removeWorktree`, and `WorktreeConflict` when the scene on disk is not the recorded one |
 | `src/infra/paths.ts` | The package's root, where packaged files are |
 | `src/infra/text.ts` | Word counts and the chat message limit, `fill` and `sameName` |
 | `src/infra/health.ts` | The `HealthBoard`, every part's health entry, each claimed by its one writer |
@@ -375,16 +380,18 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/admission-context.ts` | The bounded window an assessment starts from: the first pages of a Trigger's Thread, read through its kind, and the messages around the Trigger |
 | `src/sources/feishu-image.ts` | Reads a Feishu message's image as an attachment for the assessing Session |
 | `src/client/index.tsx` | The client plugin entry: the sidebar entry, the main panel and the page in DeepSeek Harness's Plugin Manager |
-| `src/client/app.tsx` | The panel: header, search, glossary, tabs and the page of the current route |
-| `src/client/provider.tsx` | What every page reads from its host: copy, calls, navigation, notices, the state poll, and `restart`, which reads the state quickly while dsh-superagent restarts |
+| `src/client/mode.ts` | `usePanelMode`: reads whether this deployment is standalone or the multi-repository manager, so the panel and the Plugin Manager config view choose their own content |
+| `src/client/app.tsx` | The shared panel shell: the grouped left rail (`NavRail`, `useRepoNav`), the detail header with search and glossary, the page of the current route, and the standalone route memory |
+| `src/client/repository.tsx` | The repository page of the global shell: current repository, health, and links into each work area |
+| `src/client/provider.tsx` | What every page reads from its host: copy, calls (`apiBase` selects this deployment or a managed repository's proxy), navigation, notices, the state poll, `remote` for a managed repository, and `restart`, which reads the state quickly while dsh-superagent restarts |
 | `src/client/api.ts` | Calls and polls of the management API, typed by `src/app/api.ts`, and the Decision filters of the Eval status |
-| `src/client/route.ts` | The tabs, the settings groups, the typed routes that `parseRoute` reads, and the route memory with the settings group opened last |
+| `src/client/route.ts` | The settings groups, the manager areas, the typed routes that `parseRoute` reads (a route may name the repository it belongs to), and the route memory with the settings group opened last |
 | `src/client/overview.tsx` | The overview |
 | `src/client/source.tsx`, `trigger.tsx`, `eval.tsx`, `execution.tsx` | One file per stage: its status, and its settings where it has some |
 | `src/client/thread.tsx`, `ticket.tsx` | The record pages: a Thread with its timeline, and a Ticket with its authorization, Inputs and Assignments |
-| `src/client/settings.tsx` | The Settings tab: the group navigation and the group on screen |
+| `src/client/settings.tsx` | The Settings area: headed sections for Sources, Eval, Execution, Prompts and Deployment in one column |
 | `src/client/settings-kit.tsx` | The building blocks of settings blocks: the settings the stage groups share, `useBlockDraft`, the fields, among them a Source kind's, and the history of saves |
-| `src/client/prompts.tsx` | The Prompts settings: the page owns the view it read and its editor the draft, and the Edit, Full prompt and History tabs render from them; a built-in part's editor shows a changed default and keeps or drops the override |
+| `src/client/prompts.tsx` | The Prompts settings: the page owns the view it read and its editor the draft, and the Edit, Full prompt and History views render from them, chosen by a labelled select; a built-in part's editor shows a changed default and keeps or drops the override |
 | `src/client/prompt-config.ts` | The prompt configuration by section, by the team sections, skill names, built-in parts (`part/<key>`, with `withOverride`) and part headings the prompt views give, and the line diff of the full prompt, as pure functions |
 | `src/client/deployment.tsx` | The Deployment settings, also shown in DeepSeek Harness's Plugin Manager |
 | `src/client/draft.tsx` | Settings drafts: `draftReducer`, their states and their merge with a newer saved revision, `saveBarText`, the save bar's line, and the save bar |
@@ -399,6 +406,13 @@ Some generic modules still refer directly to GitHub or Feishu:
 
 `src/sources/github.ts` and `src/sources/feishu.ts` are also the entries of the two Source plugins, built by `tsdown.config.ts` and exported in `package.json` as `./github-watch` and `./feishu-watch`. The bundle's `cordis.patch.yml` inserts the three plugins, with Feishu disabled.
 
+| `src/client/manager.tsx` | Manager mode in the unified panel: the control pages, the manager groups above the selected repository's own areas, and the mode switch |
+| `src/manager/protocol.ts` | Multi-repository management, deterministic Feishu routing and isolated execution |
+| `src/manager/store.ts` | Multi-repository management, deterministic Feishu routing and isolated execution |
+| `src/manager/instances.ts` | Multi-repository management, deterministic Feishu routing and isolated execution |
+| `src/manager/readiness.ts` | `readiness`: the five readiness dimensions of one Repository, instance, checkout, agent, Feishu and queued deliveries, each with its state, its detail and where an operator repairs it |
+| `src/manager/runtime.ts` | Multi-repository management, deterministic Feishu routing and isolated execution; forwards a registered repository's panel API with its credential |
+
 ## Tests
 
 | Test | Covers |
@@ -412,6 +426,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/feishu-read.spec.ts`, `tests/github-read.spec.ts` | Feishu and GitHub reads |
 | `tests/admission-context.spec.ts`, `tests/feishu-image.spec.ts` | The Thread window of assessments, and Feishu image reads |
 | `tests/assessment.spec.ts` | What the MasterAssessor keeps per Eval, and when it lets go |
+| `tests/delivery-tool.spec.ts` | The delivery tool: recorded plans, a moved remote head refusing the push, no second pull request for the same branch, recovery after an unknown result, and the scope overrun blocking delivery |
+| `tests/agents.spec.ts` | Delegating to the local agent CLIs: commands and permissions, the proxy, duplicate submission, results and the real workspace difference, delivery only to the current Assignment, stop and reconciliation, and the write slot ordered after the stop |
 | `tests/background.spec.ts` | Waiting for a worker's shell jobs and subagents: an end that woke it, and a host that stops |
 | `tests/bundle-patch.spec.ts` | The bundle's patch, read as DeepSeek Harness reads it, and the agent preset of Executor Sessions it defines |
 | `tests/effects.spec.ts` | The effect queue: coalescing, limits, retries with backoff, health and shutdown |
@@ -440,12 +456,22 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/client.spec.tsx`, `tests/navigation.spec.ts`, `tests/controls.spec.tsx` | The client plugin's registration and polling, Session navigation and route memory, the local controls, and the panel's imports, which have no cycle |
 | `tests/panel-overview.spec.tsx`, `panel-source.spec.tsx`, `panel-trigger.spec.tsx`, `panel-eval.spec.tsx`, `panel-execution.spec.tsx` | Each page of the panel, against a fake management API answered by route |
 | `tests/panel-settings.spec.tsx`, `panel-prompts.spec.tsx`, `panel-deployment.spec.tsx`, `panel-panel.spec.tsx` | The settings groups, drafts and history, the prompts, the Deployment page, and the panel's search, glossary and route memory |
+| `tests/panel-manager.spec.tsx` | Manager mode in the unified shell: the control rail, selecting a repository, its own pages through the manager's proxy, and every control form |
 | `tests/draft.spec.ts`, `tests/prompt-config.spec.ts`, `tests/markdown.spec.ts`, `tests/marks.spec.ts` | Draft states, merges and the save bar's line; the prompt configuration by section and the line diff; the Markdown subset and its links; the mark of every state the views classify |
 | `tests/locales.spec.ts`, `tests/styles.spec.ts` | The copy in both languages, the stylesheet |
 | `tests/class-docs.spec.ts` | Every class in `src` has a JSDoc block before it |
 | `tests/docs.spec.ts` | Numbered documents link only to earlier ones, every local link resolves, no document has merge conflict markers, and this document's tables list every module and every test |
 
 `tests/fixtures/` holds what several tests share: `host.ts`, a simulated DeepSeek Harness host; `panel-server.ts` and `panel.tsx`, the fake management API and the panel around a page; `deployment.ts`, a resolved deployment; `git.ts`, the environment of every git the tests start, which names no repository; and `async.ts`.
+
+| `tests/repository.spec.ts` | Checkout identity and shared-workspace slot protection |
+| `tests/worktree.spec.ts` | Two Tickets of one repository preparing their worktrees side by side, overlapping write scopes queued, an interrupted preparation resumed, a scene someone else changed refused, cleanup, and the person's checkout left untouched |
+| `tests/manager-store.spec.ts` | Multi-repository routing, durable replay, binding changes and local protocol guards |
+
+| `tests/manager-instances.spec.ts` | Isolated DSH storage, CLI environment, restart preservation and legacy session migration guard |
+| `tests/manager-runtime.spec.ts` | Real loopback bridge authentication, delivery recovery and reply scope using a fake bot |
+
+| `tests/bot-facade.spec.ts` | Bot-only command forwarding without modifying personal authentication |
 
 ## Persistence
 
@@ -485,6 +511,7 @@ Nothing deletes old records yet, so these grow without bound: the `trigger`, `di
 
 `SCHEMA_VERSION` only increases. A database of a newer version refuses to start; `src/app/migration.ts` upgrades a database of the pre-release schema 10 once, at start, and refuses an older one.
 
+
 ## Model-facing interfaces
 
 ### Main Session tools
@@ -516,7 +543,7 @@ Existing main Sessions on `standard` also need explicit timeouts for foreground 
 
 ### Executor tools
 
-Each Executor has six application tools:
+Each Executor has eight application tools:
 
 | Tool | Purpose |
 | --- | --- |
@@ -526,10 +553,12 @@ Each Executor has six application tools:
 | `orchestrator_thread_unrelated` | Drop an unrelated attached Thread, hand back its owned follow-ups and tell the main Session why |
 | `orchestrator_thread_follow` | Subscribe to a related Thread for context and tell the main Session |
 | `orchestrator_trigger_handback` | Hand back a message once, with a reason carried by its candidate |
+| `orchestrator_agent` | Run, continue, stop or inspect a governed local `codex`/`claude` delegation; a run's result is delivered only to the Assignment that started it |
+| `orchestrator_delivery` | Record the delivery plan, check the remote head, push, open or reuse one pull request, and recover an unknown result by querying the repository |
 
 A hand-back returns `queued: false` if another Ticket still owns the message, or this Ticket never owned it. For example, a bot message went to Eval independently.
 
-The worker preset is defined in `cordis.patch.yml` and selected through `WORKER_PRESET`. `WORK_TOOLS` in `src/app/sessions.ts` retains available file, search, shell, job, web, skill, todo and subagent tools. Workers do not receive tools for asking or presenting to a person, changing the profile, scheduling work outside worker slots, starting or messaging other Sessions, or editing external documents. Tool calls are refused after the Ticket ends.
+The worker preset is defined in `cordis.patch.yml` and selected through `WORKER_PRESET`. `WORK_TOOLS` in `src/app/sessions.ts` retains available file, search, shell, job, web, skill, todo and subagent tools, and the profile's local subagent plugin tools (`subagent_claude_code`, `subagent_codex`, `subagent_kimi`, `subagent_opencode`) plus `fleet`/`fleet_status` when those bundles are mounted. Workers do not receive tools for asking or presenting to a person, changing the profile, scheduling work outside worker slots, starting or messaging other Sessions, or editing external documents. Tool calls are refused after the Ticket ends.
 
 ### Result shapes and assessment context
 

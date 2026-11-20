@@ -1,11 +1,14 @@
 /** Concurrent runtime behavior across overlapping triggers, deliveries, and worker launches. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { latestAssignment, waitsForPerson, type Ticket, type Trigger } from '../src/core/index.ts'
+import { join } from 'node:path'
+import { latestAssignment, waitsForPerson, type ScopeQueue, type Ticket, type Trigger } from '../src/core/index.ts'
 import { Later } from '../src/app/effects.ts'
 import { reportRelay } from '../src/app/notices.ts'
 import { WorkerSlots, inputMessage, mandateInstructions, ticketExecution, transient, triggerMessage } from '../src/executor/dsh.ts'
 import { SettingsSchema } from '../src/policy.ts'
 import { Commands } from '../src/infra/commands.ts'
+import { AgentRuns } from '../src/executor/agents.ts'
+import { KV } from '../src/kv.ts'
 import { deferred, waitUntil } from './fixtures/async.ts'
 import { CHAT, MEMBER, feishu, startRuntime, type Host } from './fixtures/host.ts'
 
@@ -289,17 +292,17 @@ describe('a worker whose work runs in the background', () => {
     idle(one.sessionId)
     await vi.waitFor(() => expect(latestAssignment(ticket())?.report?.state).toBe('waiting'))
   })
-  it('kills its shell jobs and releases its subagents when its ticket stops, whose ends wake no one, and lets it start new ones', async () => {
+  it('kills its shell jobs and stops its subagents when its ticket stops, whose ends wake a turn it cancels, and lets it start new ones', async () => {
     const one = await h.acceptedTicket(feishu('1', '@bot 修一'))
     const agent = h.agents.get(one.sessionId)!
     const job = h.jobs.run(one.sessionId), child = h.subagents.spawn(one.sessionId)
     h.runtime.engine.stopTicket(one.ticket.id)
     await vi.waitFor(() => expect(h.jobs.service.kill).toHaveBeenCalledWith(job, one.sessionId, expect.any(String)))
-    await vi.waitFor(() => expect(h.subagents.service.drainChildren).toHaveBeenCalledWith(agent, [child]))
+    await vi.waitFor(() => expect(h.subagents.service.interrupt).toHaveBeenCalledWith(child, { kind: 'user' }))
     // The kill's end released the stop's own wait, which is how DSH tells the worker's job tools it was collected; the
-    // released subagent's end, which DSH delivers before the release returns, is dropped with the turn it woke.
+    // stopped subagent's end, which DSH delivers before the join of its tree returns, is dropped with the turn it woke.
     expect(h.jobs.released).toBe(1)
-    await vi.waitFor(() => expect(agent.cancel.mock.invocationCallOrder.at(-1)).toBeGreaterThan(h.subagents.service.drainChildren.mock.invocationCallOrder[0]!))
+    await vi.waitFor(() => expect(agent.cancel.mock.invocationCallOrder.at(-1)).toBeGreaterThan(h.subagents.service.interrupt.mock.invocationCallOrder[0]!))
     expect(agent.cancel).toHaveBeenLastCalledWith({ kind: 'user' }, { keepInbox: false })
     // Its Session still admits subagents, as when the ticket resumes.
     expect(() => h.subagents.spawn(one.sessionId)).not.toThrow()
@@ -509,14 +512,14 @@ describe('a worker whose work runs in the background', () => {
     h.subagents.spawn(one.sessionId)
     await h.runTool(one.sessionId, 'orchestrator_report', { state: 'ready', summary: 'PR ready' }); await h.runtime.idle()
     // A person's message is on its way into the worker's Session, held there, as the worker hands off; the release is slow.
-    const session = deferred(), drain = deferred(), release = h.subagents.service.drainChildren.getMockImplementation()!
-    h.subagents.service.drainChildren.mockImplementationOnce(async (parent, ids) => { await drain.promise; await release(parent, ids) })
+    const session = deferred(), drain = deferred(), join = h.subagents.service.waitForTreeWork.getMockImplementation()!
+    h.subagents.service.waitForTreeWork.mockImplementationOnce(async parent => { await drain.promise; return join(parent) })
     await new Promise(resolve => setTimeout(resolve, 5))
     const held = holdSession(one.sessionId, session.promise)
     h.runtime.receive(feishu('2', '按钮再大一点', { mentions: [], root_id: 'om_1' }))
     await vi.waitFor(() => expect(held()).toBe(true))
     idle(one.sessionId)
-    await vi.waitFor(() => expect(h.subagents.service.drainChildren).toHaveBeenCalled())
+    await vi.waitFor(() => expect(h.subagents.service.waitForTreeWork).toHaveBeenCalled())
     session.resolve()
     await new Promise(resolve => setTimeout(resolve, 20))
     drain.resolve()
@@ -533,8 +536,8 @@ describe('a worker whose work runs in the background', () => {
     await vi.waitFor(() => expect(latestAssignment(ticket())?.report?.state).toBe('waiting'))
     // A subagent still runs, whose release is slow; one Input waits in the Session's inbox, another in the ticket.
     h.subagents.spawn(one.sessionId)
-    const gate = deferred(), drain = h.subagents.service.drainChildren.getMockImplementation()!
-    h.subagents.service.drainChildren.mockImplementationOnce(async (parent, ids) => { await gate.promise; await drain(parent, ids) })
+    const gate = deferred(), drain = h.subagents.service.waitForTreeWork.getMockImplementation()!
+    h.subagents.service.waitForTreeWork.mockImplementationOnce(async parent => { await gate.promise; return drain(parent) })
     agent.inbox.nextStep.push({ id: 'taken-later', role: 'user', content: [{ type: 'text', text: 'Handed over' }], source: { kind: 'user' } } as never)
     const stored = ticket()
     stored.inputs.push({ id: 'input-late', kind: 'text', text: 'One more thing', at: new Date().toISOString() })
@@ -577,7 +580,7 @@ describe('a worker whose work runs in the background', () => {
     expect(h.jobs.service.kill).toHaveBeenCalledWith(job, one.sessionId, expect.any(String))
     expect(h.subagents.live(child)).toBe(false)
   })
-  it('cancels no worker for a subagent that ended before, and cancels the turn a release woke also when the release fails', async () => {
+  it('cancels no worker for a subagent that ended before, and cancels the turn a stop woke also when the stop fails', async () => {
     const one = await h.acceptedTicket(feishu('1', '@bot 修一'))
     const agent = h.agents.get(one.sessionId)!
     h.subagents.settle(h.subagents.spawn(one.sessionId))
@@ -589,10 +592,10 @@ describe('a worker whose work runs in the background', () => {
     const two = await h.acceptedTicket(feishu('5', '@bot 修二'))
     const other = h.agents.get(two.sessionId)!
     const child = h.subagents.spawn(two.sessionId)
-    h.subagents.service.drainChildren.mockImplementationOnce(async () => { h.subagents.settle(child); throw new Error('ACTIVATION_TEARDOWN_FAILED') })
+    h.subagents.service.interrupt.mockImplementationOnce((id: string) => { h.subagents.settle(id); throw new Error('SUBAGENT_INTERRUPT_UNAVAILABLE') })
     h.runtime.engine.stopTicket(two.ticket.id)
-    await vi.waitFor(() => expect(h.subagents.service.drainChildren).toHaveBeenCalled())
-    await vi.waitFor(() => expect(other.cancel.mock.invocationCallOrder.at(-1)).toBeGreaterThan(h.subagents.service.drainChildren.mock.invocationCallOrder.at(-1)!))
+    await vi.waitFor(() => expect(h.subagents.service.interrupt).toHaveBeenCalled())
+    await vi.waitFor(() => expect(other.cancel.mock.invocationCallOrder.at(-1)).toBeGreaterThan(h.subagents.service.interrupt.mock.invocationCallOrder.at(-1)!))
   })
   it('stops the jobs and the turn of a worker a restart in this process left running, before its Assignment starts again', async () => {
     const one = await h.acceptedTicket(feishu('1', '@bot 修一'))
@@ -608,10 +611,10 @@ describe('a worker whose work runs in the background', () => {
     await h.acceptedTicket(feishu('1', '@bot 修一'))
     const queued = await h.acceptedTicket(feishu('5', '@bot 修二'))
     expect(h.agents.has(queued.sessionId)).toBe(false)
-    // DSH cannot list the children of a Session that does not exist.
-    const list = h.subagents.service.listChildren.getMockImplementation()!
-    h.subagents.service.listChildren.mockImplementation(async (id: string) => {
-      if (id === queued.sessionId) throw new Error('SESSION_QUERY_SESSION_NOT_FOUND')
+    // DSH cannot list the subagents of a Session that does not exist.
+    const list = h.subagents.service.listDescendants.getMockImplementation()!
+    h.subagents.service.listDescendants.mockImplementation(async (id: string) => {
+      if (id === queued.sessionId) throw new Error('SUBAGENT_CONTROL_QUERY_UNAVAILABLE')
       return list(id)
     })
     h.runtime.engine.stopTicket(queued.ticket.id); await h.runtime.idle()
@@ -901,6 +904,37 @@ describe('the Executor\'s parts', () => {
     expect(execution.assignment).toContain('- Copy fixes (copy): Fix typos only.')
     expect(mandateInstructions({ strength: 'explicit' })).toBe('')
   })
+  it('gives two worktree tickets of one repository their own directory and branch instead of one shared checkout', () => {
+    const settings = SettingsSchema.parse({ executor: { workspaceMode: 'worktree' },
+      sources: { github: { config: { repository: 'acme/widgets' } } } })
+    const ticket = (id: string) => ({ id, origin: { triggerId: `tr-${id}` }, mandate: { strength: 'explicit', basis: {} } }) as Ticket
+    const one = ticketExecution(ticket('ticket-one'), { kind: 'accept', name: 'fix-one', scope: 'a' } as never, settings, '/state')
+    const two = ticketExecution(ticket('ticket-two'), { kind: 'accept', name: 'fix-two', scope: 'b' } as never, settings, '/state')
+    expect(one.workspaceMode).toBe('worktree')
+    expect(one.directory).toContain(join('/state/work/worktrees', 'acme--widgets'))
+    expect(one.directory).not.toBe(two.directory)
+    expect(one.worktree!.branch).not.toBe(two.worktree!.branch)
+  })
+  it('makes a worktree ticket wait for a same-repository checkout ticket until it is handed to a person', () => {
+    const execution = (mode: 'current' | 'worktree') => mode === 'current'
+      ? { name: 'fix-a', directory: '/w/checkout', assignment: '', workspaceMode: 'current', repository: 'acme/widgets' }
+      : { name: 'fix-b', directory: '/state/work/worktrees/acme--widgets/fix-b', assignment: '', workspaceMode: 'worktree',
+        repository: 'acme/widgets', worktree: { path: '/state/work/worktrees/acme--widgets/fix-b',
+          branch: 'dsh-superagent/fix-b', baseRef: '', baseSha: 'a'.repeat(40), repositoryId: 'acme--widgets' } }
+    const ticket = (id: string, title: string, mode: 'current' | 'worktree', report?: unknown) => ({ id, title, decisionId: 'd',
+      channels: [], inputs: [], undelivered: [], createdAt: '1', updatedAt: '2', origin: { triggerId: `tr-${id}` },
+      mandate: { strength: 'explicit', basis: {} }, execution: execution(mode),
+      assignments: [{ id: `a-${id}`, state: 'ended', at: '1', ...(report ? { report } : {}) }] }) as unknown as Ticket
+    h.runtime.store.tickets.save(ticket('ticket-checkout', 'Fix the copy', 'current'))
+    h.runtime.store.tickets.save(ticket('ticket-worktree', 'Fix the parser', 'worktree'))
+    // The checkout ticket still writes in the person's directory, so the worktree ticket waits and says for which work.
+    expect(h.runtime.executor.scopeBlocks('ticket-worktree')).toEqual([{ ticketId: 'ticket-checkout', title: 'Fix the copy',
+      repositoryId: 'acme--widgets', scope: [], paths: [] }])
+    // Once it reports blocked it waits for a person, so the repository is handed over.
+    h.runtime.store.tickets.save(ticket('ticket-checkout', 'Fix the copy', 'current',
+      { state: 'blocked', summary: 'Need the copy', at: '3' }))
+    expect(h.runtime.executor.scopeBlocks('ticket-worktree')).toEqual([])
+  })
   it('renders each kind of Input as its worker reads it, inline, and no reopen Input', () => {
     const asked = { id: 'tr1', source: 'feishu', threads: [{ source: 'feishu', id: 'oc:om_1' }], actor: { source: 'feishu', id: 'ou_a' }, human: true,
       at: '2026-09-01T00:00:00Z', text: 'Which page?', meta: {} } as Trigger
@@ -940,4 +974,48 @@ describe('the Executor\'s parts', () => {
     expect(ready.id).toMatch(/^report:/)
     expect(JSON.parse(ready.text)).toMatchObject({ kind: 'worker_report', ticket: { ticket_id: 't1' }, trigger_id: 'tr1', state: 'ready', answer_to: 'tr9', summary: 'Done' })
   })
+})
+
+it('routes subscribed Feishu topic recovery through the manager before local intake in managed mode', async () => {
+  const message = feishu('99', 'recovered follow-up')
+  h.runtime.machine.managed = { repositoryId: 'repository-a', url: 'http://127.0.0.1:39999', token: 'local-test-token' }
+  const fetcher = vi.fn(async (_url: string, _init?: RequestInit) => Response.json({ result: 'duplicate' }))
+  vi.stubGlobal('fetch', fetcher)
+  try {
+    await expect(h.runtime.context({ kind: 'feishu', health: ['feishu', 'history'] }).receive(message)).resolves.toBe('duplicate')
+    expect(fetcher).toHaveBeenCalledOnce()
+    expect(fetcher.mock.calls[0]?.[0]).toBe('http://127.0.0.1:39999/orchestrator/internal/repository-a/receive')
+    expect(h.runtime.store.triggers.get(message.id)).toBeUndefined()
+  } finally { delete h.runtime.machine.managed; vi.unstubAllGlobals() }
+})
+
+it('keeps a stopped ticket\'s write slot until its agent processes confirm their exit, and hands it on afterwards', async () => {
+  const one = await h.acceptedTicket(feishu('1', '@bot 修一'))
+  // Its execution names the repository it writes in, as a ticket accepted from a repository source does.
+  h.runtime.store.tickets.save({ ...one.ticket, execution: { ...one.ticket.execution!, repository: 'acme/widgets' } })
+  const executor = h.runtime.executor as unknown as { scope: ScopeQueue }
+  // The repository identity a scope claim is recorded under, with the path separator folded to `--`.
+  const holders = () => executor.scope.holders('acme--widgets').map(claim => claim.ticketId)
+  const status = () => h.runtime.store.get(KV.executor.scope(one.ticket.id))
+  // The stop reports that the ticket's agent processes did not exit within its limit.
+  const stopAll = vi.spyOn(AgentRuns.prototype, 'stopAll').mockResolvedValue({ confirmed: false, runs: [] } as never)
+  await h.runtime.engine.stopTicket(one.ticket.id)
+  await waitUntil(() => status()?.state === 'stopping')
+  expect(stopAll).toHaveBeenCalled()
+  // The slot stays claimed, and the task page can read why the ticket is still writing.
+  expect(holders()).toContain(one.ticket.id)
+  expect(status()).toMatchObject({ state: 'stopping', scope: [], blockers: [] })
+  expect(String(status()?.detail)).toContain('did not confirm their exit')
+  // A restart retries the settlement; the now confirmed exit releases the slot for the next ticket.
+  stopAll.mockResolvedValue({ confirmed: true, runs: [] } as never)
+  h.runtime.executor.resume()
+  await waitUntil(() => status() === undefined)
+  expect(holders()).not.toContain(one.ticket.id)
+  // Another ticket then claims the same repository, so the slot was released and is reusable.
+  const two = await h.acceptedTicket(feishu('5', '@bot 修二'))
+  h.runtime.store.tickets.save({ ...two.ticket, execution: { ...two.ticket.execution!, repository: 'acme/widgets' } })
+  stopAll.mockResolvedValue({ confirmed: false, runs: [] } as never)
+  await h.runtime.engine.stopTicket(two.ticket.id)
+  await waitUntil(() => h.runtime.store.get(KV.executor.scope(two.ticket.id))?.state === 'stopping')
+  expect(holders()).toEqual([two.ticket.id])
 })

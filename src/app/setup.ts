@@ -1,10 +1,15 @@
 /** Probes repository and account CLIs, configures the worker execution environment and command shims, and tracks setup readiness. */
+import { lockSync } from 'proper-lockfile'
+import { mkdir } from 'node:fs/promises'
 import type { Context } from '@deepseek-ai/cordis'
+import { verifyRepository } from '../infra/repository.ts'
 import { UserError } from '../core/index.ts'
 import { SETUP_FIELDS, resolveDeployment, resolveFeishuBot, workerProbe, type Deployment, type Machine } from '../deployment.ts'
 import { agentVariables, applyEnvironment, verifyEnvironment, withoutDirectory, workerBin, writeEnvironment } from '../infra/environment.ts'
+import { workspaceMode } from '../policy.ts'
 import type { Settings, SettingsBlock } from '../policy.ts'
 import { SetupError, type SetupProblem } from '../setup.ts'
+import { executionRoot } from './execution-environment.ts'
 
 export interface SetupHost {
   readonly context: Context
@@ -16,6 +21,7 @@ export interface SetupHost {
 const setupFields = (settings: Settings) =>
   JSON.stringify(Object.entries(SETUP_FIELDS).map(([id, keys]) => keys.map(key => settings.sources[id]?.config[key] ?? '')))
 export const setupChanged = (before: Settings, after: Settings): boolean => setupFields(before) !== setupFields(after)
+  || workspaceMode(before) !== workspaceMode(after) || before.executor.repositoryPath !== after.executor.repositoryPath
 
 /**
  * Resolves the target repository, GitHub account, and optional Feishu bot by probing CLIs, then writes and applies the isolated git and shim environment used by worker processes.
@@ -30,6 +36,7 @@ export class Setup {
   /** Environment variables pointing agent subprocesses at the isolated git config and command shims. */
   private readonly variables: Record<string, string | undefined>
   private restoreEnvironment?: () => void
+  private releaseRepository?: () => void
   constructor(private readonly host: SetupHost) {
     this.path = withoutDirectory(process.env.PATH ?? '', workerBin(host.machine.stateDir))
     this.variables = agentVariables(host.machine.stateDir)
@@ -67,7 +74,7 @@ export class Setup {
   async blockCommands(blocked: readonly string[]): Promise<void> {
     if (this.resolved) await writeEnvironment(this.resolved, blocked)
   }
-  restore(): void { this.restoreEnvironment?.(); this.restoreEnvironment = undefined }
+  restore(): void { this.restoreEnvironment?.(); this.restoreEnvironment = undefined; this.releaseRepository?.(); this.releaseRepository = undefined }
   /** Probes CLIs the way worker shells run them, using `stateDir` as `cwd` since it exists even before the repository clone is valid. */
   private probe() {
     const { context, machine, lifetime } = this.host
@@ -84,11 +91,23 @@ export class Setup {
       return undefined
     })
     const resolved = { ...deployment, ...(feishu ? { feishu } : {}) }
+    // An unset workspace mode follows the repository: managed worktrees once GitHub is configured, isolated directories otherwise.
+    const mode = workspaceMode(settings)
     const machineProblem = (error: unknown): never => {
       if (error instanceof SetupError) throw error
       throw new SetupError('environmentFailed', { output: error instanceof Error ? error.message : String(error) })
     }
-    await writeEnvironment(resolved, settings.executor.blockedCommands).catch(machineProblem)
+    if (mode === 'current') {
+      const directory = await verifyRepository(settings.executor.repositoryPath, resolved.repository, context.subprocess, lifetime).catch(machineProblem)
+      try { this.releaseRepository = lockSync(directory, { stale: 30_000, onCompromised: () => this.host.restart() }) } catch (error) { machineProblem(error) }
+    }
+    // Worktree tickets never touch the checkout a person works in: each gets a managed worktree under the execution root, whose
+    // per-repository mirror is cloned from the configured remote on first use.
+    if (mode === 'worktree') {
+      if (!String(resolved.repository ?? '')) machineProblem(new Error('Worktree workspace mode needs the repository of the GitHub source.'))
+      await mkdir(executionRoot(settings, machine.stateDir), { recursive: true }).catch(machineProblem)
+    }
+    await writeEnvironment(resolved, settings.executor.blockedCommands).catch((error: unknown) => { this.restore(); machineProblem(error) })
     this.restoreEnvironment = applyEnvironment(this.variables, machine.stateDir, this.path)
     await verifyEnvironment(resolved, context.subprocess, lifetime).catch((error: unknown) => {
       this.restore()

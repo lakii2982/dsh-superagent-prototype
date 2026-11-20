@@ -28,6 +28,10 @@ Executor Sessions run commands without approval as the operator's OS user. Their
 
 The main Session uses `dsh-superagent-router`, with the same 5-second shell and job-wait limits and a smaller tool set for routing. Sessions retain the preset selected at creation. Worker subagents use DeepSeek Harness's `standard` preset.
 
+### Local agent plugins
+
+When the DSH profile mounts the local subagent bundles, a Worker's tools also include their one-shot tools — `subagent_claude_code`, `subagent_codex`, `subagent_kimi` and `subagent_opencode` — and, when present, `fleet`/`fleet_status`. The Worker can hand a self-contained piece of work to one of them, including code changes, and a completion notice wakes it. The tools exist only in a profile that mounts the bundles; the allowlist omits absent ones, so the bundle does not depend on those local plugins. Their agents use their own permissions and one-shot sessions, so the Worker must review the real diff and run the checks before delivery. `orchestrator_agent` remains the governed codex/claude path with run records, the repository's write slot and out-of-scope checks.
+
 ### Background work and worker slots
 
 When a turn ends with shell jobs or subagents still running, the Ticket keeps its worker slot and stays working. It is not reported as waiting, and the main Session receives no waiting report. A completed job or subagent wakes the Executor with its result in the same slot. Once a turn ends with no background work, the Executor reports waiting normally.
@@ -40,7 +44,7 @@ At handoff, subagents stop. Shell jobs, such as a server offered for review, may
 
 A person can also start a turn by writing directly in the Executor Session. Its background work follows the same rules.
 
-When an Assignment ends, its shell jobs are killed without waking the Session. Its subagents are released, and any completion turns they wake are dropped. The replacement Assignment and its waiting Inputs start after that shutdown finishes.
+When an Assignment ends, its shell jobs are killed without waking the Session. Its subagents are interrupted, and any completion turns they wake are dropped; DeepSeek Harness releases each of them as it settles. The replacement Assignment and its waiting Inputs start after that shutdown finishes.
 
 Stopping or restarting the plugin inside the DeepSeek Harness process uses the same shutdown path. Inputs not yet taken into Session history are retained. Shutdown waits up to 10 seconds for each worker's background work; a process restart ends that work outright. An Assignment interrupted while busy restarts with a recovery note.
 

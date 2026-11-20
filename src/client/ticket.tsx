@@ -1,9 +1,9 @@
 /** Ticket detail page: stage and actions, Mandate details, undelivered/delivered Inputs, subscribed Threads, and Assignments. */
-import { useState, type ReactNode } from 'react'
+import { Fragment, useState, type ReactNode } from 'react'
 import { ApiError, usePoll, type TicketPageView } from './api.ts'
-import { DisclosureRow, Dot, Icon, Tag, type IconName } from './controls.tsx'
+import { Button, DisclosureRow, Dot, Icon, Tag, type IconName } from './controls.tsx'
 import { decisionMark, reportDot, ticketMark } from './marks.ts'
-import { usePanel } from './provider.tsx'
+import { useAction, usePanel } from './provider.tsx'
 import { settingsRoute } from './route.ts'
 import { Earlier, ThreadLine, automatedRuns } from './rows.tsx'
 import { actorName, localized, readableMarkers, reasonLabel, valueLabel, when } from './text.ts'
@@ -105,10 +105,82 @@ function MandateDetails({ ticket, actor }: { ticket: TicketPageView; actor: stri
   </Section>
 }
 
+/** Code prepared, the pull request's state, and the message back to the original Channel, as separate facts. */
+function DeliveryFacts({ delivery }: { delivery: TicketPageView['delivery'] }) {
+  const { t } = usePanel()
+  const pull = delivery.pull === 'open' ? t('ticketPullOpen') : delivery.pull === 'merged' ? t('ticketPullMerged')
+    : delivery.pull === 'closed' ? t('ticketPullClosed') : undefined
+  const receipt = delivery.channel === 'waiting' ? t('ticketReceiptWaiting', { count: delivery.waiting })
+    : delivery.channel === 'sent' ? t('ticketReceiptSent')
+      : delivery.channel === 'dropped' ? t('ticketReceiptDropped') : undefined
+  const { plan, remoteHead, pr, result } = delivery
+  // A delivery result reports what the host did with the plan: `unknown` means its outcome must be recovered before retrying.
+  const check = result ? result.outcome === 'applied' ? t('checkPass') : result.outcome === 'unknown' ? t('checkUnknown')
+    : t('checkFail') : undefined
+  return <>
+    {delivery.code === 'ready' && <LabelValue label={t('ticketCodeLabel')} value={t('ticketCodeReady')} />}
+    {pull && <LabelValue label={t('ticketPullLabel')} value={delivery.pull === 'open' && delivery.pullUrl
+      ? <ExternalLink href={delivery.pullUrl}>{pull}</ExternalLink> : pull} />}
+    {receipt && <LabelValue label={t('ticketReceiptLabel')} value={receipt} />}
+    {plan && <KeyValues rows={[
+      [t('ticketPlanBranch'), <span className="dt-mono">{plan.branch}</span>],
+      [t('ticketPlanBase'), <span className="dt-mono">{plan.base}</span>],
+      ...plan.expected ? [[t('ticketPlanExpected'), <span className="dt-mono">{plan.expected.slice(0, 7)}</span>] as [string, ReactNode]] : [],
+    ]} />}
+    {remoteHead && <LabelValue label={t('ticketRemoteHeadLabel')} value={<span className="dt-mono">{remoteHead.slice(0, 7)}</span>} />}
+    {pr && <LabelValue label={t('ticketPullLabel')} value={`#${pr.number}${pr.state ? ` · ${pr.state}` : ''}`} />}
+    {result && <LabelValue label={t('ticketResultLabel')} value={[check, result.state].filter(Boolean).join(' · ')} />}
+    {/* Each Channel keeps its own outbound state, so a sent GitHub delivery and a pending Feishu message read separately. */}
+    {delivery.channels.map(fact => <LabelValue key={fact.source} label={valueLabel(t, 'source', fact.source)} value={[
+      fact.pending ? `${t('channelPending')} (${fact.pending})` : '', fact.sent ? `${t('channelSent')} (${fact.sent})` : '',
+      fact.dropped ? `${t('channelDropped')} (${fact.dropped})` : ''].filter(Boolean).join(t('labelSeparator'))} />)}
+  </>
+}
+
+/** The worktree the Ticket's runs worked in, the run records themselves, and the Agent session they share. */
+function RunDetails({ ticket }: { ticket: TicketPageView }) {
+  const { t } = usePanel()
+  const { worktree } = ticket
+  const span = (from: string, to?: string) => t('assignmentSpan', { from: when(from, t('lang')), to: to ? when(to, t('lang')) : t('now') })
+  return <>
+    {worktree && <KeyValues rows={[
+      [t('runWorktree'), <span className="dt-mono">{worktree.path}</span>],
+      ...worktree.branch ? [[t('runBranch'), <span className="dt-mono">{worktree.branch}</span>] as [string, ReactNode]] : [],
+      ...worktree.baseSha ? [[t('runBaseCommit'), <span className="dt-mono">{worktree.baseSha.slice(0, 7)}
+        {worktree.baseRef ? ` · ${worktree.baseRef}` : ''}</span>] as [string, ReactNode]] : [],
+    ]} />}
+    {ticket.runs.length > 0 && <table className="dt-table">
+      <thead><tr>
+        <th>{t('runAgent')}</th><th>{t('runPermission')}</th><th>{t('runStatus')}</th><th>{t('runSpan')}</th>
+      </tr></thead>
+      <tbody>{ticket.runs.map(run => <Fragment key={run.id}>
+        <tr>
+          <td>{run.agent}</td>
+          <td>{valueLabel(t, 'permission', run.permission)}</td>
+          <td>{valueLabel(t, 'runStatus', run.status)}</td>
+          <td>{span(run.startedAt, run.settledAt)}</td>
+        </tr>
+        {(run.errorKind || run.result || run.changes) && <tr><td colSpan={4}>
+          {run.errorKind && <p className="dt-hint">{t('runError')}: {valueLabel(t, 'agentFailure', run.errorKind)}{run.hint
+            ? ` — ${run.hint}` : ''}</p>}
+          {run.result && <p className="dt-hint">{t('runResult')}: {run.result}</p>}
+          {run.changes && <div className="dt-hint">
+            <div>{t('runChanges')}{run.changes.status ? `: ${run.changes.status}` : ''}</div>
+            {run.changes.stat && <pre className="dt-mono">{run.changes.stat}</pre>}
+          </div>}
+        </td></tr>}
+      </Fragment>)}</tbody>
+    </table>}
+    {ticket.sessionId && <KeyValues rows={[[t('runSession'), <SessionButton variant="outline" sessionId={ticket.sessionId} />]]} />}
+  </>
+}
+
 export function TicketPage({ id }: { id: string }) {
   const { t, call } = usePanel()
   const { data, error, reload } = usePoll(() => call('GET tickets/:id', { id }), [id])
   const after = async (request: Promise<unknown>) => { await request; await reload() }
+  // Approving the paths a run wrote outside the declared scope unblocks delivery; the page then shows the widened scope.
+  const approve = useAction((paths?: string[]) => call('POST tickets/:id/scope-approval', { id, body: paths ? { paths } : {} }), { reload })
   if (!data) return <><PageHead
     title={t('term.ticket')} />{error instanceof ApiError && error.missing ? <Hint>{t('ticketNotFound')}</Hint> : <LoadState
       error={error} loading />}</>
@@ -136,6 +208,7 @@ export function TicketPage({ id }: { id: string }) {
     {error && <LoadState error={error} loading={false} />}
     <div className="dt-row-meta dt-status-line">
       <StageMark state={status.dot} icon={status.icon} label={status.label} />
+      <DeliveryFacts delivery={data.delivery} />
       <LabelValue label={t('ticketMandateLabel')} value={valueLabel(t, 'strength', data.mandate.strength)} />
       <LabelValue label={t('ticketActorLabel')} value={`${valueLabel(t, 'source', data.mandate.actor.source)} · ${actor}`} />
       <LabelValue label={t('ticketUpdatedLabel')} value={when(data.updatedAt, t('lang'))} />
@@ -152,6 +225,20 @@ export function TicketPage({ id }: { id: string }) {
     </p>}
     {data.deliveryError && <p className="dt-banner dt-danger dt-mono">
       <span className="dt-banner-label">{t('deliveryFailedPrefix')}</span>{data.deliveryError}
+    </p>}
+    {/* A run that wrote outside the declared scope keeps its changes in the isolated worktree; delivery waits for this answer. */}
+    {data.overrun && !data.overrun.approval && <div className="dt-banner dt-danger">
+      <span className="dt-banner-label">{t('scopeOverrunTitle')}</span>
+      <div><strong>{t('scopeDeliveryBlocked')}</strong></div>
+      <div>{t('scopeOverrunHint')}</div>
+      <ul className="dt-plain-list">{data.overrun.paths.map(path => <li key={path} className="dt-mono">{path}</li>)}</ul>
+      <div className="dt-banner-actions"><Button variant="primary" size="sm" disabled={approve.busy}
+        onClick={() => { void approve.run() }}>{t('scopeOverrunApprove')}</Button></div>
+    </div>}
+    {data.overrun?.approval && <Hint>{t('scopeOverrunApproved')}</Hint>}
+    {/* A stop whose agent processes have not confirmed their exit keeps the write slot: the reason stays visible until it settles. */}
+    {data.scopeStatus?.state === 'stopping' && <p className="dt-banner">
+      <span className="dt-banner-label">{t('scopeStopping')}</span>{data.scopeStatus.detail}
     </p>}
     <MandateDetails ticket={data} actor={actor} />
     {undelivered.length > 0 && <Section title={t('undeliveredInputs')} count={undelivered.length}>
@@ -181,6 +268,9 @@ export function TicketPage({ id }: { id: string }) {
       {data.inputs.length > undelivered.length && <Details icon="inbox" title={t('deliveredInputs',
         { count: data.inputs.length - undelivered.length })}>
         <InputList inputs={data.inputs.filter(input => input.delivered)} />
+      </Details>}
+      {(data.worktree || data.runs.length > 0) && <Details icon="queue" title={t('runDetails')}>
+        <RunDetails ticket={data} />
       </Details>}
       <Details icon="hash" title={t('identifiers')}>
         <KeyValues rows={[[t('ticketId'), <span className="dt-mono">{data.id}</span>], [t('executionDirectory'), <span

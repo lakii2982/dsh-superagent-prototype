@@ -1,8 +1,9 @@
 /** Block-scoped settings validation, optimistic concurrency saves, processing pause control, and source policy synchronization. */
 import type { Context } from '@deepseek-ai/cordis'
 import { z } from 'zod'
+import { verifyRepository } from '../infra/repository.ts'
 import { UserError, type EngineForSettings } from '../core/index.ts'
-import { EvalConfigSchema, ExecutorConfigSchema, PolicyConfigSchema, SettingsSchema, policyEffects, policyVersion } from '../policy.ts'
+import { EvalConfigSchema, ExecutorConfigSchema, PolicyConfigSchema, SettingsSchema, policyEffects, policyVersion, workspaceMode } from '../policy.ts'
 import type { Settings as SettingsValue, SettingsBlock, SettingsOrigin, SettingsSave } from '../policy.ts'
 import type { SourceHost } from '../sources/host.ts'
 import type { HealthBoard, HealthEntry } from '../infra/health.ts'
@@ -21,7 +22,8 @@ import { KV } from '../kv.ts'
 export class SettingsConflict extends Error {}
 const now = (): string => new Date().toISOString()
 /** Executor settings that control shell execution paths, prepare commands, and command shims. */
-const environment = ({ executor }: SettingsValue) => JSON.stringify([executor.directory, executor.prepare, executor.blockedCommands])
+const environment = ({ executor, sources }: SettingsValue) => JSON.stringify([executor.directory, executor.prepare, executor.blockedCommands,
+  workspaceMode({ executor, sources }), executor.repositoryPath])
 
 /** Schema parser, settings merger, and non-panel origin guard for one settings block kind. */
 interface Block {
@@ -164,6 +166,22 @@ export class Settings {
       catch (error) { throw new UserError('modelUnavailable', { block, error: error instanceof Error ? error.message : String(error) }) }
     }
     rules.guard?.(current, candidate, origin)
+    const changing = current.executor.repositoryPath !== candidate.executor.repositoryPath
+      || workspaceMode(current) !== workspaceMode(candidate)
+    if (changing && store.tickets.open().some(ticket => ticket.execution?.workspaceMode === 'current')) {
+      throw new SettingsConflict('Finish or stop open checkout tickets before changing their workspace configuration.')
+    }
+    // A worktree ticket whose preparation has not recorded its base commit yet owns a half-prepared scene: moving the
+    // repository its worktree belongs to would orphan that scene, so the scene is finished first.
+    const preparing = changing
+      ? store.tickets.open().find(ticket => ticket.execution?.workspaceMode === 'worktree' && !ticket.execution.worktree?.baseSha)
+      : undefined
+    if (preparing) {
+      throw new SettingsConflict(`Let ${preparing.title} (${preparing.id}) finish preparing its worktree before changing the workspace configuration.`)
+    }
+    if ((block === 'executor' || block === 'source:github') && workspaceMode(candidate) === 'current') {
+      candidate.executor.repositoryPath = await verifyRepository(candidate.executor.repositoryPath, String(candidate.sources.github?.config.repository ?? ''), this.host.context.subprocess, this.host.lifetime)
+    }
     if (setupChanged(current, candidate)) await this.host.setup.checkAccounts(block, candidate)
     if (stale()) throw new SettingsConflict('Settings changed during the checks. Reload before saving.')
     // Re-read current settings after async checks in case unrelated blocks were saved concurrently.

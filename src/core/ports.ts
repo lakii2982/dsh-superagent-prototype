@@ -2,6 +2,7 @@
 import type { Assignment, ChannelRef, Decision, DecisionKind, Mandate, MandateBasis, Strength, Thread, Ticket, TicketEndBy, TicketOutcome, Trigger }
   from './model.ts'
 import type { Reason } from './reasons.ts'
+import type { AgentDelegation } from '../executor/agents.ts'
 
 /** Gate admission result: either inadmissible with a reason code, or admissible with strength and MandateBasis. */
 export type GateResult = { admissible: false; reason: string } | { admissible: true; strength: Strength; basis: MandateBasis }
@@ -66,6 +67,10 @@ export interface Executor {
   deliver(ticket: Ticket, assignment: Assignment): void
   /** End an assignment's work, such as cancelling its Session's turn; called after the ticket or assignment has already ended in the domain. */
   stop(ticket: Ticket, assignment: Assignment, reason: string): void
+  /** The local agent CLI runs its workers delegate to, when the implementation supports `orchestrator_agent`. */
+  readonly agents?: AgentDelegation
+  /** Why a delegation run that writes is refused now, such as another ticket writing the repository; undefined when it may start. */
+  writeRefusal?(ticketId: string): string | undefined
 }
 
 /** A message for a Channel; `ticketId` names the Ticket it is for, when there is one. */
