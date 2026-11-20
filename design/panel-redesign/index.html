@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Superagent 插件界面 · 整合方案与探索稿</title>
+<link rel="stylesheet" href="assets/base.css" />
+<style>
+  body { background: var(--bg); }
+  .page { max-width: 1180px; margin: 0 auto; padding: 56px 40px 96px; }
+  .eyebrow { font: 500 11px/18px var(--font); letter-spacing: .08em; color: var(--ink-3); text-transform: uppercase; }
+  .hero { display: flex; align-items: flex-end; justify-content: space-between; gap: 32px; padding-bottom: 28px; border-bottom: 1px solid var(--line-2); }
+  .hero h1 { margin: 10px 0 12px; font: 600 32px/40px var(--font); letter-spacing: -.02em; }
+  .hero p { max-width: 680px; font: 400 15px/26px var(--font); color: var(--ink-2); }
+  .hero-meta { flex: none; text-align: right; font: 400 12px/20px var(--font); color: var(--ink-3); }
+  .hero-meta b { display: block; font: 500 13px/20px var(--font); color: var(--ink-1); }
+  .facts { display: flex; flex-wrap: wrap; gap: 8px; margin: 20px 0 8px; }
+  .fact { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border: 1px solid var(--line-3); border-radius: 999px; font: 400 12px/20px var(--font); color: var(--ink-2); }
+  .fact .dot { width: 5px; height: 5px; }
+  .concept { padding: 56px 0 48px; border-bottom: 1px solid var(--line-2); }
+  .concept-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 20px; }
+  .concept-index { font: 500 12px/20px var(--mono); color: var(--ink-4); }
+  .concept h2 { margin: 6px 0 8px; font: 600 24px/32px var(--font); letter-spacing: -.014em; }
+  .concept-tagline { font: 400 15px/24px var(--font); color: var(--ink-2); }
+  .concept-links { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; padding-top: 4px; }
+  .concept-links .btn { text-decoration: none; }
+  .shot { position: relative; border: 1px solid var(--line-3); border-radius: var(--r-lg); background: var(--bg-subtle); overflow: hidden; }
+  .shot-inner { width: 1440px; height: 900px; transform: scale(.694444); transform-origin: 0 0; position: relative; }
+  .shot-frame { width: 1000px; height: 625px; overflow: hidden; }
+  .shot iframe { width: 1440px; height: 900px; border: 0; pointer-events: none; background: #fff; }
+  .shot-link { position: absolute; inset: 0; z-index: 2; display: block; }
+  .shot-link:focus-visible { outline-offset: -3px; }
+  .shot-caption { display: flex; justify-content: space-between; gap: 12px; margin-top: 8px; font: 400 12px/18px var(--font); color: var(--ink-3); }
+  .shot-caption code { font-family: var(--mono); font-size: 11px; color: var(--ink-2); }
+  .concept-notes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; margin-top: 20px; border: 1px solid var(--line-3); border-radius: var(--r-md); overflow: hidden; background: var(--line-3); }
+  .note { padding: 16px 18px; background: var(--bg); }
+  .note h3 { margin: 0 0 6px; font: 500 12px/18px var(--font); color: var(--ink-3); }
+  .note p { font: 400 14px/22px var(--font); color: var(--ink-1); }
+  .note small { display: block; margin-top: 6px; font: 400 12px/18px var(--font); color: var(--ink-3); }
+  .section { padding: 48px 0; border-bottom: 1px solid var(--line-2); }
+  .section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 20px; }
+  .section h2 { font: 600 18px/26px var(--font); }
+  .section-desc { max-width: 720px; font: 400 14px/24px var(--font); color: var(--ink-2); }
+  .cols { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
+  .list { display: flex; flex-direction: column; gap: 8px; }
+  .list li { position: relative; padding-left: 18px; font: 400 13px/21px var(--font); color: var(--ink-2); }
+  .list li::before { content: ''; position: absolute; left: 2px; top: 8px; width: 4px; height: 4px; border-radius: 50%; background: var(--ink-4); }
+  .questions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .question { padding: 18px; border: 1px solid var(--line-3); border-radius: var(--r-md); }
+  .question .num { font: 500 11px/18px var(--mono); color: var(--ink-4); }
+  .question h3 { margin: 6px 0 8px; font: 600 14px/22px var(--font); }
+  .question p { font: 400 13px/21px var(--font); color: var(--ink-2); }
+  .tokens { display: grid; grid-template-columns: 1.1fr 1fr; gap: 32px; }
+  .token-table { width: 100%; border-collapse: collapse; font: 400 12px/18px var(--font); }
+  .token-table th { padding: 0 0 8px; text-align: left; font: 500 12px/18px var(--font); color: var(--ink-3); border-bottom: 1px solid var(--line-2); }
+  .token-table td { padding: 9px 0; border-bottom: 1px solid var(--line-1); vertical-align: middle; color: var(--ink-2); }
+  .token-table td:first-child { font-family: var(--mono); font-size: 11px; color: var(--ink-1); }
+  .swatch { display: inline-block; width: 12px; height: 12px; border-radius: 4px; border: 1px solid var(--line-3); vertical-align: -2px; margin-right: 6px; }
+  .type-sample { display: flex; flex-direction: column; gap: 10px; }
+  .type-row { display: flex; align-items: baseline; gap: 14px; }
+  .type-row span:first-child { width: 74px; flex: none; font: 400 11px/18px var(--mono); color: var(--ink-4); }
+  .limits { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+  .limits p { font: 400 13px/22px var(--font); color: var(--ink-2); }
+  .foot { display: flex; justify-content: space-between; gap: 24px; padding-top: 32px; font: 400 12px/20px var(--font); color: var(--ink-3); }
+  .foot code { font-family: var(--mono); font-size: 11px; }
+
+  .explore-label { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-top: 8px; padding: 48px 0 0; border-top: 1px solid var(--line-2); font: 600 18px/26px var(--font); }
+
+  @media (max-width: 1120px) {
+    .page { padding: 40px 24px 64px; }
+    .shot-frame { width: 720px; height: 450px; max-width: 100%; }
+    .shot-inner { transform: scale(.5); }
+    .concept-notes, .questions { grid-template-columns: 1fr; }
+    .cols { grid-template-columns: 1fr; gap: 20px; }
+    .tokens, .limits { grid-template-columns: 1fr; }
+    .hero { flex-direction: column; align-items: flex-start; }
+    .hero-meta { text-align: left; }
+    .concept-head { flex-direction: column-reverse; }
+    .concept-links { justify-content: flex-start; }
+  }
+</style>
+</head>
+<body>
+<main class="page">
+  <header class="hero">
+    <div>
+      <div class="eyebrow">Superagent · 设计评审</div>
+      <h1>插件界面 · 整合方案</h1>
+      <p>把 V1 的队列分栏与命令面板、V3 的设置与视觉语言整合成一个完整工作台。下面先给最终方案，再保留三版方向探索用于对照；全部使用同一份模拟数据，都可以直接点击。</p>
+      <div class="facts">
+        <span class="fact"><span class="dot dot-green"></span>DSH light palette</span>
+        <span class="fact">1440 × 900</span>
+        <span class="fact">零依赖 · 可交互</span>
+        <span class="fact">整合方案 + 3 版探索稿</span>
+        <span class="fact">模拟数据</span>
+      </div>
+    </div>
+    <div class="hero-meta">
+      <b>2026 年 11 月 17 日</b>
+      基线 <span class="mono">a028a6b</span><br />
+      评审：产品负责人
+    </div>
+  </header>
+
+
+  <article class="concept" id="solution">
+    <div class="concept-head">
+      <div>
+        <div class="concept-index">00 / Integrated</div>
+        <h2>整合方案</h2>
+        <p class="concept-tagline">V1 的队列分栏与命令面板，加上 V3 的设置与视觉语言；一个可以日常使用的完整工作台。</p>
+      </div>
+      <div class="concept-links">
+        <a class="btn btn-primary" href="solution.html?view=home" target="_blank" rel="noopener">打开方案</a>
+        <a class="btn btn-outline" href="solution.html?palette=1" target="_blank" rel="noopener">命令面板</a>
+        <a class="btn btn-ghost" href="solution.html?view=settings" target="_blank" rel="noopener">设置</a>
+      </div>
+    </div>
+    <div class="shot">
+      <div class="shot-frame">
+        <div class="shot-inner">
+          <iframe src="solution.html?view=home" title="整合方案预览" loading="lazy" tabindex="-1" aria-hidden="true"></iframe>
+        </div>
+      </div>
+      <a class="shot-link" href="solution.html?view=home" target="_blank" rel="noopener" aria-label="打开整合方案"></a>
+    </div>
+    <div class="shot-caption"><span>默认打开今日队列，右侧是当前这件事的完整上下文</span><span><code>solution.html?view=home</code> · 缩放 69%</span></div>
+    <div class="concept-notes">
+      <div class="note"><h3>来自 V1</h3><p>三栏队列分栏与行内处理；<code>⌘K</code> 命令面板保留为全局入口。</p><small>j / k 移动 · Enter 打开 · ⌘K 搜索</small></div>
+      <div class="note"><h3>来自 V3</h3><p>设置页的四步清单、分组卡片与保存条；黑色的当前导航、16px 卡片、克制的留白。强调不使用左侧色条，改用浅色表面、完整描边和状态点。</p><small>设置隐藏队列，占满内容区</small></div>
+      <div class="note"><h3>整合后的取舍</h3><p>队列占 340px，右侧详情更宽；导航收成 64px 图标栏，仓库上下文回到队列顶部。</p><small>1440 宽下优先级最高的是队列与详情</small></div>
+    </div>
+  </article>
+
+  <div class="explore-label"><span>方向探索</span><span class="t-caption">整合前的三版，保留用于对照</span></div>
+  <article class="concept" id="v1">
+    <div class="concept-head">
+      <div>
+        <div class="concept-index">01 / Focus Queue</div>
+        <h2>队列分栏</h2>
+        <p class="concept-tagline">把面板当成一个需要清空的收件箱：左边导航，中间队列，右边是当前这件事的全部上下文。</p>
+      </div>
+      <div class="concept-links">
+        <a class="btn btn-primary" href="v1-queue.html?view=home" target="_blank" rel="noopener">打开原型</a>
+        <a class="btn btn-outline" href="v1-queue.html?palette=1" target="_blank" rel="noopener">命令面板</a>
+        <a class="btn btn-ghost" href="v1-queue.html?view=settings" target="_blank" rel="noopener">设置</a>
+      </div>
+    </div>
+    <div class="shot">
+      <div class="shot-frame">
+        <div class="shot-inner">
+          <iframe src="v1-queue.html?view=home" title="V1 队列分栏预览" loading="lazy" tabindex="-1" aria-hidden="true"></iframe>
+        </div>
+      </div>
+      <a class="shot-link" href="v1-queue.html?view=home" target="_blank" rel="noopener" aria-label="打开 V1 队列分栏原型"></a>
+    </div>
+    <div class="shot-caption"><span>默认打开「今日」，自动选中第一件需要你处理的工作</span><span><code>v1-queue.html?view=home</code> · 缩放 69%</span></div>
+    <div class="concept-notes">
+      <div class="note"><h3>打开后先看到</h3><p>需要你处理的队列，以及第一件事的完整上下文。</p><small>无需再点一次</small></div>
+      <div class="note"><h3>适合</h3><p>每天多次处理、追求速度的日常监督；键盘操作。</p><small>j / k 移动 · Enter 打开 · ⌘K 搜索</small></div>
+      <div class="note"><h3>取舍</h3><p>三段并置，详情区域偏窄；信息密度高，新用户需要适应。</p><small>1180px 以下详情会明显变窄</small></div>
+    </div>
+  </article>
+
+  <article class="concept" id="v2">
+    <div class="concept-head">
+      <div>
+        <div class="concept-index">02 / Flow Board</div>
+        <h2>流水看板</h2>
+        <p class="concept-tagline">用空间表达流程：新触发、等待你、执行中、已结束四列并排，一眼看到工作卡在哪一段。</p>
+      </div>
+      <div class="concept-links">
+        <a class="btn btn-primary" href="v2-board.html?view=board" target="_blank" rel="noopener">打开原型</a>
+        <a class="btn btn-outline" href="v2-board.html?drawer=t-1042" target="_blank" rel="noopener">打开抽屉</a>
+        <a class="btn btn-ghost" href="v2-board.html?view=settings" target="_blank" rel="noopener">设置</a>
+      </div>
+    </div>
+    <div class="shot">
+      <div class="shot-frame">
+        <div class="shot-inner">
+          <iframe src="v2-board.html?view=board" title="V2 流水看板预览" loading="lazy" tabindex="-1" aria-hidden="true"></iframe>
+        </div>
+      </div>
+      <a class="shot-link" href="v2-board.html?view=board" target="_blank" rel="noopener" aria-label="打开 V2 流水看板原型"></a>
+    </div>
+    <div class="shot-caption"><span>默认打开看板，四列对应真实生命周期；点击卡片从右侧看详情</span><span><code>v2-board.html?view=board</code> · 缩放 69%</span></div>
+    <div class="concept-notes">
+      <div class="note"><h3>打开后先看到</h3><p>工作在全流程中的位置，以及今天流进来多少、卡在哪。</p><small>顶部状态带 + 四列</small></div>
+      <div class="note"><h3>适合</h3><p>同时盯多条工作、关注堵点和吞吐；也适合向他人解释流程。</p><small>点卡片 → 右侧抽屉</small></div>
+      <div class="note"><h3>取舍</h3><p>卡片只能承载摘要，阅读上下文要开抽屉；四列对宽度要求高。</p><small>窄屏需要横向滚动</small></div>
+    </div>
+  </article>
+
+  <article class="concept" id="v3">
+    <div class="concept-head">
+      <div>
+        <div class="concept-index">03 / Briefing Desk</div>
+        <h2>简报工作台</h2>
+        <p class="concept-tagline">先读一份今天的工作简报，再决定做什么。问题用大卡承载，一次只处理一件事。</p>
+      </div>
+      <div class="concept-links">
+        <a class="btn btn-primary" href="v3-briefing.html?view=briefing" target="_blank" rel="noopener">打开原型</a>
+        <a class="btn btn-outline" href="v3-briefing.html?inspector=t-1042" target="_blank" rel="noopener">打开检查器</a>
+        <a class="btn btn-ghost" href="v3-briefing.html?view=settings" target="_blank" rel="noopener">设置</a>
+      </div>
+    </div>
+    <div class="shot">
+      <div class="shot-frame">
+        <div class="shot-inner">
+          <iframe src="v3-briefing.html?view=briefing" title="V3 简报工作台预览" loading="lazy" tabindex="-1" aria-hidden="true"></iframe>
+        </div>
+      </div>
+      <a class="shot-link" href="v3-briefing.html?view=briefing" target="_blank" rel="noopener" aria-label="打开 V3 简报工作台原型"></a>
+    </div>
+    <div class="shot-caption"><span>默认打开今日简报；问题原文和回复框直接出现在卡片里</span><span><code>v3-briefing.html?view=briefing</code> · 缩放 69%</span></div>
+    <div class="concept-notes">
+      <div class="note"><h3>打开后先看到</h3><p>一段解释今天发生了什么的话，以及两件需要你决定的事。</p><small>阅读优先，动作紧随</small></div>
+      <div class="note"><h3>适合</h3><p>低频监督、先读清楚再处理；也适合把面板当作每日工作入口。</p><small>专注模式隐藏一切次要信息</small></div>
+      <div class="note"><h3>取舍</h3><p>一屏信息量最少，批量处理慢；需要滚动才能看到执行与历史。</p><small>面板会显得「更长」</small></div>
+    </div>
+  </article>
+
+  <section class="section">
+    <div class="section-head"><h2>覆盖范围</h2><span class="badge">同一份数据</span></div>
+    <p class="section-desc">整合方案与三版探索稿覆盖同一组页面与状态；整合方案从左侧导航进入这些页面，三版探索稿保留完整视图用于对照。</p>
+    <div class="cols" style="margin-top: 24px;">
+      <div>
+        <h3 class="t-section" style="margin-bottom: 10px;">四类页面</h3>
+        <ul class="list">
+          <li>今日：需要你、系统问题、24 小时流水、执行器、正在发生、近期结果</li>
+          <li>工单：列表与详情，含来源、判断理由、会话、分支 / PR、时间线</li>
+          <li>流水：触发、决定、丢弃消息，含过滤与原因</li>
+          <li>设置：来源与账号、准入、执行、部署、首次配置清单</li>
+        </ul>
+      </div>
+      <div>
+        <h3 class="t-section" style="margin-bottom: 10px;">共同状态</h3>
+        <ul class="list">
+          <li>2 件需要你：一个等待回复，一个验证失败</li>
+          <li>1 个可行动的警告：飞书连接中断</li>
+          <li>2 个执行中、1 个排队、3 个近期结束</li>
+          <li>回复、重试、暂停、打开会话等动作都有反馈</li>
+        </ul>
+      </div>
+      <div>
+        <h3 class="t-section" style="margin-bottom: 10px;">共同收敛</h3>
+        <ul class="list">
+          <li>六个页签收敛为四个入口：今日 / 工单 / 流水 / 设置</li>
+          <li>来源、触发、评估合并进「流水」的过滤与详情</li>
+          <li>设置里的首次配置单独成清单</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-head"><h2>评审请回答</h2><span class="t-caption">需要你的判断，不是偏好投票</span></div>
+    <div class="questions">
+      <div class="question"><div class="num">Q1</div><h3>这个整合方向能作为最终方案吗？</h3><p>队列来自 V1，视觉与设置来自 V3。如果有打断整体感的地方，请指出是哪一块。</p></div>
+      <div class="question"><div class="num">Q2</div><h3>六个页签是否收敛为四个？</h3><p>整合方案用「今日 / 工单 / 流水 / 设置」四个入口。如果来源、触发、评估各自需要独立入口，请说明。</p></div>
+      <div class="question"><div class="num">Q3</div><h3>还有哪些 Codex 细节需要对齐？</h3><p>密度、圆角、字体、动效或导航形态——指出你希望更接近 Codex 的具体一处即可。</p></div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="section-head"><h2>设计基线</h2><span class="t-caption">DSH semantic tokens · light</span></div>
+    <div class="tokens">
+      <div>
+        <table class="token-table">
+          <thead><tr><th>Token</th><th>用途</th></tr></thead>
+          <tbody>
+            <tr><td><span class="swatch" style="background:#fff"></span>bg-base</td><td>主画布 / 卡片</td></tr>
+            <tr><td><span class="swatch" style="background:#f5f6f7"></span>bg-module-platform</td><td>导航、看板底</td></tr>
+            <tr><td><span class="swatch" style="background:#0f1115"></span>label-primary</td><td>标题 / 主文字</td></tr>
+            <tr><td><span class="swatch" style="background:#61666b"></span>label-secondary</td><td>正文辅助</td></tr>
+            <tr><td><span class="swatch" style="background:#81858c"></span>label-tertiary</td><td>说明 / 元信息</td></tr>
+            <tr><td><span class="swatch" style="background:#0f1115"></span>brand-primary</td><td>黑色主按钮</td></tr>
+            <tr><td><span class="swatch" style="background:#4176e6"></span>state-business-primary</td><td>链接 / 进行中</td></tr>
+            <tr><td><span class="swatch" style="background:#f59e0b"></span>state-warn-primary</td><td>等待 / 需要你</td></tr>
+            <tr><td><span class="swatch" style="background:#7c3aed"></span>state-done-primary</td><td>已合并 / 完成</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div>
+        <div class="type-sample">
+          <div class="type-row"><span>20 / 28</span><span style="font:600 20px/28px var(--font)">页面标题</span></div>
+          <div class="type-row"><span>16 / 24</span><span style="font:600 16px/24px var(--font)">分区标题</span></div>
+          <div class="type-row"><span>14 / 22</span><span style="font:400 14px/22px var(--font)">正文与行标题</span></div>
+          <div class="type-row"><span>13 / 20</span><span style="font:400 13px/20px var(--font); color:var(--ink-2)">辅助文字与元信息</span></div>
+          <div class="type-row"><span>12 / 18</span><span style="font:400 12px/18px var(--font); color:var(--ink-3)">说明与时间</span></div>
+        </div>
+        <hr class="hairline" style="margin: 20px 0;" />
+        <ul class="list">
+          <li>1px 发丝线优先于阴影；阴影只用于抽屉、菜单、命令面板。</li>
+          <li>圆角 8 / 12 / 16；主按钮一屏最多一个。</li>
+          <li>状态色只表达状态，不用作装饰或大面积底色。</li>
+          <li>动效 200ms；`prefers-reduced-motion` 下关闭。</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" style="border-bottom: 0;">
+    <div class="section-head"><h2>证据与限制</h2></div>
+    <div class="limits">
+      <p>三版都是零依赖的静态 HTML/CSS/JS 原型，使用同一份模拟数据；未接入真实 API，未实现暗色主题与移动端。交互可通过 URL 参数复现，便于逐项评审。</p>
+      <p>本轮以 Superagent 主面板为主，现有 Manager 页的仓库、群绑定和首次配置收进三版「设置」。视觉基线截图来自当前插件构建的 Manager 页；主面板实时截图因本地 GUI 需要启动凭证，未纳入本轮。</p>
+    </div>
+  </section>
+
+  <footer class="foot">
+    <span>Superagent 面板重设计 · 三版原型 · 2026-11-17</span>
+    <span><code>design/panel-redesign/</code> · <a href="README.md">设计说明</a></span>
+  </footer>
+</main>
+</body>
+</html>
