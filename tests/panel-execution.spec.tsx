@@ -121,7 +121,7 @@ it('offers a Ticket awaiting review its review place and Session in the page hea
 
 it('lets the workspace mode follow the repository again after a mode was chosen', async () => {
   await mount()
-  await click(zh['tab.execution'])
+  await click(rail(zh['nav.tasks']))
   await click(find(zh['tab.settings'], '.dt-status-head button'))
   expect(field<HTMLInputElement>(zh.executionDirectory).value).toBe('')
   // The default option clears the stored choice, so the configured repository decides again instead of the panel pinning a mode.
