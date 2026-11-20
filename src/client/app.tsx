@@ -1,7 +1,7 @@
-/** Root panel shell: header with global search and glossary, top-level navigation tabs, and active route view. */
+/** Root panel shell: one left rail of work areas and a single scrolling detail column, without page tabs. */
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { usePoll, type SearchView } from './api.ts'
-import { Button, Dot, Icon, Input, Modal, SegmentedTabs, type IconName } from './controls.tsx'
+import { Button, Dot, Icon, Input, Modal, type IconName } from './controls.tsx'
 import type { DeploymentForm } from './deployment.tsx'
 import { EvalStatus } from './eval.tsx'
 import { ExecutionStatus } from './execution.tsx'
@@ -10,7 +10,7 @@ import { GLOSSARY, GLOSSARY_VALUES, en, zh, type DshSuperagentKey } from './loca
 import { OverviewPage } from './overview.tsx'
 import { RepositoryPage } from './repository.tsx'
 import { PanelProvider, usePanel, usePanelData } from './provider.tsx'
-import { HOME, TABS, initialLocation, lastSettingsGroup, remember, routeLabel, settingsRoute, type Location, type Route, type Tab } from './route.ts'
+import { HOME, initialLocation, lastSettingsGroup, remember, routeLabel, settingsRoute, type Location, type Route, type SettingsGroup } from './route.ts'
 import { SettingsPage } from './settings.tsx'
 import { SourceStatus } from './source.tsx'
 import { actorName, errorText, reasonLabel, valueLabel, type T, readableMarkers } from './text.ts'
@@ -98,7 +98,8 @@ function SearchResults({ result, query, onClose }: { result: SearchView; query: 
   </div>
 }
 
-function Header({ masterId }: { masterId: string | undefined }) {
+/** The detail column's title area: the work area's name, global search, the glossary and the main Session shortcut. */
+function Header({ title, masterId }: { title: string | undefined; masterId: string | undefined }) {
   const { t, call, openSession, notify } = usePanel()
   const [glossary, setGlossary] = useState(false)
   const [query, setQuery] = useState('')
@@ -122,7 +123,7 @@ function Header({ masterId }: { masterId: string | undefined }) {
       failure => { if (request === latest.current) notify(errorText(failure)) })
   }
   return <header className="dt-head">
-    <div className="dt-head-title"><h1 className="dt-title">{t('title')}</h1></div>
+    {title && <h1 className="dt-title">{title}</h1>}
     <div className="dt-toolbar">
       <form ref={search} className="dt-search" role="search" onSubmit={submit} onKeyDown={event => { if (event.key === 'Escape') show() }}>
         <Input type="search" icon={<Icon name="search" />} value={query} placeholder={t('searchPlaceholder')} aria-label={t('searchLabel')}
@@ -138,70 +139,100 @@ function Header({ masterId }: { masterId: string | undefined }) {
   </header>
 }
 
-function Pages({ route, openTab, deploymentForm }: { route: Route; openTab: (tab: Tab) => void; deploymentForm: DeploymentForm }) {
-  const { t } = usePanel()
-  const { state, error, reload } = usePanelData()
-  const waiting = error ? <p className="dt-error" role="alert">{error.message}</p> : <p className="dt-hint">{t('loading')}</p>
-  const page = (() => {
-    switch (route.page) {
-      case 'overview': return <OverviewPage />
-      case 'source': return <SourceStatus />
-      case 'trigger': return route.id !== undefined ? <ThreadPage key={route.id} id={route.id} target={route.query?.trigger} />
-        : <TriggerStatus filter={route.query?.filter ?? 'subscribed'} />
-      case 'eval': return <EvalStatus filter={route.query?.filter ?? 'work'} window={route.query?.window}
-        paused={!!state?.paused} />
-      case 'execution': return route.id !== undefined ? <TicketPage key={route.id} id={route.id} />
-        : state ? <ExecutionStatus filter={route.query?.filter ?? 'open'} state={state} reload={reload} /> : waiting
-      case 'settings': return state ? <SettingsPage key={state.masterId} group={route.query.group} query={route.query} state={state}
-        deploymentForm={deploymentForm} /> : waiting
-      case 'repository': return <RepositoryPage />
-    }
-  })()
-  return <div className="dt-page">
-    <div className="dt-column">
-      <Header masterId={state?.masterId} />
-      {error && state && <p className="dt-error" role="status">{error.message}</p>}
-      <details className="dt-all-pages">
-        <summary>{t('allPages')}</summary>
-        <SegmentedTabs className="dt-tabs" label={t('pagesLabel')} value={route.page === 'repository' ? 'overview' : route.page} onChange={openTab}
-          items={TABS.map(value => ({ value, label: t(`tab.${value}`), id: `dt-tab-${value}`, panelId: 'dt-page' }))} />
-      </details>
-      <main id="dt-page" role="tabpanel" aria-labelledby={`dt-tab-${route.page}`} className="dt-main">{page}</main>
-    </div>
-  </div>
+/** The work area a route belongs to, used for the rail's current item and for its title. */
+type Area = 'inbox' | 'tasks' | 'repository' | 'source' | 'trigger' | 'eval' | 'prompts' | 'settings'
+function areaOf(route: Route): Area {
+  switch (route.page) {
+    case 'overview': return 'inbox'
+    case 'execution': return 'tasks'
+    case 'repository': return 'repository'
+    case 'settings': return route.query.group === 'prompts' ? 'prompts' : 'settings'
+    default: return route.page
+  }
+}
+const AREA_LABEL: Record<Area, DshSuperagentKey> = {
+  inbox: 'nav.inbox', tasks: 'nav.tasks', repository: 'nav.repository', source: 'tab.source', trigger: 'tab.trigger',
+  eval: 'tab.eval', prompts: 'nav.prompts', settings: 'tab.settings',
+}
+/**
+ * The detail title names the work area, except while a Thread or Ticket is open: that page carries its own title and a back
+ * button, so the header only keeps the global tools.
+ */
+function titleOf(t: T, route: Route): string | undefined {
+  const detail = (route.page === 'trigger' || route.page === 'execution') && route.id !== undefined
+  return detail ? undefined : t(AREA_LABEL[areaOf(route)])
 }
 
-
-/** Global shell: a compact left navigation and the selected page. */
-function Nav({ route }: { route: Route }) {
+interface RailItem { area: Area; label: string; icon: IconName; route: Route; count?: number }
+function Rail({ route, settingsGroup }: { route: Route; settingsGroup: SettingsGroup }) {
   const { t, call, navigate } = usePanel()
   const { state } = usePanelData()
   const { data: overview } = usePoll(() => call('GET overview'), [])
-  const active = route.page === 'overview' ? 'inbox'
-    : route.page === 'execution' ? 'tasks'
-      : route.page === 'settings' ? (route.query.group === 'prompts' ? 'prompts' : 'health')
-        : 'repository'
-  const items: { id: string; label: string; icon: IconName; route: Route; count?: number }[] = [
-    { id: 'inbox', label: t('nav.inbox'), icon: 'inbox', route: { page: 'overview' }, count: overview?.person.length },
-    { id: 'repository', label: t('nav.repository'), icon: 'hash', route: { page: 'repository' } },
-    { id: 'tasks', label: t('nav.tasks'), icon: 'queue', route: { page: 'execution' }, count: state?.load.running },
-    { id: 'prompts', label: t('nav.prompts'), icon: 'review', route: settingsRoute('prompts') },
-    { id: 'health', label: t('nav.health'), icon: 'settings', route: settingsRoute('deployment') },
+  const active = areaOf(route)
+  const groups: { title: DshSuperagentKey; items: RailItem[] }[] = [
+    { title: 'nav.groupWork', items: [
+      { area: 'inbox', label: t('nav.inbox'), icon: 'inbox', route: { page: 'overview' }, count: overview?.person.length },
+      { area: 'tasks', label: t('nav.tasks'), icon: 'queue', route: { page: 'execution' }, count: state?.load.running },
+      { area: 'repository', label: t('nav.repository'), icon: 'hash', route: { page: 'repository' } },
+    ] },
+    { title: 'nav.groupFlow', items: [
+      { area: 'source', label: t('tab.source'), icon: 'hash', route: { page: 'source' } },
+      { area: 'trigger', label: t('tab.trigger'), icon: 'message', route: { page: 'trigger' } },
+      { area: 'eval', label: t('tab.eval'), icon: 'decision', route: { page: 'eval' } },
+    ] },
+    { title: 'nav.groupConfigure', items: [
+      { area: 'prompts', label: t('nav.prompts'), icon: 'review', route: settingsRoute('prompts') },
+      { area: 'settings', label: t('tab.settings'), icon: 'settings', route: settingsRoute(route.page === 'settings' ? 'source' : settingsGroup) },
+    ] },
   ]
-  return <nav className="dt-shell-nav" aria-label={t('pagesLabel')}>
-    <div className="dt-global-nav-brand"><span className="dt-global-nav-mark">S</span><span>Superagent</span></div>
-    {items.map(item => <button key={item.id} type="button" className="dt-global-nav-item" aria-current={active === item.id ? 'page' : undefined}
-      onClick={() => navigate(item.route)}>
-      <Icon name={item.icon} size={16} /><span>{item.label}</span>
-      {item.count ? <span className="dt-global-nav-count">{item.count}</span> : null}
-    </button>)}
-  </nav>
+  return <aside className="dt-rail">
+    <div className="dt-rail-brand"><span className="dt-rail-mark">S</span><span className="dt-rail-name">{t('panel')}</span></div>
+    <nav className="dt-rail-nav" aria-label={t('pagesLabel')}>
+      {groups.map(group => <div key={group.title} className="dt-rail-group">
+        <p className="dt-rail-group-title">{t(group.title)}</p>
+        {group.items.map(item => <button key={item.area} type="button" className="dt-rail-item"
+          aria-current={active === item.area ? 'page' : undefined} onClick={() => navigate(item.route)}>
+          <span className="dt-rail-icon"><Icon name={item.icon} size={16} /></span>
+          <span className="dt-rail-label">{item.label}</span>
+          {item.count ? <span className="dt-rail-count">{item.count}</span> : null}
+        </button>)}
+      </div>)}
+    </nav>
+  </aside>
 }
 
-function Shell({ route, openTab, deploymentForm }: { route: Route; openTab: (tab: Tab) => void; deploymentForm: DeploymentForm }) {
+function Content({ route, deploymentForm }: { route: Route; deploymentForm: DeploymentForm }) {
+  const { t } = usePanel()
+  const { state, error, reload } = usePanelData()
+  const waiting = error ? <p className="dt-error" role="alert">{error.message}</p> : <p className="dt-hint">{t('loading')}</p>
+  switch (route.page) {
+    case 'overview': return <OverviewPage />
+    case 'source': return <SourceStatus />
+    case 'trigger': return route.id !== undefined ? <ThreadPage key={route.id} id={route.id} target={route.query?.trigger} />
+      : <TriggerStatus filter={route.query?.filter ?? 'subscribed'} />
+    case 'eval': return <EvalStatus filter={route.query?.filter ?? 'work'} window={route.query?.window}
+      paused={!!state?.paused} />
+    case 'execution': return route.id !== undefined ? <TicketPage key={route.id} id={route.id} />
+      : state ? <ExecutionStatus filter={route.query?.filter ?? 'open'} state={state} reload={reload} /> : waiting
+    case 'settings': return state ? <SettingsPage key={state.masterId} group={route.query.group} query={route.query} state={state}
+      deploymentForm={deploymentForm} /> : waiting
+    case 'repository': return <RepositoryPage />
+  }
+}
+
+/** The global shell: a grouped left rail and one scrolling detail column. */
+function Shell({ route, deploymentForm, settingsGroup }: { route: Route; deploymentForm: DeploymentForm; settingsGroup: SettingsGroup }) {
+  const { t } = usePanel()
+  const { state, error } = usePanelData()
   return <div className="dt-shell">
-    <Nav route={route} />
-    <div className="dt-shell-content"><Pages route={route} openTab={openTab} deploymentForm={deploymentForm} /></div>
+    <Rail route={route} settingsGroup={settingsGroup} />
+    <main className="dt-workspace" id="dt-page">
+      <div className="dt-workspace-inner">
+        <Header title={titleOf(t, route)} masterId={state?.masterId} />
+        {error && state && <p className="dt-error" role="status">{error.message}</p>}
+        <Content route={route} deploymentForm={deploymentForm} />
+      </div>
+    </main>
   </div>
 }
 
@@ -209,16 +240,14 @@ function Shell({ route, openTab, deploymentForm }: { route: Route; openTab: (tab
 export function App({ t, openSession, deploymentForm }: AppProps) {
   const [location, setLocation] = useState(initialLocation)
   useEffect(() => { remember(location) }, [location])
-  // Preserve the last opened settings group across navigation so the Settings tab reopens at it.
+  // Preserve the last opened settings group across navigation so the Settings area reopens where it was.
   const move = useCallback((next: (current: Location) => Pick<Location, 'route' | 'stack'>) =>
     setLocation(current => ({ ...next(current), group: lastSettingsGroup(current) })), [])
   /** Navigates to `route`; `replace` swaps the current entry (filters, paging) instead of pushing a back step. */
   const navigate = useCallback((route: Route, replace = false) => move(current => ({ route,
     stack: replace ? current.stack : [...current.stack, current.route].slice(-20) })), [move])
   const back = useCallback(() => move(current => ({ route: current.stack.at(-1) ?? HOME, stack: current.stack.slice(0, -1) })), [move])
-  const openTab = useCallback((tab: Tab) => move(current => ({ stack: [], route: tab === 'settings'
-    ? settingsRoute(lastSettingsGroup(current)) : { page: tab, id: undefined } })), [move])
   return <PanelProvider t={t} openSession={openSession} navigate={navigate} back={back} backLabel={routeLabel(t, location.stack.at(-1) ?? HOME)}>
-    <Shell route={location.route} openTab={openTab} deploymentForm={deploymentForm} />
+    <Shell route={location.route} deploymentForm={deploymentForm} settingsGroup={lastSettingsGroup(location)} />
   </PanelProvider>
 }
