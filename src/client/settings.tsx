@@ -1,5 +1,8 @@
-/** Settings tab shell routing between stage settings (Sources, Eval, Execution), Prompts, and Deployment. */
-import { useState } from 'react'
+/**
+ * Settings area: Source, Eval, Execution, Prompts and Deployment are one column of sections separated by small headings, so
+ * the panel keeps a single left rail and one scrolling detail instead of a second navigation bar.
+ */
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import type { StateView } from './api.ts'
 import { SegmentedControl } from './controls.tsx'
 import { DeploymentPage, type DeploymentForm } from './deployment.tsx'
@@ -7,7 +10,7 @@ import { EvalSettings } from './eval.tsx'
 import { ExecutionSettings } from './execution.tsx'
 import { PromptsPage } from './prompts.tsx'
 import { usePanel } from './provider.tsx'
-import { SETTINGS_GROUPS, settingsRoute, type SettingsGroup } from './route.ts'
+import type { SettingsGroup } from './route.ts'
 import { Field, SettingsProvider, useSettings } from './settings-kit.tsx'
 import { SourceSettings } from './source.tsx'
 import { errorText, localized } from './text.ts'
@@ -47,30 +50,44 @@ function DefaultAgentField() {
   </Field>
 }
 
-const STAGE_GROUPS: readonly SettingsGroup[] = ['source', 'eval', 'execution']
+/** One configuration section: a small heading names it and every option it owns follows in the same column. */
+function SettingsSection({ group, title, children }: { group: SettingsGroup; title: string; children: ReactNode }) {
+  return <section className="dt-group" data-group={group} aria-labelledby={`dt-group-${group}`}>
+    <h2 className="dt-group-title" id={`dt-group-${group}`}>{title}</h2>
+    {children}
+  </section>
+}
+
 export function SettingsPage({ group, query, state, deploymentForm }: {
   group: SettingsGroup; query: { source?: string; version?: string }; state: StateView; deploymentForm: DeploymentForm
 }) {
-  const { t, navigate } = usePanel()
-  const content = (() => {
-    switch (group) {
-      case 'source': return <SettingsProvider><SourceSettings {...query.source ? { focus: query.source } : {}} /></SettingsProvider>
-      case 'eval': return <SettingsProvider><EvalSettings version={query.version} /></SettingsProvider>
-      case 'execution': return <SettingsProvider><DefaultAgentField /><ExecutionSettings /></SettingsProvider>
-      case 'prompts': return <PromptsPage />
-      case 'deployment': return <DeploymentPage setup={state.setup} form={deploymentForm} />
-    }
-  })()
-  return <div className="dt-settings">
-    <nav className="dt-settings-nav" aria-label={t('tab.settings')}>
-      {SETTINGS_GROUPS.map(value => <button key={value} type="button" className="dt-settings-link" data-stage={STAGE_GROUPS.includes(value)
-        || undefined}
-        aria-current={value === group ? 'page' : undefined} onClick={() => navigate(settingsRoute(value),
-          true)}>{t(`settingsGroup.${value}`)}</button>)}
-    </nav>
-    <div className="dt-settings-body">
-      <h2 className="dt-settings-title">{t(`settingsGroup.${group}`)}</h2>
-      {content}
-    </div>
+  const { t } = usePanel()
+  const page = useRef<HTMLDivElement>(null)
+  // A link that names a group (a stage's Settings button, a setup problem) opens the page at that section; the first one
+  // means the top of the page, which is where the rail's Settings entry lands.
+  useEffect(() => {
+    if (group === 'source') { page.current?.closest<HTMLElement>('.dt-workspace')?.scrollTo?.({ top: 0 }); return }
+    const section = page.current?.querySelector<HTMLElement>(`[data-group="${group}"]`)
+    section?.scrollIntoView?.({ block: 'start' })
+  }, [group])
+  return <div className="dt-settings" data-active={group} ref={page}>
+    <SettingsProvider>
+      <SettingsSection group="source" title={t('settingsGroup.source')}>
+        <SourceSettings {...query.source ? { focus: query.source } : {}} />
+      </SettingsSection>
+      <SettingsSection group="eval" title={t('settingsGroup.eval')}>
+        <EvalSettings version={query.version} />
+      </SettingsSection>
+      <SettingsSection group="execution" title={t('settingsGroup.execution')}>
+        <DefaultAgentField />
+        <ExecutionSettings />
+      </SettingsSection>
+    </SettingsProvider>
+    <SettingsSection group="prompts" title={t('settingsGroup.prompts')}>
+      <PromptsPage />
+    </SettingsSection>
+    <SettingsSection group="deployment" title={t('settingsGroup.deployment')}>
+      <DeploymentPage setup={state.setup} form={deploymentForm} />
+    </SettingsSection>
   </div>
 }

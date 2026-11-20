@@ -173,11 +173,12 @@ function PolicyBlock() {
             : <Hint>{t('rulesEmpty')}</Hint>}
       </Section>
       {current && <Section title={t('policyPerSource')} hint={t('policyPerSourceHint')}>
-        {parts.length > 1 && <div className="dt-subtabs" role="tablist" aria-label={t('policyPerSource')}>
-          {parts.map(source => <button key={source.id} type="button" role="tab" aria-selected={source === current} className="dt-subtab"
-            onClick={() => setTab(source.id)}>
-            {localized(t, source.title)}
-          </button>)}
+        {parts.length > 1 && <div className="dt-subhead">
+          <label className="dt-field-head" htmlFor="dt-policy-source">{t('policySource')}</label>
+          <select id="dt-policy-source" className="dt-select dt-inline-select" aria-label={t('policyPerSource')} value={current.id}
+            onChange={event => setTab(event.target.value)}>
+            {parts.map(source => <option key={source.id} value={source.id}>{localized(t, source.title)}</option>)}
+          </select>
         </div>}
         <SourcePart key={current.id} source={current} part={part(current.id)}
           saved={(blocks.policy.value.sources[current.id] ?? {}) as Part} dirty={draft.dirty}

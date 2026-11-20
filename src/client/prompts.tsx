@@ -55,8 +55,14 @@ function PromptsEditor({ view, reload }: { view: PromptsView; reload: () => Prom
     { value: 'history' as const, label: t('promptViewHistory') }]
   const removed = view.defaultChanged.filter(item => item.removed).map(item => item.part)
   return <div className="dt-form">
-    <div className="dt-subtabs" role="tablist" aria-label={t('promptViews')}>{tabs.map(item => <button key={item.value} type="button"
-      role="tab" className="dt-subtab" aria-selected={tab === item.value} onClick={() => setTab(item.value)}>{item.label}</button>)}</div>
+    {/* Editing, the full composed prompt and the history are views of one module, chosen by a labelled select, not tabs. */}
+    <div className="dt-subhead">
+      <label className="dt-field-head" htmlFor="dt-prompt-view">{t('promptViews')}</label>
+      <select id="dt-prompt-view" className="dt-select dt-inline-select" value={tab}
+        onChange={event => setTab(event.target.value as Tab)}>
+        {tabs.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}
+      </select>
+    </div>
     {removed.length > 0 && <Hint>{t('promptRemovedParts', { parts: removed.join(t('listSeparator')) })}</Hint>}
     {tab === 'edit' && <PromptSections config={config} view={view} changed={changed} selected={selected} onSelect={select} onEdit={edit} />}
     {tab === 'full' && <FullPrompt config={config} view={view} dirty={draft.dirty} revision={draft.revision} onEdit={open} />}

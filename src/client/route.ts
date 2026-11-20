@@ -4,8 +4,6 @@ import type { SetupPlace } from '../setup.ts'
 import { DECISION_FILTERS, type DecisionFilter } from './api.ts'
 import type { T } from './text.ts'
 
-export const TABS = ['overview', 'source', 'trigger', 'eval', 'execution', 'settings'] as const
-export type Tab = typeof TABS[number]
 export const SETTINGS_GROUPS = ['source', 'eval', 'execution', 'prompts', 'deployment'] as const
 export type SettingsGroup = typeof SETTINGS_GROUPS[number]
 export type Route = { page: 'overview' | 'source' | 'repository'; id?: undefined; query?: undefined }
