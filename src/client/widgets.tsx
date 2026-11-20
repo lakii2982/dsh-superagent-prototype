@@ -90,9 +90,10 @@ export function ConfirmButton({ label, title, message, onConfirm, variant = 'gho
 }
 export function SessionButton({ sessionId, label,
   variant = 'ghost' }: { sessionId: string; label?: string; variant?: 'ghost' | 'outline' }) {
-  const { t, openSession, notify } = usePanel()
+  const { t, openSession, notify, remote } = usePanel()
   return <Button variant={variant} size="sm" icon={<Icon name="session" size={14} />}
-    onClick={() => { openSession(sessionId).catch(error => notify(errorText(error))) }}>{label ?? t('openSession')}</Button>
+    onClick={() => { openSession(sessionId).catch(error => notify(errorText(error))) }}>{label ?? t(remote ? 'manager.openWorkspace'
+      : 'openSession')}</Button>
 }
 export function ExternalLink({ href, children, icon = 'external' }: { href: string; children: ReactNode; icon?: IconName }) {
   return <a className="dt-inline-link dt-icon-link" href={href} {...external}><Icon name={icon} size={13} />{children}</a>
