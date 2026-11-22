@@ -18,6 +18,8 @@ export interface SourceScope {
 export interface Policy {
   version: string
   paused: boolean
+  /** When present, the policy can reject a trigger before it reaches any session, including through a subscription. */
+  intakeRejection?(trigger: Trigger): string | undefined
   gate(trigger: Trigger, thread: Thread, tickets: Ticket[]): GateResult
   /** Re-check a mandate's gate-layer basis under this policy, such as before an ended ticket resumes. */
   revalidate(mandate: Mandate): boolean

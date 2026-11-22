@@ -1,0 +1,487 @@
+#!/usr/bin/env node
+import fs from 'node:fs';
+import path from 'node:path';
+import { createHash, randomBytes } from 'node:crypto';
+import { createConnection } from 'node:net';
+import { tmpdir } from 'node:os';
+import { DatabaseSync } from 'node:sqlite';
+import { createRequire } from 'node:module';
+import { spawn, spawnSync } from 'node:child_process';
+import { setTimeout as wait } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
+
+const home = fs.realpathSync(path.dirname(fileURLToPath(import.meta.url)));
+const configFile = path.join(home, 'service.json');
+const pidFile = path.join(home, 'manager.pid');
+const logFile = path.join(home, 'manager.log');
+const actions = ['start', 'foreground', 'stop', 'status', 'url', 'logs', 'backup', 'verify-backup', 'restore', 'rotate-logs'];
+const BACKUP_FORMAT = 1;
+const LOG_GENERATIONS = 5;
+const LOG_LIMIT = 20 * 1024 * 1024;
+const START_TIMEOUT = 60_000;
+const STOP_TIMEOUT = 300_000;
+
+function loadConfig() {
+  const fileStat = fs.lstatSync(configFile);
+  if (!fileStat.isFile() || fileStat.uid !== process.getuid() || (fileStat.mode & 0o077)) throw new Error('service.json must be a private regular file owned by the service account');
+  const config = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+  const { profile, port, capacity, dsh, bundle, sha256, operatorTokenFile } = config;
+  if (config.schema !== 1 || !/^dsh-enterprise-[a-f0-9]{16}$/.test(profile) ||
+      !Number.isInteger(port) || port < 1024 || port > 65535 ||
+      !Number.isInteger(capacity) || capacity < 1 || capacity > 12 ||
+      typeof dsh !== 'string' || !path.isAbsolute(dsh) ||
+      typeof config.path !== 'string' || !config.path ||
+      !/^[0-9a-f]{64}$/.test(sha256) || bundle !== path.join(home, 'releases', sha256, 'package') ||
+      operatorTokenFile !== path.join(home, 'operator.token')) {
+    throw new Error('Invalid service.json. Reinstall into a new directory or restore this instance configuration.');
+  }
+  const tokenStat = fs.lstatSync(operatorTokenFile);
+  if (!tokenStat.isFile() || tokenStat.uid !== process.getuid() || (tokenStat.mode & 0o077)) {
+    throw new Error('operator.token must be a private regular file owned by the service account');
+  }
+  const token = fs.readFileSync(operatorTokenFile, 'utf8').trim();
+  if (!/^[0-9a-f]{64}$/.test(token)) throw new Error('Invalid authentication file');
+  return { ...config, token, url: `http://127.0.0.1:${port}` };
+}
+
+function isAlive(pid) {
+  try { process.kill(pid, 0); return true; }
+  catch (error) { if (error.code === 'ESRCH') return false; throw error; }
+}
+
+function servicePid() {
+  let value;
+  try { value = fs.readFileSync(pidFile, 'utf8').trim(); }
+  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  const pid = Number(value);
+  if (!/^[1-9][0-9]*$/.test(value) || !Number.isSafeInteger(pid) || pid < 2) throw new Error('Invalid manager.pid');
+  return isAlive(pid) ? pid : null;
+}
+
+function savePid(pid) {
+  const temporary = `${pidFile}.${randomBytes(8).toString('hex')}`;
+  try {
+    fs.writeFileSync(temporary, String(pid) + '\n', { mode: 0o600, flag: 'wx' });
+    fs.renameSync(temporary, pidFile);
+  } finally { fs.rmSync(temporary, { force: true }); }
+}
+
+async function request(config, route, data, timeout = 2_000) {
+  return fetch(`${config.url}/orchestrator/manager/${route}`, {
+    method: data === undefined ? 'GET' : 'POST',
+    headers: { authorization: `Bearer ${config.token}`, 'x-orchestrator-request': '1', 'content-type': 'application/json' },
+    body: data === undefined ? undefined : JSON.stringify(data),
+    redirect: 'error',
+    signal: AbortSignal.timeout(timeout),
+  });
+}
+
+async function managerState(config, pid) {
+  const response = await request(config, 'state');
+  if (!response.ok) throw new Error(`Management API returned HTTP ${response.status}`);
+  const state = await response.json();
+  const occupied = state.capacity?.runningRepositories;
+  if (state.pid !== pid || state.stateDir !== path.join(home, 'manager') || state.enterprisePilot !== true ||
+      state.requireProtectedBranches !== true || state.capacity?.maxRunningRepositories !== config.capacity ||
+      !Number.isInteger(occupied) || occupied < 0 || !Array.isArray(state.repositories)) {
+    throw new Error('Manager does not match this enterprise installation');
+  }
+  return state;
+}
+
+function summary(config, pid, state) {
+  const { capacity, repositories, queues, health } = state;
+  console.log(JSON.stringify({ pid, url: config.url, capacity, repositories: repositories.length, queued: queues?.total ?? 0,
+    health: Object.fromEntries(Object.entries(health ?? {}).map(([component, information]) => [component, information.state])) }, null, 2));
+}
+
+async function requireVacant(config) {
+  const response = await fetch(`${config.url}/orchestrator/mode`, {
+    redirect: 'manual', signal: AbortSignal.timeout(1_500),
+  }).catch(() => null);
+  if (response) {
+    await response.body?.cancel();
+    throw new Error(`Another process already responds at ${config.url}`);
+  }
+}
+
+function launchEnvironment(config) {
+  return { ...process.env, PATH: config.path, DSH_HOME: path.join(home, 'dsh') };
+}
+
+async function start(config, foreground) {
+  const pid = servicePid();
+  if (pid) {
+    if (foreground) throw new Error('The manager is already running');
+    summary(config, pid, await managerState(config, pid));
+    return;
+  }
+  await requireVacant(config);
+  const args = ['--profile', config.profile, '--no-open'];
+  const fd = fs.openSync(logFile, 'a', 0o600);
+  let child;
+  try {
+    child = spawn(config.dsh, args, { detached: !foreground, env: launchEnvironment(config),
+      stdio: ['ignore', fd, fd] });
+    await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
+    try { savePid(child.pid); }
+    catch (error) { child.kill('SIGTERM'); throw error; }
+  } finally { fs.closeSync(fd); }
+  if (foreground) return child;
+  child.unref();
+  const deadline = Date.now() + START_TIMEOUT;
+  while (Date.now() < deadline) {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      fs.rmSync(pidFile, { force: true });
+      throw new Error(`DSH quit during startup. Read ${logFile}`);
+    }
+    const state = await managerState(config, child.pid).catch(() => null);
+    if (state) { summary(config, child.pid, state); return; }
+    await wait(500);
+  }
+  throw new Error(`DSH has not passed the authenticated health check. Read ${logFile}`);
+}
+
+async function drainRepositories(config, pid, deadline) {
+  const stopping = new Set();
+  for (;;) {
+    const state = await managerState(config, pid);
+    if (state.capacity.runningRepositories === 0 && !state.repositories.some(repo => repo.starting || repo.status?.online)) return;
+    if (Date.now() > deadline) throw new Error('Repository shutdown did not finish. Manager remains running.');
+    for (const repo of state.repositories) {
+      if (repo.starting || !repo.status?.online || stopping.has(repo.id)) continue;
+      const endpoint = `repositories/${encodeURIComponent(repo.id)}`;
+      if (Date.now() > deadline) throw new Error('Repository shutdown did not finish. Manager remains running.');
+      const stop = await request(config, `${endpoint}/stop`, {}, 30_000);
+      await stop.body?.cancel();
+      if (!stop.ok) throw new Error(`Repository stop returned HTTP ${stop.status}; manager remains running`);
+      stopping.add(repo.id);
+    }
+    await wait(1_000);
+  }
+}
+
+async function stop(config) {
+  const pid = servicePid();
+  if (!pid) {
+    await requireVacant(config);
+    fs.rmSync(pidFile, { force: true });
+    console.log('Manager is stopped.');
+    return;
+  }
+  const deadline = Date.now() + STOP_TIMEOUT;
+  await drainRepositories(config, pid, deadline);
+  if (servicePid() !== pid) throw new Error('Manager process changed during shutdown');
+  process.kill(pid, 'SIGTERM');
+  while (isAlive(pid)) {
+    if (Date.now() > deadline) throw new Error('Manager graceful shutdown timed out');
+    await wait(500);
+  }
+  fs.rmSync(pidFile, { force: true });
+  console.log('Managed repositories and manager stopped.');
+}
+
+async function ownLifecycle(config, action) {
+  const properLockfile = createRequire(path.join(config.bundle, 'package.json'))('proper-lockfile');
+  const unlock = properLockfile.lockSync(home, { lockfilePath: `${home}.lifecycle.lock`, stale: 30_000 });
+  let child;
+  try {
+    if (action === 'stop') await stop(config);
+    else child = await start(config, action === 'foreground');
+  } finally { unlock(); }
+  if (!child) return;
+
+  // Supervisors should invoke this CLI's authenticated `stop` as ExecStop before signaling the process group.
+  const terminate = () => child.kill('SIGTERM');
+  const interrupt = () => child.kill('SIGINT');
+  process.once('SIGTERM', terminate);
+  process.once('SIGINT', interrupt);
+  await new Promise(resolve => {
+    if (child.exitCode !== null || child.signalCode !== null) { resolve(); return; }
+    child.once('exit', resolve);
+  });
+  process.removeListener('SIGTERM', terminate);
+  process.removeListener('SIGINT', interrupt);
+  process.exitCode = child.exitCode ?? (child.signalCode === 'SIGTERM' ? 0 : 1);
+}
+
+function privateDirectory(directory) {
+  const stat = fs.lstatSync(directory);
+  if (!stat.isDirectory() || stat.uid !== process.getuid() || (stat.mode & 0o077)) {
+    throw new Error(`Expected a private directory owned by the service account: ${directory}`);
+  }
+}
+function inside(parent, child) { return child === parent || child.startsWith(parent + path.sep); }
+function newSiblingPath(value) {
+  if (!value) throw new Error('A destination directory is required');
+  const requested = path.resolve(value);
+  const target = path.join(fs.realpathSync(path.dirname(requested)), path.basename(requested));
+  if (inside(home, target) || inside(target, home)) throw new Error('Backup must be outside the installation directory');
+  if (fs.existsSync(target)) throw new Error('Destination already exists; choose a new directory');
+  return target;
+}
+async function registeredRepositories(root = home) {
+  const source = path.join(root, 'manager', 'manager.sqlite');
+  if (!fs.existsSync(source)) return [];
+  // SQLite may create or update SHM even in read-only mode. Inspect a temporary copy so immutable backups stay byte-identical.
+  const temporary = await fs.promises.mkdtemp(path.join(tmpdir(), 'dsh-registry-check-'));
+  const file = path.join(temporary, 'manager.sqlite');
+  try {
+    for (const suffix of ['', '-wal', '-shm']) {
+      const from = source + suffix;
+      if (!fs.existsSync(from)) continue;
+      if (!fs.lstatSync(from).isFile()) throw new Error('Manager database and sidecars must be regular files');
+      await fs.promises.copyFile(from, file + suffix);
+      await fs.promises.chmod(file + suffix, 0o600);
+    }
+    const db = new DatabaseSync(file, { readOnly: true });
+    try {
+      const row = db.prepare("SELECT value FROM kv WHERE key='repositories'").get();
+      const repositories = row ? JSON.parse(row.value) : [];
+      if (!Array.isArray(repositories) || repositories.some(repo => typeof repo.id !== 'string' ||
+        !/^[a-f0-9-]{36}$/.test(repo.id) || !Number.isInteger(repo.port) || repo.port < 1024 || repo.port > 65535)) {
+        throw new Error('Cannot establish registered repository ports from the current database');
+      }
+      return repositories;
+    } finally { db.close(); }
+  } finally { await fs.promises.rm(temporary, { recursive: true, force: true }); }
+}
+async function portIsOccupied(port) {
+  return new Promise((resolve, reject) => {
+    const socket = createConnection({ host: '127.0.0.1', port });
+    const finish = value => { socket.destroy(); resolve(value); };
+    socket.setTimeout(1500, () => { socket.destroy(); reject(new Error(`Cannot verify that port ${port} is stopped`)); });
+    socket.once('connect', () => finish(true));
+    socket.once('error', error => { if (error.code === 'ECONNREFUSED') finish(false); else { socket.destroy(); reject(error); } });
+  });
+}
+async function requireStopped(config, repositories) {
+  if (servicePid()) throw new Error('Stop the manager and all repository instances before maintenance');
+  for (const port of new Set([config.port, ...repositories.map(repo => repo.port)])) {
+    if (await portIsOccupied(port)) throw new Error(`Port ${port} is active; stop all manager and repository instances before maintenance`);
+  }
+}
+async function withStoppedInstallation(config, work) {
+  privateDirectory(home);
+  const properLockfile = createRequire(path.join(config.bundle, 'package.json'))('proper-lockfile');
+  const unlockLifecycle = properLockfile.lockSync(home, { lockfilePath: `${home}.lifecycle.lock`, stale: 30_000 });
+  const locks = [];
+  try {
+    // Runtime state locks also reject detached instances whose HTTP service is unhealthy.
+    await requireStopped(config, []);
+    const managerDirectory = path.join(home, 'manager');
+    const lock = directory => {
+      if (!fs.existsSync(directory)) return;
+      privateDirectory(directory);
+      locks.push({ path: `${directory}.lock`, unlock: properLockfile.lockSync(directory, { stale: 30_000 }) });
+    };
+    lock(managerDirectory);
+    const repositories = await registeredRepositories();
+    await requireStopped(config, repositories);
+    const repositoryRoot = path.join(managerDirectory, 'repositories');
+    const repositoryIds = new Set(repositories.map(repo => repo.id));
+    if (fs.existsSync(repositoryRoot)) {
+      privateDirectory(repositoryRoot);
+      for (const name of fs.readdirSync(repositoryRoot)) if (/^[a-f0-9-]{36}$/.test(name)) repositoryIds.add(name);
+    }
+    for (const id of repositoryIds) lock(path.join(repositoryRoot, id));
+    await requireStopped(config, repositories);
+    return await work({ repositories, lockPaths: locks.map(lock => lock.path) });
+  } finally {
+    for (const lock of locks.reverse()) lock.unlock();
+    unlockLifecycle();
+  }
+}
+async function hashFile(file) {
+  const hash = createHash('sha256');
+  for await (const chunk of fs.createReadStream(file)) hash.update(chunk);
+  return hash.digest('hex');
+}
+async function inventory(root, { harden = false } = {}) {
+  const entries = [];
+  async function visit(relative) {
+    const absolute = path.join(root, relative);
+    const stat = await fs.promises.lstat(absolute);
+    if (stat.isSymbolicLink()) {
+      entries.push({ path: relative, type: 'symlink', target: await fs.promises.readlink(absolute) });
+      return;
+    }
+    if (!stat.isDirectory() && !stat.isFile()) throw new Error(`Unsupported snapshot file type: ${relative}`);
+    const mode = stat.isDirectory() ? 0o700 : 0o600 | (stat.mode & 0o100);
+    if (harden) await fs.promises.chmod(absolute, mode);
+    else if (stat.uid !== process.getuid() || (stat.mode & 0o777) !== mode) {
+      throw new Error(`Snapshot is not private or its owner permissions changed: ${relative}`);
+    }
+    if (stat.isDirectory()) {
+      entries.push({ path: relative, type: 'directory', mode });
+      for (const child of (await fs.promises.readdir(absolute)).sort()) await visit(relative ? path.join(relative, child) : child);
+    } else entries.push({ path: relative, type: 'file', mode, size: stat.size, sha256: await hashFile(absolute) });
+  }
+  await visit('');
+  return entries;
+}
+async function createBackup(config, target, lockPaths) {
+  fs.mkdirSync(target, { mode: 0o700 });
+  const snapshot = path.join(target, 'snapshot');
+  const excluded = new Set([pidFile, ...lockPaths]);
+  try {
+    await fs.promises.cp(home, snapshot, { recursive: true, dereference: false, verbatimSymlinks: true,
+      filter: source => !excluded.has(source) });
+    const entries = await inventory(snapshot, { harden: true });
+    const manifest = { format: BACKUP_FORMAT, installation: home, releaseSha256: config.sha256,
+      profile: config.profile, createdAt: new Date().toISOString(), entries };
+    fs.writeFileSync(path.join(target, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
+    return manifest;
+  } catch (error) {
+    // An incomplete copy is never exposed as a valid snapshot, and contains no data absent from the source.
+    await fs.promises.rm(target, { recursive: true, force: true });
+    throw error;
+  }
+}
+async function verifyBackup(config, value) {
+  const backup = fs.realpathSync(path.resolve(value));
+  if (inside(home, backup) || inside(backup, home)) throw new Error('Backup must be outside the installation directory');
+  privateDirectory(backup);
+  const manifestFile = path.join(backup, 'manifest.json');
+  const stat = fs.lstatSync(manifestFile);
+  if (!stat.isFile() || stat.uid !== process.getuid() || (stat.mode & 0o077)) throw new Error('Backup manifest must be a private regular file');
+  const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
+  if (manifest.format !== BACKUP_FORMAT || manifest.installation !== home || manifest.releaseSha256 !== config.sha256 ||
+    manifest.profile !== config.profile || !Array.isArray(manifest.entries)) {
+    throw new Error('Backup must match this installation path, profile and exact release; cross-version restore is not supported');
+  }
+  const snapshot = path.join(backup, 'snapshot');
+  privateDirectory(snapshot);
+  const entries = await inventory(snapshot);
+  if (JSON.stringify(entries) !== JSON.stringify(manifest.entries)) throw new Error('Backup integrity verification failed');
+  const savedConfig = JSON.parse(fs.readFileSync(path.join(snapshot, 'service.json'), 'utf8'));
+  if (savedConfig.schema !== config.schema || savedConfig.sha256 !== config.sha256 || savedConfig.bundle !== config.bundle ||
+    savedConfig.profile !== config.profile || savedConfig.operatorTokenFile !== config.operatorTokenFile || savedConfig.port !== config.port) {
+    throw new Error('Snapshot service configuration does not match this installation');
+  }
+  return { backup, snapshot, manifest };
+}
+async function backup(config, value) {
+  const target = newSiblingPath(value);
+  await withStoppedInstallation(config, async ({ lockPaths }) => {
+    const manifest = await createBackup(config, target, lockPaths);
+    await verifyBackup(config, target);
+    console.log(JSON.stringify({ backup: target, createdAt: manifest.createdAt, entries: manifest.entries.length, verified: true }));
+  });
+}
+async function restore(config, value) {
+  const verified = await verifyBackup(config, value);
+  await withStoppedInstallation(config, async ({ repositories, lockPaths }) => {
+    const restoredRepositories = await registeredRepositories(verified.snapshot);
+    await requireStopped(config, [...repositories, ...restoredRepositories]);
+    // Preserve all work accepted since the selected snapshot; never silently discard the current state.
+    const stamp = `${Date.now()}-${randomBytes(4).toString('hex')}`;
+    const safety = `${home}.before-restore-${stamp}`;
+    await createBackup(config, safety, lockPaths);
+    await verifyBackup(config, safety);
+    const stage = `${home}.restore-stage-${stamp}`;
+    const previous = `${home}.restore-previous-${stamp}`;
+    try {
+      await fs.promises.cp(verified.snapshot, stage, { recursive: true, dereference: false, verbatimSymlinks: true });
+      if (JSON.stringify(await inventory(stage)) !== JSON.stringify(verified.manifest.entries)) throw new Error('Staged restore verification failed');
+      await requireStopped(config, [...repositories, ...restoredRepositories]);
+      // Keep state locks at their original paths across the synchronous directory swap. The external lifecycle lock stays held.
+      try {
+        for (const lockPath of lockPaths) {
+          const moved = path.join(stage, path.relative(home, lockPath));
+          fs.mkdirSync(path.dirname(moved), { recursive: true, mode: 0o700 });
+          fs.renameSync(lockPath, moved);
+        }
+        fs.renameSync(home, previous);
+        try { fs.renameSync(stage, home); }
+        catch (error) { fs.renameSync(previous, home); throw error; }
+      } catch (error) {
+        for (const lockPath of lockPaths) {
+          const moved = path.join(stage, path.relative(home, lockPath));
+          if (fs.existsSync(moved)) fs.renameSync(moved, lockPath);
+        }
+        throw error;
+      }
+      await fs.promises.rm(previous, { recursive: true, force: true });
+      console.log(JSON.stringify({ restoredFrom: verified.backup, preservedCurrentState: safety, running: false,
+        next: 'Review credentials and accepted events before explicitly starting the manager.' }));
+    } finally { await fs.promises.rm(stage, { recursive: true, force: true }); }
+  });
+}
+async function rotateLogs(config) {
+  await withStoppedInstallation(config, async () => {
+    const logs = [logFile];
+    const directory = path.join(home, 'manager', 'logs');
+    if (fs.existsSync(directory)) {
+      privateDirectory(directory);
+      for (const name of fs.readdirSync(directory)) if (/^[a-f0-9-]{36}\.log$/.test(name)) logs.push(path.join(directory, name));
+    }
+    const rotated = [];
+    for (const file of logs) {
+      if (!fs.existsSync(file)) continue;
+      const stat = fs.lstatSync(file);
+      if (!stat.isFile() || stat.uid !== process.getuid()) throw new Error('Log must be a regular file owned by the service account');
+      if (stat.size < LOG_LIMIT) continue;
+      for (let i = 1; i <= LOG_GENERATIONS; i++) {
+        const candidate = `${file}.${i}`;
+        if (fs.existsSync(candidate)) {
+          const archived = fs.lstatSync(candidate);
+          if (!archived.isFile() || archived.uid !== process.getuid()) throw new Error('Rotated log must be a regular file owned by the service account');
+          fs.chmodSync(candidate, 0o600);
+        }
+      }
+      fs.rmSync(`${file}.${LOG_GENERATIONS}`, { force: true });
+      for (let i = LOG_GENERATIONS - 1; i >= 1; i--) if (fs.existsSync(`${file}.${i}`)) fs.renameSync(`${file}.${i}`, `${file}.${i + 1}`);
+      fs.renameSync(file, `${file}.1`);
+      fs.chmodSync(`${file}.1`, 0o600);
+      fs.writeFileSync(file, '', { mode: 0o600, flag: 'wx' });
+      rotated.push(path.relative(home, file));
+    }
+    console.log(JSON.stringify({ rotated, thresholdBytes: LOG_LIMIT, retainedGenerations: LOG_GENERATIONS, running: false }));
+  });
+}
+
+async function main() {
+  process.umask(0o077);
+  const [action, option, ...rest] = process.argv.slice(2);
+  if (action === '--help' || action === '-h') {
+    console.log(`Usage: dsh-enterprise ${actions.join('|')}\nlogs [--follow] [repository-id]\nbackup <new-directory> | verify-backup <directory> | restore <directory>\nbackup, restore and rotate-logs require all instances stopped. Restore never starts services.`);
+    return;
+  }
+  if (action === 'logs') {
+    const args = [option, ...rest].filter(Boolean);
+    const follow = args.includes('--follow');
+    const ids = args.filter(value => value !== '--follow');
+    if (args.length > 2 || ids.length > 1 || (ids.length && !/^[a-f0-9-]{36}$/.test(ids[0])) || args.filter(value => value === '--follow').length > 1) {
+      throw new Error('Usage: dsh-enterprise logs [--follow] [repository-id]');
+    }
+    loadConfig();
+    if (ids.length && !fs.existsSync(path.join(home, 'manager', 'repositories', ids[0]))) throw new Error('Unknown repository ID');
+    const file = ids.length ? path.join(home, 'manager', 'logs', `${ids[0]}.log`) : logFile;
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.uid !== process.getuid()) throw new Error('Log must be a regular file owned by the service account');
+    const result = spawnSync('tail', [follow ? '-f' : '-100', '--', file], { stdio: 'inherit' });
+    if (result.error) throw result.error;
+    process.exitCode = result.status ?? 1;
+    return;
+  }
+  const needsDirectory = ['backup', 'verify-backup', 'restore'].includes(action);
+  if (!actions.includes(action) || rest.length || (needsDirectory ? !option : option && !(action === 'logs' && option === '--follow'))) {
+    throw new Error(`Usage: dsh-enterprise ${actions.join('|')}`);
+  }
+  const config = loadConfig();
+  if (action === 'backup') { await backup(config, option); return; }
+  if (action === 'restore') { await restore(config, option); return; }
+  if (action === 'verify-backup') { const result = await verifyBackup(config, option); console.log(JSON.stringify({ backup: result.backup, verified: true, entries: result.manifest.entries.length })); return; }
+  if (action === 'rotate-logs') { await rotateLogs(config); return; }
+  if (action === 'url') { console.log(config.url); return; }
+  if (action === 'status') {
+    const pid = servicePid();
+    if (!pid) throw new Error('Manager is stopped');
+    summary(config, pid, await managerState(config, pid));
+    return;
+  }
+  await ownLifecycle(config, action);
+}
+
+main().catch(error => { console.error(`dsh-enterprise: ${error.message}`); process.exitCode = 1; });

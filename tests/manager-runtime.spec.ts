@@ -25,7 +25,14 @@ type State = {
 }
 let directory: string, manager: Manager, server: Server, origin: string, repository: Repository, ctx: Context, botCli: string
 const fakes: Fake[] = []
-const listen = (server: Server, port = 0) => new Promise<number>(resolve => { server.listen(port, '127.0.0.1', () => { resolve((server.address() as { port: number }).port) }) })
+const listen = (server: Server, port = 0) => new Promise<number>((resolve, reject) => {
+  const failed = (error: Error) => reject(error)
+  server.once('error', failed)
+  server.listen(port, '127.0.0.1', () => {
+    server.removeListener('error', failed)
+    resolve((server.address() as { port: number }).port)
+  })
+})
 const close = (server: Server) => new Promise<void>(resolve => { server.closeAllConnections(); server.close(() => resolve()) })
 const response = (res: ServerResponse, value: unknown, status = 200) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(value)) }
 const request = (path: string, value?: unknown, method = value === undefined ? 'GET' : 'POST', headers: Record<string, string> = { 'x-orchestrator-request': '1' }) =>
@@ -98,9 +105,13 @@ console.log(JSON.stringify({ok:true,data}));
   await manager.start()
 })
 afterEach(async () => {
-  await manager.stop(); await close(server)
-  for (const fake of fakes) if (fake.server.listening) await close(fake.server)
-  fakes.length = 0; rmSync(directory, { recursive: true, force: true })
+  try { await manager?.stop() }
+  finally {
+    try {
+      if (server?.listening) await close(server)
+      for (const fake of fakes) if (fake.server.listening) await close(fake.server)
+    } finally { fakes.length = 0; if (directory) rmSync(directory, { recursive: true, force: true }) }
+  }
 })
 it('hides instance credentials and rejects cross-origin browser and unauthenticated internal calls', async () => {
   const state = await (await request('manager/state')).text()
@@ -109,6 +120,24 @@ it('hides instance credentials and rejects cross-origin browser and unauthentica
   expect((await request(`internal/${repository.id}/receive`, feishu('1', 'request'))).status).toBe(403)
   const wrong = feishu('1', 'wrong group', { chat_id: 'oc_second' })
   expect((await request(`internal/${repository.id}/receive`, wrong, 'POST', { authorization: `Bearer ${repository.token}` })).status).toBe(400)
+})
+it('atomically binds a group and grants access to its selected verified members', async () => {
+  expect((await request('manager/chats/refresh', {})).status).toBe(200)
+  const revision = manager.store.revision()
+  manager.store.save([{ ...repository, allowedFeishu: ['ou_other'] }], manager.store.bindings(), revision)
+  const before = manager.store.revision()
+  const bindings = [...manager.store.bindings().map(({ effectiveAt, ...binding }) => binding),
+    { chatId: 'oc_second', repositoryId: repository.id, enabled: true }]
+  const grant = { chatId: 'oc_second', repositoryId: repository.id, memberIds: ['ou_missing'] }
+  expect((await request('manager/bindings', { revision: before, bindings, grant }, 'PUT')).status).toBe(400)
+  expect(manager.store.revision()).toBe(before)
+  expect(manager.store.bindings()).toHaveLength(1)
+  expect(manager.store.repositories()[0]?.allowedFeishu).toEqual(['ou_other'])
+  grant.memberIds = ['ou_alice']
+  expect((await request('manager/bindings', { revision: before, bindings, grant }, 'PUT')).status).toBe(200)
+  expect(manager.store.revision()).toBe(before + 1)
+  expect(manager.store.bindings()).toHaveLength(2)
+  expect(manager.store.repositories()[0]?.allowedFeishu).toEqual(['ou_other', 'ou_alice'])
 })
 it('forwards a managed repository panel request with its own credential and keeps that credential in the manager', async () => {
   const seen: { method: string; url: string; auth: string; body: string }[] = []

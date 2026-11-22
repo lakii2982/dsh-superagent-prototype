@@ -91,6 +91,7 @@ export function ConfirmButton({ label, title, message, onConfirm, variant = 'gho
 export function SessionButton({ sessionId, label,
   variant = 'ghost' }: { sessionId: string; label?: string; variant?: 'ghost' | 'outline' }) {
   const { t, openSession, notify, remote } = usePanel()
+  if (!openSession) return null
   return <Button variant={variant} size="sm" icon={<Icon name="session" size={14} />}
     onClick={() => { openSession(sessionId).catch(error => notify(errorText(error))) }}>{label ?? t(remote ? 'manager.openWorkspace'
       : 'openSession')}</Button>

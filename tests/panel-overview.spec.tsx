@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 // The overview.
-import { expect, it } from 'vitest'
+import { expect, it, vi } from 'vitest'
 import { en, zh } from '../src/client/locales.ts'
 import { usePanel, mount, remount, all, find, rail, activeRail, click, text } from './fixtures/panel.tsx'
 import { server, droppedReply, threadSummary } from './fixtures/panel-server.ts'
@@ -156,4 +156,67 @@ it('says when no Source is on, an Eval is past its deadline or a message keeps f
   await click(rail(zh['nav.inbox']))
   await click('评估超时未决定：#9 迟迟未决')
   expect(server.requests.some(request => request.path.startsWith('threads/github:9'))).toBe(true)
+})
+
+
+it('summarizes real work and exposes the two daily destinations before the detailed lists', async () => {
+  await mount()
+  const hero = document.querySelector('.dt-overview-hero')!
+  expect(hero.textContent).toContain('2 项任务需要你处理')
+  expect(hero.textContent).toContain('有 2 项运行问题')
+  expect(hero.querySelector('.dt-tag')?.getAttribute('data-tone')).toBe('warning')
+  await click('查看全部任务')
+  expect(activeRail()).toBe(zh['nav.tasks'])
+  await click(rail(zh['nav.inbox']))
+  await click('查看接单入口')
+  expect(activeRail()).toBe(zh['tab.source'])
+})
+
+it('does not claim everything is clear when the inbox is empty but a service needs attention', async () => {
+  server.person = []
+  await mount()
+  expect(document.querySelector('.dt-inbox-empty')?.textContent).toContain('当前没有需要你处理的工单')
+  expect(document.querySelector('.dt-inbox-empty')?.textContent).toContain('运行问题仍需关注')
+  expect(document.querySelector('.dt-overview-hero .dt-tag')?.textContent).toBe('需要关注')
+})
+
+it('keeps diagnostic paths and logs collapsed and labels each repository health state accurately', async () => {
+  const original = globalThis.fetch
+  vi.stubGlobal('fetch', async (url: string, options?: RequestInit) => {
+    const response = await original(url, options)
+    if (url !== '/orchestrator/api/state') return response
+    const state = JSON.parse(await response.text())
+    return Response.json({ ...state, health: {
+      github: { state: 'starting', detail: 'starting a command' },
+      feishu: { state: 'paused', detail: 'Waiting for a binding' },
+      worker: { state: 'ready', detail: 'Worker events are handled' },
+      launch: { state: 'error', detail: 'spawn failed' },
+    } })
+  })
+  await mount()
+  await click(rail(zh['nav.repository']))
+  const hero = document.querySelector('.dt-repo-hero')!
+  expect(hero.textContent).not.toContain('/srv/dsh-superagent')
+  expect(hero.textContent).not.toContain('当前部署只有一个仓库')
+  expect(hero.querySelector('.dt-tag')?.textContent).toBe('有服务异常')
+  const health = all('.dt-health-item')
+  expect(health.map(item => item.querySelector('summary .dt-tag')?.textContent)).toEqual(['启动中', '已暂停', '正常', '异常'])
+  expect(health.map(item => item.querySelector('summary .dt-tag')?.getAttribute('data-tone'))).toEqual(['info', 'warning', 'success', 'danger'])
+  expect(health.every(item => !(item as HTMLDetailsElement).open)).toBe(true)
+  const advanced = document.querySelector<HTMLDetailsElement>('.dt-advanced')!
+  expect(advanced.open).toBe(false)
+  expect(advanced.textContent).toContain('/srv/dsh-superagent')
+})
+
+it('offers retry instead of an endless repository loading label when state cannot be read', async () => {
+  const original = globalThis.fetch
+  let unavailable = true
+  vi.stubGlobal('fetch', (url: string, options?: RequestInit) => url === '/orchestrator/api/state' && unavailable
+    ? Promise.resolve(Response.json({ error: 'Temporarily unavailable' }, { status: 503 })) : original(url, options))
+  await mount()
+  await click(rail(zh['nav.repository']))
+  expect(document.querySelector('[role="alert"]')?.textContent).toContain('暂时无法读取仓库状态')
+  unavailable = false
+  await click('重新读取')
+  expect(document.querySelector('.dt-repo-hero')).not.toBeNull()
 })

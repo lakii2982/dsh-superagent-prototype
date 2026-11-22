@@ -1,6 +1,6 @@
 /** Formats background notices and steering relays delivered to the main Session via the effect queue. */
 import { randomUUID } from 'node:crypto'
-import { followupOwners, key, liveTicket, type DomainEvent, type Ticket, type WorkerReport } from '../core/index.ts'
+import { followupOwners, key, liveTicket, type DomainEvent, type Ticket, type Trigger, type WorkerReport } from '../core/index.ts'
 import { triggerMessage } from '../executor/dsh.ts'
 import type { SourceRegistry } from '../sources/registry.ts'
 import { repliedTo } from './links.ts'
@@ -83,7 +83,7 @@ const FOLLOWUP_NOTE = 'Its ticket\'s worker has it and decides; act only if the 
  * that resumed on the follow-up), with the trigger rendered as workers read it, the replied-to message, and the open
  * tickets it reached; returns `undefined` while no ticket's worker decides it (see `followupOwners`) or it reached no live ticket.
  */
-export function followupNotice(store: Store, sources: SourceRegistry, triggerId: string): Relay | undefined {
+export function followupNotice(store: Store, sources: SourceRegistry, triggerId: string, mayQuoteTrigger?: (trigger: Trigger) => boolean): Relay | undefined {
   const trigger = store.triggers.get(triggerId)
   const disposition = store.triggers.disposition(triggerId)
   if (!trigger || !followupOwners(trigger, store).length) return undefined
@@ -93,7 +93,7 @@ export function followupNotice(store: Store, sources: SourceRegistry, triggerId:
     return ticket && liveTicket(ticket) ? [{ ticket_id: id, title: ticket.title, state: ticketCard(ticket).state, ...context }] : []
   })
   if (!tickets.length) return undefined
-  return followupRelay(triggerMessage(trigger, {}, undefined, repliedTo({ store, sources }, trigger)), tickets)
+  return followupRelay(triggerMessage(trigger, {}, undefined, repliedTo({ store, sources, mayQuoteTrigger }, trigger)), tickets)
 }
 /**
  * A person's message that reached tickets, as the main Session hears of it: the message as their workers read it, and the

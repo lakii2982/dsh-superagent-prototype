@@ -11,11 +11,22 @@ import { runAsWorker, sameDirectory, withoutDirectory, workerBin } from './infra
 import { SetupError } from './setup.ts'
 
 const reason = (error: unknown): string => error instanceof Error ? error.message : String(error)
-const ManagedConfig: s<{ repositoryId: string; url: string; token: string } | null> = s.union([s.object({ repositoryId: s.string().required(), url: s.string().required(), token: s.string().required() }), s.const(null)]).default(null)
+interface ManagedRepositoryConfig { repositoryId: string; url: string; token: string; enterprisePilot?: boolean }
+const ManagedConfig: s<ManagedRepositoryConfig | null> = s.union([s.object({
+  repositoryId: s.string().required(), url: s.string().required(), token: s.string().required(),
+  enterprisePilot: s.boolean(),
+}), s.const(null)]).default(null)
 const absolute = (description: string) => s.string().pattern(/^\//).description(`${description} Absolute path.`)
 /** Plugin configuration of the dsh-superagent entry. Volatile fields apply without a restart because dsh-superagent reads them on each use; changing `stateDir` remounts the plugin. */
 export const Config = s.object({
   mode: s.union(['standalone', 'manager']).default('standalone'),
+  desktopMultiRepository: s.boolean().default(false)
+    .description('Switch this local standalone installation to the shared enterprise workspace. Its existing data is kept.').volatile(),
+  maxRunningRepositories: s.number().min(LIMITS.maxRunningRepositories.min).max(LIMITS.maxRunningRepositories.max).step(1)
+    .default(LIMITS.maxRunningRepositories.default).description('Maximum running or starting repository instances in manager mode.'),
+  enterprisePilot: s.boolean().default(false).description('Apply enterprise pilot delivery controls to managed repositories.'),
+  requireProtectedBranches: s.boolean().default(false).description('Require enforced GitHub rules on the default branch before a managed repository starts.'),
+  operatorTokenFile: absolute('Optional owner-only credential file for manager API access.'),
   managed: ManagedConfig.description('Internal repository bridge; configured by the manager.'),
   stateDir: absolute('Directory for the database, locks, worker shims, the agent\'s git configuration and, by default, the ticket directories.').required(),
   promptMaxChars: s.number().min(LIMITS.promptMaxChars.min).max(LIMITS.promptMaxChars.max).step(1).default(100000)
@@ -26,8 +37,14 @@ export const Config = s.object({
     .default(15000).description('Time limit of one context read during an assessment, in milliseconds.').volatile(),
 })
 export type DeploymentConfig = ReturnType<typeof Config>
+/** Non-sensitive mode-switch status for locally managed DSH installations. */
+export interface DesktopModeView {
+  desktopMultiRepository: boolean
+  modeSwitchBlocked?: 'standalone_busy' | 'manager_busy'
+  modeSwitchError?: string
+}
 export interface Machine {
-  managed?: { repositoryId: string; url: string; token: string }
+  managed?: ManagedRepositoryConfig
   stateDir: string
   promptMaxChars: Volatile<number>
   admissionContextMaxPages: Volatile<number>

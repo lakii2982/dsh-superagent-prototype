@@ -1,0 +1,132 @@
+name: Release validation
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-validation-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CI: 'true'
+
+jobs:
+  validate:
+    name: Validate (${{ matrix.os }}, Node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            node: '22.19.0'
+          - os: ubuntu-24.04
+            node: '24.18.1'
+          - os: macos-15
+            node: '24.18.1'
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: ${{ matrix.node }}
+          package-manager-cache: false
+      - name: Install pinned package manager
+        run: npm install --global pnpm@11.7.0
+      - name: Install locked dependencies
+        id: install
+        run: pnpm install --frozen-lockfile
+      - name: Record source and tools
+        run: |
+          mkdir -p ci-results
+          {
+            git rev-parse HEAD
+            node --version
+            pnpm --version
+            python3 --version
+            git --version
+          } | tee ci-results/environment.log
+      - name: Type check, all tests, and build
+        run: pnpm check 2>&1 | tee ci-results/check.log
+      - name: Enterprise operations tests
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: |
+          mkdir -p ci-results
+          node --test ops/enterprise/*.test.mjs 2>&1 | tee ci-results/operations.log
+      - name: Retain validation evidence
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: validation-${{ matrix.os }}-node-${{ matrix.node }}-${{ github.run_attempt }}
+          path: ci-results/*.log
+          if-no-files-found: error
+          retention-days: 14
+
+  package:
+    name: Build verified release candidate
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '24.18.1'
+          package-manager-cache: false
+      - name: Install pinned package manager and locked dependencies
+        run: |
+          npm install --global pnpm@11.7.0
+          pnpm install --frozen-lockfile
+      - name: Build with mandatory release gates
+        run: |
+          mkdir -p ci-results release-candidate
+          node ops/enterprise/package.mjs release-candidate/dsh-enterprise-release.zip 2>&1 | tee ci-results/package.log
+      - name: Record release checksum and source
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          sha256sum release-candidate/dsh-enterprise-release.zip > release-candidate/SHA256SUMS
+          node --input-type=module <<'NODE'
+          import { execFileSync } from 'node:child_process';
+          import { writeFileSync } from 'node:fs';
+          writeFileSync('release-candidate/SOURCE.json', JSON.stringify({
+            sourceCommit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
+            workflowRun: process.env.RUN_URL,
+            nodeVersion: process.version,
+            packageManager: 'pnpm@11.7.0',
+            status: 'Automated validation passed; customer acceptance is still required.',
+          }, null, 2) + '\n');
+          NODE
+      - name: Retain release candidate
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: dsh-enterprise-release-${{ github.sha }}-${{ github.run_attempt }}
+          path: release-candidate/*
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+      - name: Retain packaging evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: packaging-evidence-${{ github.run_attempt }}
+          path: ci-results/package.log
+          if-no-files-found: warn
+          retention-days: 14

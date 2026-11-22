@@ -43,6 +43,7 @@ function ticketOf(extra: Partial<Ticket> = {}): Ticket {
 /** A Pull as GitHub's `pulls/<n>` and `gh pr list` answer it, filed by the agent from the ticket's branch. */
 const pullBody = (number: number, state = 'open') => ({ number, state, html_url: `https://github.com/acme/widgets/pull/${number}`,
   user: { login: 'agent', id: 1 }, head: { sha: local, ref: 'agent/t1', repo: { full_name: 'acme/widgets' } },
+  base: { ref: 'main' },
   merged: state === 'closed' ? false : undefined })
 const listed = (number: number, state = 'open') => ({ number, state, url: `https://github.com/acme/widgets/pull/${number}`,
   headRefOid: local, baseRefName: 'main' })
@@ -164,6 +165,74 @@ it('creates the pull request only when none exists for the branch, then records 
   expect(result).toMatchObject({ ok: true, action: 'open', created: true, pr: { number: 9 } })
   expect(calls.run[0]!.slice(0, 3)).toEqual(['pr', 'create', '--head'])
   expect(savedPlan()!.result).toMatchObject({ outcome: 'applied', pr: 9, state: 'open' })
+})
+
+it('only publishes the exact reviewed pilot commit and creates a draft PR for human review', async () => {
+  store.tickets.save(ticketOf())
+  let published = false, opened = false
+  const { host, calls } = fake({
+    git: args => {
+      if (args[0] === 'ls-remote') return published ? `${local}\trefs/heads/agent/t1\n` : ''
+      if (args[0] === 'rev-parse') return local
+      if (args[0] === 'diff') return 'src/regression.ts\0'
+      if (args[0] === 'push') published = true
+      return ''
+    },
+    gh: () => opened ? [listed(9)] : [],
+    run: () => { opened = true; return 'https://github.com/acme/widgets/pull/9' },
+  })
+  const pilot = { ...host, enterprisePilot: true, pilotMandateAllowed: () => true }
+  await expect(call(pilot, { action: 'open' })).resolves.toMatchObject({ reason: 'pilot_branch_unpublished' })
+  await expect(call(pilot, { action: 'push', branch: 'other/t1', expected: base })).resolves.toMatchObject({ reason: 'pilot_worktree_required' })
+  await expect(call(pilot, { action: 'push', expected: remote })).resolves.toMatchObject({ reason: 'pilot_base_mismatch' })
+  await expect(call(pilot, { action: 'push', expected: base })).resolves.toMatchObject({ ok: true, branch_sha: local })
+  expect(calls.git).toContainEqual(['merge-base', '--is-ancestor', base, local])
+  expect(calls.git).toContainEqual(['push', 'https://github.com/acme/widgets.git', `${local}:refs/heads/agent/t1`])
+  await expect(call(pilot, { action: 'open', base: 'release' })).resolves.toMatchObject({ reason: 'pilot_worktree_required' })
+  await expect(call(pilot, { action: 'open' })).resolves.toMatchObject({ ok: true, pr: { number: 9 } })
+  expect(calls.run[0]!.slice(0, 3)).toEqual(['pr', 'create', '--draft'])
+})
+
+it('stops pilot delivery on a protected path or a non-fast-forward update', async () => {
+  store.tickets.save(ticketOf())
+  let paths = 'src/safe.ts\0.github/workflows/check.yml\0server/schema/migrations/new.sql\0'
+  const { host, calls } = fake({ git: args => {
+    if (args[0] === 'ls-remote') return `${remote}\trefs/heads/agent/t1\n`
+    if (args[0] === 'rev-parse') return local
+    if (args[0] === 'diff') return paths
+    if (args[0] === 'merge-base') throw new Error('not an ancestor')
+    return ''
+  } })
+  const pilot = { ...host, enterprisePilot: true, pilotMandateAllowed: () => true }
+  await expect(call(pilot, { action: 'push', expected: remote })).resolves.toMatchObject({ reason: 'pilot_protected_paths',
+    paths: ['.github/workflows/check.yml', 'server/schema/migrations/new.sql'] })
+  paths = 'src/safe.ts\0'
+  await expect(call(pilot, { action: 'push', expected: remote })).resolves.toMatchObject({ reason: 'pilot_history_rewrite' })
+  expect(calls.git.some(args => args[0] === 'push')).toBe(false)
+})
+
+it('holds pilot publication when requester approval changes during its preflight checks', async () => {
+  store.tickets.save(ticketOf())
+  let authorized = true
+  const { host, calls } = fake({ git: args => {
+    if (args[0] === 'ls-remote') return ''
+    if (args[0] === 'rev-parse') return local
+    if (args[0] === 'diff') authorized = false
+    return ''
+  } })
+  const pilot = { ...host, enterprisePilot: true, pilotMandateAllowed: () => authorized }
+  await expect(call(pilot, { action: 'push', expected: base })).resolves.toMatchObject({ reason: 'pilot_authorization_required' })
+  expect(calls.git.some(args => args[0] === 'push')).toBe(false)
+})
+
+it('refuses to claim or recover a pilot branch PR targeting another base', async () => {
+  store.tickets.save(ticketOf())
+  const { host, calls } = fake({ git: args => args[0] === 'ls-remote' ? `${local}\trefs/heads/agent/t1\n` : args[0] === 'rev-parse' ? local : '',
+    gh: () => [{ ...listed(9), baseRefName: 'release' }], pull: number => ({ ...pullBody(number), base: { ref: 'release' } }) })
+  const pilot = { ...host, enterprisePilot: true, pilotMandateAllowed: () => true }
+  await expect(call(pilot, { action: 'open' })).resolves.toMatchObject({ reason: 'pilot_pr_mismatch', expected_base: 'main', pr: { base: 'release' } })
+  await expect(call(pilot, { action: 'recover' })).resolves.toMatchObject({ reason: 'pilot_pr_mismatch', expected_base: 'main' })
+  expect(calls.run).toEqual([])
 })
 
 it('refuses push and open while a scope overrun waits for approval, and allows them once approved', async () => {

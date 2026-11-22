@@ -1,8 +1,8 @@
 /** Root panel shell: one left rail of work areas and a single scrolling detail column, without page tabs. */
-import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { useCallback, useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { usePoll, type SearchView } from './api.ts'
 import { Button, Dot, Icon, Input, Modal, StateDot, type DotState, type IconName } from './controls.tsx'
-import type { DeploymentForm } from './deployment.tsx'
+import { DesktopModeSwitch, type DeploymentForm } from './deployment.tsx'
 import { EvalStatus } from './eval.tsx'
 import { ExecutionStatus } from './execution.tsx'
 import { ticketMark } from './marks.ts'
@@ -100,7 +100,7 @@ function SearchResults({ result, query, onClose }: { result: SearchView; query: 
 }
 
 /** The detail column's title area: the work area's name, global search, the glossary and the main Session shortcut. */
-export function Header({ title, masterId }: { title: string | undefined; masterId: string | undefined }) {
+export function Header({ title, masterId, actions }: { title: string | undefined; masterId: string | undefined; actions?: ReactNode }) {
   const { t, call, openSession, notify, remote } = usePanel()
   const [glossary, setGlossary] = useState(false)
   const [query, setQuery] = useState('')
@@ -133,9 +133,10 @@ export function Header({ title, masterId }: { title: string | undefined; masterI
       </form>
       <Button variant="ghost" size="sm" icon={<Icon name="question" />} aria-label={t('glossary')} title={t('glossary')} aria-haspopup="dialog"
         onClick={() => setGlossary(true)} />
-      <Button variant="outline" size="sm" icon={<Icon name="session" size={14} />} disabled={!masterId}
+      {openSession && <Button variant="outline" size="sm" icon={<Icon name="session" size={14} />} disabled={!masterId}
         onClick={() => { if (masterId) openSession(masterId).catch(failure => notify(errorText(failure))) }}>{t(remote
-          ? 'manager.openWorkspace' : 'openMaster')}</Button>
+          ? 'manager.openWorkspace' : 'openMaster')}</Button>}
+      {actions}
     </div>
     <Glossary open={glossary} onClose={() => setGlossary(false)} />
   </header>
@@ -175,15 +176,20 @@ export interface NavItem {
 export interface NavGroup { title: string; items: NavItem[] }
 /** The one left rail used by every panel context; the detail column decides the page, the rail only navigates. */
 export function NavRail({ brand, groups, label }: { brand: { name: string; subtitle?: string }; groups: NavGroup[]; label: string }) {
-  return <aside className="dt-rail">
-    <div className="dt-rail-brand"><span className="dt-rail-mark">S</span><span className="dt-rail-ident">
+  const [expanded, setExpanded] = useState(false)
+  const navId = useId()
+  const active = groups.flatMap(group => group.items).find(item => item.active)?.label
+  return <aside className="dt-rail" data-expanded={expanded || undefined}>
+    <div className="dt-rail-brand"><span className="dt-rail-mark" aria-hidden="true"><Icon name="layers" size={20} /></span><span className="dt-rail-ident">
       <span className="dt-rail-name">{brand.name}</span>{brand.subtitle && <span className="dt-rail-sub">{brand.subtitle}</span>}
-    </span></div>
-    <nav className="dt-rail-nav" aria-label={label}>
+    </span><button type="button" className="dt-rail-toggle" aria-label={label} aria-expanded={expanded} aria-controls={navId}
+      onClick={() => setExpanded(!expanded)}><span>{active}</span><Icon name={expanded ? 'close' : 'menu'} /></button></div>
+    <nav className="dt-rail-nav" id={navId} aria-label={label}>
       {groups.filter(group => group.items.length).map(group => <div key={group.title} className="dt-rail-group">
         <p className="dt-rail-group-title">{group.title}</p>
         {group.items.map(item => <button key={item.key} type="button" className="dt-rail-item"
-          aria-current={item.active ? 'page' : undefined} data-selected={item.selected || undefined} onClick={item.onSelect}>
+          aria-current={item.active ? 'page' : item.selected ? 'location' : undefined} data-selected={item.selected || undefined} title={item.label}
+          onClick={() => { item.onSelect(); setExpanded(false) }}>
           <span className="dt-rail-icon"><Icon name={item.icon} size={16} /></span>
           <span className="dt-rail-label">{item.label}</span>
           {item.count ? <span className="dt-rail-count">{item.count}</span> : null}
@@ -231,12 +237,12 @@ export function Rail({ route, settingsGroup, extraGroups = [], subtitle }: {
 
 /** The shared shell frame: one left rail and one scrolling detail column. */
 export function ShellFrame({ rail, children }: { rail: ReactNode; children: ReactNode }) {
-  return <div className="dt-shell">
+  return <div className="dt-shell-container"><div className="dt-shell">
     {rail}
     <main className="dt-workspace" id="dt-page">
       <div className="dt-workspace-inner">{children}</div>
     </main>
-  </div>
+  </div></div>
 }
 
 export function Content({ route, deploymentForm }: { route: RepoRoute; deploymentForm: DeploymentForm }) {
@@ -263,7 +269,8 @@ function Shell({ route, deploymentForm, settingsGroup }: { route: RepoRoute; dep
   const { t } = usePanel()
   const { state, error } = usePanelData()
   return <ShellFrame rail={<Rail route={route} settingsGroup={settingsGroup} />}>
-    <Header title={titleOf(t, route)} masterId={state?.masterId} />
+    <Header title={titleOf(t, route)} masterId={state?.masterId} actions={<DesktopModeSwitch t={t} form={deploymentForm}
+      mode="standalone" running={state?.load.running} />} />
     {error && state && <p className="dt-error" role="status">{error.message}</p>}
     <Content route={route} deploymentForm={deploymentForm} />
   </ShellFrame>

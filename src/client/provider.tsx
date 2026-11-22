@@ -12,7 +12,7 @@ export interface PanelContext {
   navigate: (route: Route, replace?: boolean) => void
   back: () => void
   backLabel: string
-  openSession: (sessionId: string) => Promise<void>
+  openSession: ((sessionId: string) => Promise<void>) | null
   /** The Session lives in a managed repository's own DSH instance, so an open action opens that workspace instead. */
   remote: boolean
   notify: (text: string) => void
@@ -73,9 +73,10 @@ function Toast({ text, onDone, holdMs = 3000 }: { text: string; onDone: () => vo
 }
 const stay = () => {}
 const noSession = async () => {}
-export function PanelProvider({ t, interval = 5000, apiBase, remote = false, openSession = noSession, navigate = stay, back = stay,
+export function PanelProvider({ t, interval = 5000, apiBase, apiAuthorization, onApiUnauthorized, remote = false, openSession = noSession, navigate = stay, back = stay,
   backLabel = '', children }: {
-  t: T; interval?: number; apiBase?: string; remote?: boolean; openSession?: (sessionId: string) => Promise<void>
+  t: T; interval?: number; apiBase?: string; apiAuthorization?: string; onApiUnauthorized?: () => void
+  remote?: boolean; openSession?: PanelContext['openSession']
   navigate?: PanelContext['navigate']; back?: () => void
   backLabel?: string
   children: ReactNode
@@ -83,7 +84,8 @@ export function PanelProvider({ t, interval = 5000, apiBase, remote = false, ope
   // Read the current translator via ref so locale changes do not recreate `call` and restart polling.
   const copy = useRef(t)
   copy.current = t
-  const call = useMemo(() => caller(() => messages(copy.current), apiBase), [apiBase])
+  const call = useMemo(() => caller(() => messages(copy.current), apiBase, { authorization: apiAuthorization, onUnauthorized: onApiUnauthorized }),
+    [apiBase, apiAuthorization, onApiUnauthorized])
   const [toast, setToast] = useState<{ text: string; id: number }>()
   const notify = useCallback((text: string) => setToast({ text, id: Date.now() }), [])
   // Poll at 1s during a restart until the server goes down and answers again, or time out after 30s if the restart completed between polls.

@@ -56,6 +56,7 @@ const BLOCKS: Record<'policy' | 'eval' | 'executor' | 'source', Block> = {
 
 /** Host dependencies used by `Settings`. */
 export interface SettingsHost {
+  readonly enterprisePilot?: boolean
   readonly store: Pick<Store, 'settings' | 'saveSettings' | 'blockRevision' | 'atomic' | 'tickets' | 'get'>
   readonly sources: SourceRegistry
   /** Notified when a settings save changes the policy version. */
@@ -149,6 +150,9 @@ export class Settings {
    */
   async save(block: SettingsBlock, value: unknown, revision: number, origin: SettingsOrigin) {
     const { store, sources, engine, sessions } = this.host
+    if (this.host.enterprisePilot && block === 'policy' && origin !== 'panel') {
+      throw new SettingsConflict('Enterprise pilot authorization policy must be managed by an operator.')
+    }
     const stale = () => revision !== store.blockRevision(block)
     if (stale()) throw new SettingsConflict('Settings changed. Reload before saving.')
     const id = block.startsWith('source:') ? block.slice(7) : block
@@ -166,6 +170,14 @@ export class Settings {
       catch (error) { throw new UserError('modelUnavailable', { block, error: error instanceof Error ? error.message : String(error) }) }
     }
     rules.guard?.(current, candidate, origin)
+    if (this.host.enterprisePilot) {
+      if (workspaceMode(candidate) !== 'worktree') throw new SettingsConflict('Enterprise pilot repositories require managed Git worktrees.')
+      const github = current.sources.github?.config, nextGithub = candidate.sources.github?.config
+      if (github?.repository !== nextGithub?.repository || github?.cli !== nextGithub?.cli) {
+        throw new SettingsConflict('Register a separate enterprise pilot repository to change its GitHub repository or execution account.')
+      }
+      if (candidate.eval.mode !== 'off') throw new SettingsConflict('Enterprise pilot repositories require explicit requests with proactive evaluation off.')
+    }
     const changing = current.executor.repositoryPath !== candidate.executor.repositoryPath
       || workspaceMode(current) !== workspaceMode(candidate)
     if (changing && store.tickets.open().some(ticket => ticket.execution?.workspaceMode === 'current')) {
@@ -195,7 +207,7 @@ export class Settings {
     const before = policyVersion(old), after = policyVersion(settings)
     const scope = (version: SettingsValue) => ({
       scope: (input: { source: string; meta: Record<string, unknown> }) => this.host.sources.scope(input, version) })
-    const effects = before === after ? new Map() : policyEffects(store.tickets.open(), old, SettingsSchema.parse(settings), scope)
+    const effects = before === after ? new Map() : policyEffects(store.tickets.open(), old, SettingsSchema.parse(settings), scope, this.host.enterprisePilot)
     const notified = [...effects.keys()]
     store.atomic(() => {
       store.saveSettings(SettingsSchema.parse(settings), { source: origin, block, policyVersion: after, policyChanged: before !== after, notified })
@@ -233,7 +245,7 @@ export class Settings {
   /** Returns the IDs of installed, enabled Sources whose policy section can synchronize now (empty while setup is not configured). */
   syncable(): string[] {
     const { sources } = this.host
-    if (!this.host.setup.configured()) return []
+    if (this.host.enterprisePilot || !this.host.setup.configured()) return []
     return sources.instances().filter(instance => instance.installed && instance.enabled).flatMap(instance => {
       const sync = sources.kind(instance.id)?.policy?.sync
       const part = sources.policyPart(instance.id)

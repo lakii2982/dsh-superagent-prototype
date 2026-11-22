@@ -1,0 +1,22 @@
+{
+  "asOf": "2026-04-26T00:00:00Z",
+  "followUpDays": 28,
+  "eligibleClass": "standard-iteration",
+  "baseline": { "start": "2026-01-01T00:00:00Z", "end": "2026-01-29T00:00:00Z" },
+  "current": { "start": "2026-03-01T00:00:00Z", "end": "2026-03-29T00:00:00Z" },
+  "products": [
+    { "id": "product-01", "teamId": "team-01" },
+    { "id": "product-02", "teamId": "team-01" },
+    { "id": "product-03", "teamId": "team-01" },
+    { "id": "product-04", "teamId": "team-02" },
+    { "id": "product-05", "teamId": "team-02" },
+    { "id": "product-06", "teamId": "team-02" },
+    { "id": "product-07", "teamId": "team-03" },
+    { "id": "product-08", "teamId": "team-03" },
+    { "id": "product-09", "teamId": "team-04" },
+    { "id": "product-10", "teamId": "team-04" },
+    { "id": "product-11", "teamId": "team-05" },
+    { "id": "product-12", "teamId": "team-05" }
+  ],
+  "workItems": []
+}

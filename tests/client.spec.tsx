@@ -3,7 +3,8 @@ import { act, useState, type ComponentType } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, expect, it, vi } from 'vitest'
 import { ApiError, caller, usePoll } from '../src/client/api.ts'
-import { apply } from '../src/client/index.tsx'
+import { apply, inject } from '../src/client/index.tsx'
+import { MANAGER_NAV_EVENT, MANAGER_ROUTE_KEY } from '../src/client/route.ts'
 import { zh } from '../src/client/locales.ts'
 import { SettingsSchema } from '../src/policy.ts'
 
@@ -21,6 +22,7 @@ function fixture(listed: string[]) {
     effect: (effect: () => unknown) => { effect() },
     sessions: { list: { getSnapshot: () => ({ phase: 'ready', byId: Object.fromEntries(listed.map(id => [id, {}])) }) }, refresh: vi.fn(async () => {}) },
     uiWorkspace: { openSession: vi.fn() },
+    layout: { selectPanel: vi.fn() },
     // Omit config form service so Deployment renders read-only.
     get: () => undefined,
   }
@@ -58,6 +60,25 @@ it('registers a localized main panel, sidebar entry and Plugin Manager row page,
   expect(main.options).toMatchObject({ key: 'dsh-superagent', locale: 'dshSuperagent' })
   expect(nav.options).toMatchObject({ id: 'dsh-superagent', order: 10, locale: 'dshSuperagent' })
   expect(nav.options.label?.()).toBe('Superagent')
+  expect(inject).toContain('layout')
+})
+
+it('opens the exact manager area from native plugin settings and preserves it for the mounted panel', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (url: string) => url === '/orchestrator/mode'
+    ? Response.json({ mode: 'manager' }) : Response.json({ revision: 1, repositories: [], bindings: [], chats: {},
+      bot: null, botCli: '', workspaces: [], health: {}, pending: [] })))
+  const { ctx, entries } = fixture([])
+  const routed = vi.fn()
+  window.addEventListener(MANAGER_NAV_EVENT, routed)
+  const view = await render(entries.find(entry => entry.options.name === 'plugins.row.config')!, { t, view: 'page' })
+  try {
+    const shortcut = [...view.container.querySelectorAll<HTMLButtonElement>('.dt-plugin-link')]
+      .find(button => button.textContent?.includes('群聊与工作入口'))!
+    await act(async () => { shortcut.click() })
+    expect(ctx.layout.selectPanel).toHaveBeenCalledExactlyOnceWith('dsh-superagent')
+    expect(routed).toHaveBeenCalledOnce()
+    expect(JSON.parse(sessionStorage.getItem(MANAGER_ROUTE_KEY)!)).toMatchObject({ route: { page: 'manager', query: { area: 'bindings' } } })
+  } finally { view.dispose(); window.removeEventListener(MANAGER_NAV_EVENT, routed); sessionStorage.removeItem(MANAGER_ROUTE_KEY) }
 })
 
 it('opens a listed Session through the workspace from the main panel', async () => {

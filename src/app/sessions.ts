@@ -19,6 +19,7 @@ import { SKILL_PREFIX, type PromptVersion, type Prompts } from './prompts.ts'
 import type { Store } from './store.ts'
 import { KV } from '../kv.ts'
 import type { RegisterTool, Tool } from './tools/tool.ts'
+import { PILOT_SCOPE } from './pilot-scope.ts'
 
 /** Host dependencies used by `Sessions`. */
 export interface SessionsHost {
@@ -31,6 +32,8 @@ export interface SessionsHost {
   readonly health: HealthEntry
   readonly masterId: string
   readonly lifetime: AbortSignal
+  readonly enterprisePilot?: boolean
+  pilotMandateAllowed?(ticket: Ticket): boolean
   workRefusal?(ticketId: string): string | undefined
   closing(): boolean
   /** Execution environment variables for `ticket`, rendered into its worker's system prompt. */
@@ -65,9 +68,18 @@ declare module '@deepseek-ai/cordis' {
  * them, and one that does not registers nothing, which `workOnly`'s availability filter then leaves out. Adding them here
  * gives a worker the same backends as commander mode without making the dsh-superagent bundle depend on those local plugins.
  */
-const WORK_TOOLS = ['read', 'write', 'edit', 'read_image', 'glob', 'grep', 'bash', 'pwsh', 'job_output', 'job_list', 'job_kill', 'web_search',
-  'web_fetch', 'skill', 'todo_write', 'subagent', 'list_subagent_models', 'send_message', 'list_agents', 'interrupt_agent',
+const WEB_TOOLS = ['web_search', 'web_fetch']
+const DELEGATION_TOOLS = ['subagent', 'list_subagent_models', 'send_message', 'list_agents', 'interrupt_agent',
   'subagent_claude_code', 'subagent_codex', 'subagent_kimi', 'subagent_opencode', 'fleet', 'fleet_status']
+const WORK_TOOLS = ['read', 'write', 'edit', 'read_image', 'glob', 'grep', 'bash', 'pwsh', 'job_output', 'job_list', 'job_kill',
+  ...WEB_TOOLS, 'skill', 'todo_write', ...DELEGATION_TOOLS]
+const PILOT_EXCLUDED_TOOLS = new Set([...WEB_TOOLS, ...DELEGATION_TOOLS])
+const REVOKED_TICKET_TOOLS = new Set(['orchestrator_report', 'job_kill', 'job_output', 'job_list'])
+function canReconcileRevokedTicket(name: string, input: unknown): boolean {
+  if (REVOKED_TICKET_TOOLS.has(name)) return true
+  if (name !== 'orchestrator_delivery' || !input || typeof input !== 'object' || !('action' in input)) return false
+  return input.action === 'recover' || input.action === 'status'
+}
 /** What the main Session is told when it would wait: what it waits for comes to it, and a waiting step holds back the next. */
 const NO_WAIT = 'Reports, follow_up notices, new candidates and a background job\'s end with its output arrive by themselves as messages; '
   + 'end the turn instead of waiting for them.'
@@ -253,7 +265,8 @@ export class Sessions {
       const version = this.promptFor(agent, context.signal !== undefined)
       const current = ticket && host.store.tickets.get(ticket.id)
       const composed = host.prompts.compose(version.config, master ? 'orchestrator' : 'worker', current ? host.environment(current) : undefined)
-      return `[dsh-superagent prompt revision ${version.revision}]\n${composed}\n${current ? mandateInstructions(current.mandate) : ''}`
+      const prompt = `[dsh-superagent prompt revision ${version.revision}]\n${composed}\n${current ? mandateInstructions(current.mandate) : ''}`
+      return host.enterprisePilot ? `${prompt}\n\n${PILOT_SCOPE}` : prompt
     }, ...(master ? { complete: true } : {}) }))
     // A recreated skill scope (e.g. after the skills service restarts) starts empty, so reset `binding.skills` before rebinding.
     const skillScope = agent.ctx.inject(['skills'], scope => {
@@ -297,10 +310,15 @@ export class Sessions {
   private workOnly(agent: Agent, ticketId: string): (() => void)[] {
     const store = this.host.store
     const parent = scopeParentOf(agent)
-    const allow = WORK_TOOLS.filter(name => agent.ctx.tools.get(name, parent))
-    return [agent.ctx.tools.restrict({ allow }), agent.ctx.tools.guard(() => {
+    const allow = WORK_TOOLS.filter(name => (!this.host.enterprisePilot || !PILOT_EXCLUDED_TOOLS.has(name)) && agent.ctx.tools.get(name, parent))
+    return [agent.ctx.tools.restrict({ allow }), agent.ctx.tools.guard(execution => {
       const current = store.tickets.get(ticketId)
-      return !current || !liveTicket(current) ? 'Ticket ended; new work needs a new authorized ticket' : this.host.workRefusal?.(ticketId)
+      if (!current || !liveTicket(current)) return 'Ticket ended; new work needs a new authorized ticket'
+      if (this.host.enterprisePilot && this.host.pilotMandateAllowed?.(current) !== true
+        && !canReconcileRevokedTicket(execution.name, execution.arguments)) {
+        return 'The requester no longer has authority for this ticket. Report its status or reconcile delivery with the operator.'
+      }
+      return this.host.workRefusal?.(ticketId)
     })]
   }
   /**

@@ -7,6 +7,7 @@ import { SettingsConflict } from '../src/app/settings.ts'
 import type { HttpHost } from '../src/app/http.ts'
 import { SettingsSchema } from '../src/policy.ts'
 import { SetupError } from '../src/setup.ts'
+import { testMachine } from './fixtures/deployment.ts'
 
 type Handler = (req: unknown, res: unknown) => Promise<void>
 type Headers = Record<string, string | undefined>
@@ -14,7 +15,7 @@ type Headers = Record<string, string | undefined>
 function serve(runtime: Partial<Record<keyof HttpHost, unknown>>, host = '127.0.0.1') {
   let handler: Handler = async () => {}
   const ctx = { webServer: { host, port: 3082, register: (route: { handler: Handler }) => { handler = route.handler; return () => {} } } }
-  registerHttp(ctx as never, { ready: Promise.resolve(), ...runtime } as unknown as HttpHost)
+  registerHttp(ctx as never, { ready: Promise.resolve(), machine: testMachine(), ...runtime } as unknown as HttpHost)
   return async (method: string, path: string, body?: unknown, headers: Headers = {}) => {
     let status = 0, text = ''
     const chunks = body === undefined ? [] : [Buffer.from(typeof body === 'string' ? body : JSON.stringify(body))]
@@ -79,6 +80,12 @@ it('answers only a same-origin request from the panel on the loopback address', 
   expect(await post({ host: 'localhost:3082', origin: 'http://localhost:3082' })).toMatchObject({ status: 200 })
   // Management routes require a loopback Web server.
   expect(() => serve({}, '0.0.0.0')).toThrow('Orchestrator management requires a loopback Web server')
+})
+
+it('requires managed pilot operators to use the manager proxy', async () => {
+  const call = serve({ machine: testMachine({ managed: { repositoryId: 'repo', url: 'http://127.0.0.1:3081', token: 'fixture', enterprisePilot: true } }) })
+  expect(await call('GET', 'settings')).toEqual({ status: 403, body: { error: 'Open this repository through the enterprise manager' } })
+  expect(await call('POST', 'executor/pause', { paused: true })).toMatchObject({ status: 403 })
 })
 
 it('answers a prompt save that lost a race with 409, and a settings body over 128 KiB with 400', async () => {

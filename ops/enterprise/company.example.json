@@ -1,0 +1,332 @@
+{
+  "expectedCounts": {
+    "teams": 5,
+    "productLines": 12,
+    "members": 120
+  },
+  "feishuCli": null,
+  "teams": [
+    {
+      "id": "platform",
+      "name": "平台研发",
+      "members": [
+        {
+          "id": "platform-member-001",
+          "github": "platform-placeholder"
+        }
+      ],
+      "productLines": [
+        {
+          "id": "product-01",
+          "name": "身份服务"
+        },
+        {
+          "id": "product-02",
+          "name": "开发者门户"
+        },
+        {
+          "id": "product-03",
+          "name": "平台 API"
+        }
+      ],
+      "repositories": [
+        {
+          "id": "repo-01",
+          "name": "身份服务",
+          "remote": "your-org/repo-01",
+          "directory": "/srv/worktrees/repo-01",
+          "githubCli": "/srv/dsh-bin/gh-platform",
+          "productLineIds": [
+            "product-01"
+          ],
+          "memberIds": [
+            "platform-member-001"
+          ],
+          "requiredChecks": [
+            "build-and-test"
+          ],
+          "chatIds": []
+        },
+        {
+          "id": "repo-02",
+          "name": "开发者门户",
+          "remote": "your-org/repo-02",
+          "directory": "/srv/worktrees/repo-02",
+          "githubCli": "/srv/dsh-bin/gh-platform",
+          "productLineIds": [
+            "product-02"
+          ],
+          "memberIds": [
+            "platform-member-001"
+          ],
+          "requiredChecks": [
+            "build-and-test"
+          ],
+          "chatIds": []
+        },
+        {
+          "id": "repo-03",
+          "name": "平台 API",
+          "remote": "your-org/repo-03",
+          "directory": "/srv/worktrees/repo-03",
+          "githubCli": "/srv/dsh-bin/gh-platform",
+          "productLineIds": [
+            "product-03"
+          ],
+          "memberIds": [
+            "platform-member-001"
+          ],
+          "requiredChecks": [
+            "build-and-test"
+          ],
+          "chatIds": []
+        }
+      ]
+    },
+    {
+      "id": "commerce",
+      "name": "交易研发",
+      "members": [
+        {
+          "id": "commerce-member-001",
+          "github": "commerce-placeholder"
+        }
+      ],
+      "productLines": [
+        {
+          "id": "product-04",
+          "name": "订单"
+        },
+        {
+          "id": "product-05",
+          "name": "库存"
+        },
+        {
+          "id": "product-06",
+          "name": "商品"
+        }
+      ],
+      "repositories": [
+        {
+          "id": "repo-04",
+          "name": "订单",
+          "remote": "your-org/repo-04",
+          "directory": "/srv/worktrees/repo-04",
+          "githubCli": "/srv/dsh-bin/gh-commerce",
+          "productLineIds": [
+            "product-04"
+          ],
+          "memberIds": [
+            "commerce-member-001"
+          ],
+          "requiredChecks": [
+            "build-and-test"
+          ],
+          "chatIds": []
+        },
+        {
+          "id": "repo-05",
+          "name": "库存",
+          "remote": "your-org/repo-05",
+          "directory": "/srv/worktrees/repo-05",
+          "githubCli": "/srv/dsh-bin/gh-commerce",
+          "productLineIds": [
+            "product-05"
+          ],
+          "memberIds": [
+            "commerce-member-001"
+          ],
+          "requiredChecks": [
+            "build-and-test"
+          ],
+          "chatIds": []
+        },
+        {
+          "id": "repo-06",
+          "name": "商品",
+          "remote": "your-org/repo-06",
+          "directory": "/srv/worktrees/repo-06",
+          "githubCli": "/srv/dsh-bin/gh-commerce",
+          "productLineIds": [
+            "product-06"
+          ],
+          "memberIds": [
+            "commerce-member-001"
+          ],
+          "requiredChecks": [
+            "build-and-test"
+          ],
+          "chatIds": []
+        }
+      ]
+    },
+    {
+      "id": "experience",
+      "name": "体验研发",
+      "members": [
+        {
+          "id": "experience-member-001",
+          "github": "experience-placeholder"
+        }
+      ],
+      "productLines": [
+        {
+          "id": "product-07",
+          "name": "桌面客户端"
+        },
+        {
+          "id": "product-08",
+          "name": "移动客户端"
+        }
+      ],
+      "repositories": [
+        {
+          "id": "repo-07",
+          "name": "桌面客户端",
+          "remote": "your-org/repo-07",
+          "directory": "/srv/worktrees/repo-07",
+          "githubCli": "/srv/dsh-bin/gh-experience",
+          "productLineIds": [
+            "product-07"
+          ],
+          "memberIds": [
+            "experience-member-001"
+          ],
+          "requiredChecks": [
+            "build-and-test"
+          ],
+          "chatIds": []
+        },
+        {
+          "id": "repo-08",
+          "name": "移动客户端",
+          "remote": "your-org/repo-08",
+          "directory": "/srv/worktrees/repo-08",
+          "githubCli": "/srv/dsh-bin/gh-experience",
+          "productLineIds": [
+            "product-08"
+          ],
+          "memberIds": [
+            "experience-member-001"
+          ],
+          "requiredChecks": [
+            "build-and-test"
+          ],
+          "chatIds": []
+        }
+      ]
+    },
+    {
+      "id": "data",
+      "name": "数据研发",
+      "members": [
+        {
+          "id": "data-member-001",
+          "github": "data-placeholder"
+        }
+      ],
+      "productLines": [
+        {
+          "id": "product-09",
+          "name": "数据平台"
+        },
+        {
+          "id": "product-10",
+          "name": "分析看板"
+        }
+      ],
+      "repositories": [
+        {
+          "id": "repo-09",
+          "name": "数据平台",
+          "remote": "your-org/repo-09",
+          "directory": "/srv/worktrees/repo-09",
+          "githubCli": "/srv/dsh-bin/gh-data",
+          "productLineIds": [
+            "product-09"
+          ],
+          "memberIds": [
+            "data-member-001"
+          ],
+          "requiredChecks": [
+            "build-and-test"
+          ],
+          "chatIds": []
+        },
+        {
+          "id": "repo-10",
+          "name": "分析看板",
+          "remote": "your-org/repo-10",
+          "directory": "/srv/worktrees/repo-10",
+          "githubCli": "/srv/dsh-bin/gh-data",
+          "productLineIds": [
+            "product-10"
+          ],
+          "memberIds": [
+            "data-member-001"
+          ],
+          "requiredChecks": [
+            "build-and-test"
+          ],
+          "chatIds": []
+        }
+      ]
+    },
+    {
+      "id": "operations",
+      "name": "交付研发",
+      "members": [
+        {
+          "id": "operations-member-001",
+          "github": "operations-placeholder"
+        }
+      ],
+      "productLines": [
+        {
+          "id": "product-11",
+          "name": "客户工作台"
+        },
+        {
+          "id": "product-12",
+          "name": "服务集成"
+        }
+      ],
+      "repositories": [
+        {
+          "id": "repo-11",
+          "name": "客户工作台",
+          "remote": "your-org/repo-11",
+          "directory": "/srv/worktrees/repo-11",
+          "githubCli": "/srv/dsh-bin/gh-operations",
+          "productLineIds": [
+            "product-11"
+          ],
+          "memberIds": [
+            "operations-member-001"
+          ],
+          "requiredChecks": [
+            "build-and-test"
+          ],
+          "chatIds": []
+        },
+        {
+          "id": "repo-12",
+          "name": "服务集成",
+          "remote": "your-org/repo-12",
+          "directory": "/srv/worktrees/repo-12",
+          "githubCli": "/srv/dsh-bin/gh-operations",
+          "productLineIds": [
+            "product-12"
+          ],
+          "memberIds": [
+            "operations-member-001"
+          ],
+          "requiredChecks": [
+            "build-and-test"
+          ],
+          "chatIds": []
+        }
+      ]
+    }
+  ]
+}

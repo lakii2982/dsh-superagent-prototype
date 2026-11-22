@@ -93,9 +93,14 @@ Copy [examples/profile.cordis.patch.yml](../examples/profile.cordis.patch.yml) t
 | Key | Required | Meaning |
 | --- | --- | --- |
 | `stateDir` | yes | Absolute path: the database, the lock, the command shims in `worker-bin`, the agent's git configuration and, by default, the Ticket directories in `work`. Back it up before upgrades |
+| `desktopMultiRepository` | no | Enables the team repository manager from a local standalone installation. Manager data lives under `stateDir/enterprise-manager`, alongside the original standalone workspace |
 | `promptMaxChars`, `admissionContextMaxPages`, `admissionContextTimeoutMs` | no | The largest saved prompt configuration, and how many Thread pages one assessment reads within what time |
 
 After the first start, edit machine limits in **Settings → Deployment** or the DeepSeek Harness Plugin Manager. Changes apply without restart. `stateDir` cannot be changed there. Invalid values or unknown configuration keys prevent startup; the log identifies the key.
+
+In the desktop Superagent panel, choose **Enable multi-repository management** to open the team workspace. The local supervisor uses enterprise pilot rules and 12 repository slots. Register each repository with its team name and product lines. Under **Group bindings**, connect the Feishu bot, choose a group and its target repository, then select the group members who may submit work. For a dedicated company service with its own operator credential, follow `ops/enterprise/README.md`.
+
+The desktop switch pauses standalone intake while the manager is active. It preserves standalone records and source settings in the original state directory. To return, stop the running repository services and choose **Return to single repository**. The manager registry and group bindings remain available the next time the team workspace is enabled.
 
 ## Start and stop
 

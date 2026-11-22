@@ -15,7 +15,7 @@ export { SOURCE, feishuRef, feishuThreadId, feishuTime, feishuTrigger, feishuTri
   from './feishu-trigger.ts'
 export type { FeishuEvent } from './feishu-trigger.ts'
 export { backfillChat, consumerRetry, pollThreads, refreshChatNames, threadRef } from './feishu-loops.ts'
-const MembersSchema = z.looseObject({
+export const MembersSchema = z.looseObject({
   users: z.array(z.looseObject({ member_id: z.string(), name: z.string() })),
   has_more: z.boolean(), truncations: z.array(z.unknown()).optional(),
 })

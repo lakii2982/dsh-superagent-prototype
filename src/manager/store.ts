@@ -8,7 +8,13 @@ import type { Trigger } from '../core/index.ts'
 
 export const RepositorySchema = z.object({
   id: z.string().uuid(), name: z.string().trim().min(1).max(100),
-  remote: z.string().regex(/^[\w.-]+\/[\w.-]+$/), directory: z.string().startsWith('/'),
+  teamName: z.string().trim().min(1).max(100).optional(),
+  productLines: z.array(z.string().trim().min(1).max(100)).max(100)
+    .refine(lines => new Set(lines).size === lines.length, 'Duplicate product lines').optional(),
+  requiredChecks: z.array(z.string().trim().min(1).max(200)).max(100)
+    .refine(checks => new Set(checks).size === checks.length, 'Duplicate required GitHub checks').optional(),
+  remote: z.string().regex(/^[\w.-]+\/[\w.-]+$/),
+  directory: z.union([z.literal(''), z.string().startsWith('/')]).default(''),
   githubCli: z.string().min(1), allowedGithub: z.array(z.string().min(1)).default([]),
   allowedFeishu: z.array(z.string().min(1)).default([]), enabled: z.boolean().default(true),
   port: z.number().int().min(1024).max(65535), token: z.string().min(32), profile: z.string(),
@@ -71,7 +77,8 @@ export class ManagerStore {
     this.atomic(() => {
       if (revision !== this.revision()) throw new Error('Configuration changed; reload before saving')
       if (new Set(bindings.map(item => item.chatId)).size !== bindings.length) throw new Error('A group can bind to only one repository')
-      if (new Set(repositories.map(item => item.directory)).size !== repositories.length) throw new Error('This local checkout is already registered')
+      const checkouts = repositories.map(item => item.directory).filter(Boolean)
+      if (new Set(checkouts).size !== checkouts.length) throw new Error('This local checkout is already registered')
       if (new Set(repositories.map(item => item.port)).size !== repositories.length) throw new Error('Repository ports must be unique')
       if (bindings.some(item => !repositories.some(repo => repo.id === item.repositoryId))) throw new Error('Unknown repository in group binding')
       this.set('repositories', repositories); this.set('bindings', bindings); this.set('revision', revision + 1)
@@ -97,17 +104,17 @@ export class ManagerStore {
       return 'stored'
     })
   }
-  /** Topic heads only: the oldest due message of each topic, skipping paused groups and disabled repositories. */
-  pending(limit = 100, due = true): JournalItem[] {
-    const routes = this.routes()
-    const chats = [...routes.chats].filter(([, owner]) => owner !== undefined).map(([chat]) => chat)
-    const repositories = [...routes.repositories].filter(([, enabled]) => enabled).map(([id]) => id)
+  /** Select the oldest due message of each deliverable topic before applying the batch limit. */
+  pending(limit = 100, due = true, eligible?: Pick<ReadonlySet<string>, 'has'>): JournalItem[] {
+    const chats = this.bindings().filter(binding => binding.enabled).map(binding => binding.chatId)
+    const repositories = this.repositories().filter(repo => repo.enabled && (!eligible || eligible.has(repo.id))).map(repo => repo.id)
     if (!chats.length || !repositories.length) return []
     const marks = (items: string[]): string => items.map(() => '?').join(',')
     return this.db.prepare(`SELECT * FROM inbox i WHERE delivered=0 AND next_at<=? AND chat IN (${marks(chats)}) AND repository IN (${marks(repositories)})
       AND NOT EXISTS (SELECT 1 FROM inbox p WHERE p.delivered=0 AND p.thread=i.thread AND p.rowid<i.rowid)
+      AND NOT EXISTS (SELECT 1 FROM routes r WHERE r.thread=i.thread AND r.repository<>i.repository)
       ORDER BY rowid LIMIT ?`).all(due ? Date.now() : Number.MAX_SAFE_INTEGER, ...chats, ...repositories, limit)
-      .map(row => this.item(row)).filter(item => !this.holdOf(item, routes))
+      .map(row => this.item(row))
   }
   /** Every undelivered message with its hold reason; the management view explains work that waits in a paused group. */
   outstanding(limit = 200): QueuedItem[] {

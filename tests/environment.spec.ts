@@ -46,6 +46,18 @@ describe('worker shims', () => {
     expect([(await exec(join(bin, 'gh'), ['api', 'user'])).stdout, (await exec(join(bin, 'lark-cli'), ['im'])).stdout]).toEqual(['gh api user\n', 'lark im\n'])
     expect(readdirSync(bin)).not.toContain('git')
   })
+  it('keeps normal Git workspace commands and routes pilot publishing and channel operations to the host', async () => {
+    const deployed = testDeployment({ stateDir: dir, managed: { repositoryId: 'pilot', url: 'http://127.0.0.1:3082',
+      token: 'fixture', enterprisePilot: true } })
+    await writeEnvironment(deployed, [])
+    const env = { PATH: `${workerBin(dir)}:${process.env.PATH}` }
+    await expect(exec('gh', ['pr', 'ready'], { env })).rejects.toMatchObject({ stderr: expect.stringContaining('orchestrator_delivery') })
+    await expect(exec('lark-cli', ['im'], { env })).rejects.toMatchObject({ stderr: expect.stringContaining('orchestrator_read') })
+    await exec('git', ['init', '-q', 'checkout'], { cwd: dir, env })
+    await expect(exec('git', ['-C', 'checkout', 'status', '--short'], { cwd: dir, env })).resolves.toMatchObject({ stdout: '' })
+    await expect(exec('git', ['-C', 'checkout', '-c', 'user.name=fixture', 'push'], { cwd: dir, env }))
+      .rejects.toMatchObject({ stderr: expect.stringContaining('orchestrator_delivery') })
+  })
   it('replace only what dsh-superagent wrote and refuse anything else in its places', async () => {
     await writeEnvironment(testDeployment({ stateDir: dir }), ['old-cli'])
     await writeEnvironment(testDeployment({ stateDir: dir }), [])
