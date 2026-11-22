@@ -559,7 +559,7 @@ describe('agent runs in the Executor', () => {
 
 describe('orchestrator_agent', () => {
   /** A stub delegation that records what the tool asked for, so the tool's own choices are testable without a process. */
-  const stubAgents = (calls: string[], probes?: AgentProbe[]): AgentDelegation => {
+  const stubAgents = (calls: string[], probes: AgentProbe[] = fixtureProbe()): AgentDelegation => {
     const base: AgentRun = { id: 'run-1', ticketId: 't1', assignmentId: 'a1', agent: 'codex', permission: 'read', prompt: 'x',
       status: 'running', directory: '/work', startedAt: '2026-05-01T00:00:00.000Z' }
     return {
@@ -568,7 +568,7 @@ describe('orchestrator_agent', () => {
       status: () => base,
       stop: async () => ({ run: { ...base, status: 'stopped' }, confirmed: true }),
       stopAll: async () => ({ confirmed: true, runs: [] }),
-      ...probes ? { probe: () => probes } : {},
+      probe: () => probes,
     }
   }
   const toolOf = (agents: AgentDelegation, agent: string | undefined) => {
