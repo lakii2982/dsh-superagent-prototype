@@ -12,6 +12,8 @@ Node.js 要求来自 [DSH `0.2.2-rc.5` 官方 CLI 的 `engines.node`](https://gi
 
 专用 VM 是运行隔离边界。五个团队接入同一已批准的信任域，服务身份只持有这些仓库的工作目录和批准的工具凭据，不持有生产发布权限。公司如果要求团队之间满足操作系统级强隔离，需要在部署架构上另设执行边界并单独验收。
 
+启用 Codex 或 Claude 委派时，部署身份还需安装并完成相应 CLI 的认证。Linux 需要可用的 `bwrap`（bubblewrap），macOS 需要可用的 `sandbox-exec`，用于限制执行进程的文件访问。仓库运行检查会实际探测工具与隔离能力；缺少条件时拒绝启动对应执行器。管理器能够打开不等于执行工具已经就绪。
+
 GitHub 目标分支启用 Active ruleset，至少要求人工审批和指定 CI 检查，并禁止强推和删除。执行账号不得绕过规则或执行受保护分支上的合并。自动分支检查按 active ruleset 放行，运维再用执行账号和代码负责人的独立身份实测合并权限。参见 [GitHub 分支规则说明](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets)。
 
 ## 2. 安装并启动统一服务
@@ -98,7 +100,7 @@ chmod 700 "$HOME/dsh-backups"
 "$HOME/dsh-enterprise/dsh-enterprise" start
 ```
 
-管理器日志位于 `manager.log`，仓库日志位于 `manager/logs/<仓库ID>.log`。`logs [--follow] [仓库ID]` 读取指定实例的最后 100 行或持续跟踪。`rotate-logs` 在全部实例停机后，对达到 20 MiB 的日志执行重命名轮转，保留 `.1` 至 `.5` 五代，并创建权限为 `0600` 的新日志。不使用会丢失写入窗口内容的在线截断。当前没有运行时自动轮转，长时间运行的主机需监控日志体积和磁盘余量，将轮转纳入维护窗口；重启后重新登记需要运行的仓库。日志可能含 DSH 启动链接和渠道上下文，按部署凭据同级控制访问。
+管理器日志位于 `manager.log`，仓库日志位于 `manager/logs/<仓库ID>.log`。`logs [--follow] [仓库ID]` 读取指定实例的最后 100 行或持续跟踪。`rotate-logs` 在全部实例停机后，对达到 20 MiB 的日志执行重命名轮转，保留 `.1` 至 `.5` 五代，并创建权限为 `0600` 的新日志。不使用会丢失写入窗口内容的在线截断。当前没有运行时自动轮转，长时间运行的主机需监控日志体积和磁盘余量，将轮转纳入维护窗口；重启后重新启动需要运行的已登记仓库。日志可能含 DSH 启动链接和渠道上下文，按部署凭据同级控制访问。
 
 ## 5. 验收每条产品线的 50%
 

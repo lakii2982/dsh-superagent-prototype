@@ -57,12 +57,12 @@ async function vacantPort() {
     return server.address().port
   } finally { if (server.listening) await new Promise((accept, reject) => server.close(error => error ? reject(error) : accept())) }
 }
-async function managerState(authorization = token) {
+async function managerState(authorization = token, requestMarker = true) {
   const response = await fetch(`http://127.0.0.1:${config.port}/orchestrator/manager/state`, {
-    headers: authorization ? { authorization: `Bearer ${authorization}` } : {},
+    headers: { ...(requestMarker ? { 'x-orchestrator-request': '1' } : {}), ...(authorization ? { authorization: `Bearer ${authorization}` } : {}) },
     redirect: 'error', signal: AbortSignal.timeout(3000),
   })
-  return { response, value: await response.json() }
+  return { response, value: await response.json().catch(() => null) }
 }
 async function launch() {
   const output = await open(join(temporary, 'supervisor.log'), 'a', 0o600)
@@ -73,10 +73,13 @@ async function launch() {
     await new Promise((accept, reject) => { supervisor.once('spawn', accept); supervisor.once('error', reject) })
   } finally { await output.close() }
   const deadline = Date.now() + 90_000
+  let lastObservation = 'No response received'
   while (Date.now() < deadline) {
     if (supervisor.exitCode !== null || supervisor.signalCode !== null) throw new Error('Real DSH host exited during startup')
-    const result = await managerState().catch(() => undefined)
-    if (result?.response.ok) {
+    const result = await managerState().catch(error => { lastObservation = redact(error.message); return undefined })
+    if (result) lastObservation = `HTTP ${result.response.status}, ${result.response.headers.get('content-type') ?? 'no content type'}${
+      typeof result.value?.error === 'string' ? `: ${redact(result.value.error).slice(0, 500)}` : ''}`
+    if (result?.response.ok && typeof result.value?.pid === 'number') {
       const pid = Number((await readFile(join(deployment, 'manager.pid'), 'utf8')).trim())
       assert.equal(result.value.pid, pid)
       assert.equal(result.value.stateDir, join(deployment, 'manager'))
@@ -84,7 +87,7 @@ async function launch() {
     }
     await wait(250)
   }
-  throw new Error('Real DSH host did not expose its authenticated manager API within 90 seconds')
+  throw new Error(`Real DSH host did not expose its authenticated manager API within 90 seconds. Last observation: ${lastObservation}`)
 }
 async function stop() {
   await operate('stop')
@@ -150,7 +153,9 @@ with zipfile.ZipFile(archive) as package:
     assert.equal(unauthorized.value.code, 'operator_auth_required')
     const wrong = await managerState('invalid-smoke-token')
     assert.equal(wrong.response.status, 401)
-    return { authorizedStatus: 200, anonymousStatus: 401, invalidTokenStatus: 401 }
+    const missingMarker = await managerState(token, false)
+    assert.equal(missingMarker.response.status, 403)
+    return { authorizedStatus: 200, anonymousStatus: 401, invalidTokenStatus: 401, missingRequestMarkerStatus: 403 }
   })
   await step('graceful-stop', stop)
   let databaseDigest

@@ -15,7 +15,7 @@
 
 多人共用请按[部署说明](ops/enterprise/README.md)安装到专用主机，使用同一个管理器。当前容量上限为同时运行 12 个仓库；120 人实际负载须在目标环境验证。
 
-上线前完成正常网络环境下的 HTTP 集成测试，并以真实业务试单验证授权、模型执行、草稿 PR、CI、人工合并和原渠道回执。当前实现与桌面检查不代表生产验收通过；迭代周期缩短 50% 需要按产品线持续度量。详见[验收计划](docs/014-enterprise-development-pilot.zh-CN.md)。
+自动发布流程执行完整 HTTP 集成测试、跨平台回归和真实 DSH 安装恢复验证，全部通过后提供带校验和的安装包。客户上线时还需以真实业务试单验证授权、模型执行、草稿 PR、CI、人工合并和原渠道回执；迭代周期缩短 50% 按产品线持续度量。详见[自动化验证](docs/016-ci-validation.zh-CN.md)和[验收计划](docs/014-enterprise-development-pilot.zh-CN.md)。
 
 开发检查：`pnpm check`。配置与故障排查见[部署文档](docs/006-deployment.md)，正式交付按[发布验收记录](docs/015-release-acceptance.zh-CN.md)逐项验证。
 
