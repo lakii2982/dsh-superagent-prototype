@@ -6,7 +6,9 @@
 
 ## 1. 准备部署主机
 
-使用公司分配的专用 VM 和非管理员服务身份。目标机器需要 DSH `0.2.2-rc.5`、Node.js `22.19+` 或 `24+`、Git、`curl` 和访问已批准 GitHub、模型以及可选飞书服务的权限。仓库应位于 `github.com`。准备管理器身份下的 GitHub SSH 已知主机与专用只读拉取凭据，用 `git ls-remote git@github.com:<owner>/<repo>.git HEAD` 验证镜像拉取权限。插件安装依赖已随包提供，安装无需访问 npm 注册表。
+使用公司分配的专用 VM 和非管理员服务身份。目标机器需要 DSH `0.2.2-rc.5`、Node.js `24.9.0` 或更新版本、Git、`curl` 和访问已批准 GitHub、模型以及可选飞书服务的权限。仓库应位于 `github.com`。准备管理器身份下的 GitHub SSH 已知主机与专用只读拉取凭据，用 `git ls-remote git@github.com:<owner>/<repo>.git HEAD` 验证镜像拉取权限。插件安装依赖已随包提供，安装无需访问 npm 注册表。
+
+Node.js 要求来自 [DSH `0.2.2-rc.5` 官方 CLI 的 `engines.node`](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.5/apps/cli/package.json)。插件自身的 `package.json` 兼容范围不代表 DSH 宿主的部署要求；Node.js 22.x 和 24.0–24.8 无法通过本安装器。
 
 专用 VM 是运行隔离边界。五个团队接入同一已批准的信任域，服务身份只持有这些仓库的工作目录和批准的工具凭据，不持有生产发布权限。公司如果要求团队之间满足操作系统级强隔离，需要在部署架构上另设执行边界并单独验收。
 

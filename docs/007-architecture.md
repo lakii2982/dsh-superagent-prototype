@@ -476,7 +476,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/manager-capacity.spec.ts` | Repository slot accounting, multi-team routing at 120 synthetic senders, and dispatch past offline backlogs |
 | `tests/operator-auth.spec.ts` | Owner-only credentials and manager operator authentication |
 | `tests/enterprise-measure.spec.ts` | Per-product release-cycle evidence and comparison of equal Ready cohorts |
-| `tests/manager-runtime.spec.ts` | Real loopback bridge authentication, delivery recovery and reply scope using a fake bot |
+| `tests/manager-runtime.spec.ts` | Real loopback bridge authentication, delivery recovery and reply scope using a fake bot; concurrent routing of 120 synthetic identities across 5 teams and 12 fake repository executors, cross-repository authorization rejection, duplicate ingress and drained queues (control-plane regression, not model throughput or production load) |
 
 | `tests/bot-facade.spec.ts` | Bot-only command forwarding without modifying personal authentication |
 

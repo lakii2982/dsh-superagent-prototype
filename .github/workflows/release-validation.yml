@@ -98,6 +98,14 @@ jobs:
         run: |
           mkdir -p ci-results release-candidate
           node ops/enterprise/package.mjs release-candidate/dsh-enterprise-release.zip 2>&1 | tee ci-results/package.log
+      - name: Install the official DSH host in a clean runtime
+        run: |
+          npm install --prefix "$RUNNER_TEMP/dsh-runtime" --no-audit --no-fund @deepseek-ai/dsh@0.2.2-rc.5 2>&1 | tee ci-results/dsh-install.log
+          echo "$RUNNER_TEMP/dsh-runtime/node_modules/.bin" >> "$GITHUB_PATH"
+      - name: Verify real host installation and recovery
+        run: |
+          node ops/enterprise/smoke-release.mjs release-candidate/dsh-enterprise-release.zip ci-results/smoke-release.json 2>&1 | tee ci-results/smoke-release.log
+          cp ci-results/smoke-release.json release-candidate/SMOKE-REPORT.json
       - name: Record release checksum and source
         env:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -111,7 +119,7 @@ jobs:
             workflowRun: process.env.RUN_URL,
             nodeVersion: process.version,
             packageManager: 'pnpm@11.7.0',
-            status: 'Automated validation passed; customer acceptance is still required.',
+            status: 'Automated validation and real DSH installation/recovery passed; customer acceptance is still required.',
           }, null, 2) + '\n');
           NODE
       - name: Retain release candidate
@@ -127,6 +135,8 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: packaging-evidence-${{ github.run_attempt }}
-          path: ci-results/package.log
+          path: |
+            ci-results/*.log
+            ci-results/smoke-release.json
           if-no-files-found: warn
           retention-days: 14

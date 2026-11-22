@@ -45,8 +45,8 @@ done
 [[ "$capacity" =~ ^([1-9]|1[0-2])$ ]] || fail '--capacity must be 1–12'
 [[ $(id -u) != 0 ]] || fail 'Run this installer as a dedicated non-root service account'
 for executable in node dsh git tar install awk; do command -v "$executable" >/dev/null || fail "$executable must be installed"; done
-node -e 'const [major, minor] = process.versions.node.split(".").map(Number); if (!(major >= 24 || (major === 22 && minor >= 19))) process.exit(1)' \
-  || fail 'Node 22.19+ in the 22.x series or Node 24+ is required'
+node -e 'const [major, minor] = process.versions.node.split(".").map(Number); if (!(major > 24 || (major === 24 && minor >= 9))) process.exit(1)' \
+  || fail 'DSH 0.2.2-rc.5 requires Node.js 24.9.0 or newer'
 dsh_path=$(command -v dsh)
 [[ "$dsh_path" = /* ]] || fail 'dsh must resolve to an absolute executable path'
 [[ $("$dsh_path" --version) = 0.2.2-rc.5 ]] || fail 'This release requires DSH 0.2.2-rc.5'

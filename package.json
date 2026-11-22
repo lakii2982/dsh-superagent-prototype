@@ -28,6 +28,7 @@
     "docs/*.md",
     "prompts",
     "skills",
+    "ops/enterprise/README.md",
     "ops/enterprise/check-branches.mjs"
   ],
   "dsh": {

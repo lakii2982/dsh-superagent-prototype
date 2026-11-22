@@ -20,8 +20,16 @@ import { SettingsSchema, settingsPolicy } from '../src/policy.ts'
 import { sourceContextOf, type SourceContextDeps } from '../src/app/source-context.ts'
 import { SetupError, type SetupProblem } from '../src/setup.ts'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import * as subprocess from 'node:child_process'
+import { EventEmitter } from 'node:events'
+import { PassThrough } from 'node:stream'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+
+vi.mock('node:child_process', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:child_process')>()
+  return { ...actual, spawn: vi.fn(actual.spawn) }
+})
 
 const MEMBER = 'ou_alice'
 function host(overrides: Partial<SourceContextDeps> = {}) {
@@ -1096,6 +1104,29 @@ describe('feishu event consumer', () => {
     expect(store.get(KV.feishu.chats)).toEqual({ oc_group: false, oc_dm: true })
     expect(health.feishu).toMatchObject({ state: 'error', detail: expect.stringContaining('JSON') })
     controller.abort(); await running; store.close()
+  }, 20_000)
+  it('preserves a malformed-event error when the ready line arrives from stderr afterwards', async () => {
+    const child = Object.assign(new EventEmitter(), {
+      stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(),
+      kill: () => { child.emit('close', 0); return true },
+    })
+    const spawn = vi.spyOn(subprocess, 'spawn').mockReturnValue(child as unknown as ReturnType<typeof subprocess.spawn>)
+    const { ctx, health, store } = consumerSource(cli('ready'))
+    try {
+      running = runFeishu(ctx, controller.signal)
+      await vi.waitFor(() => expect(spawn).toHaveBeenCalled(), until)
+      // Independent stdout/stderr pipes can deliver the ready line after event processing, even when written first.
+      child.stdout.write('not json\n' + event('om_before_ready', 'oc_group', 'group') + '\n')
+      await vi.waitFor(() => expect(store.triggers.get(feishuTriggerId('om_before_ready'))).toBeDefined(), until)
+      expect(health.feishu).toMatchObject({ state: 'error', detail: expect.stringContaining('JSON') })
+      child.stderr.write('[event] ready\n')
+      expect(health.feishu).toMatchObject({ state: 'error', detail: expect.stringContaining('JSON') })
+      child.stdout.write(event('om_after_ready', 'oc_group', 'group') + '\n')
+      await vi.waitFor(() => expect(store.triggers.get(feishuTriggerId('om_after_ready'))).toBeDefined(), until)
+      expect(health.feishu).toMatchObject({ state: 'error', detail: expect.stringContaining('JSON') })
+    } finally {
+      controller.abort(); await running; spawn.mockRestore(); store.close()
+    }
   }, 20_000)
   it('drops the events it reads once the Source is off', async () => {
     writeFileSync(join(dir, 'events'), event('om_9', 'oc_group', 'group') + '\n')

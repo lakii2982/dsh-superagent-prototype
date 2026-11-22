@@ -9,7 +9,7 @@ import { test } from 'node:test'
 
 const source = dirname(fileURLToPath(import.meta.url))
 
-async function fixture(t) {
+async function fixture(t, { nodeVersion = '24.9.0' } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'dsh-release-install-')))
   t.after(() => rm(root, { recursive: true, force: true }))
   const release = join(root, 'release'), bin = join(root, 'bin'), stage = join(root, 'stage'), target = join(root, 'deployment with spaces')
@@ -18,8 +18,22 @@ async function fixture(t) {
   await copyFile(join(source, 'dsh-enterprise'), join(release, 'dsh-enterprise'))
   await chmod(join(release, 'dsh-enterprise'), 0o700)
   const executable = async (name, text) => { await writeFile(join(bin, name), text, { mode: 0o700 }) }
-  // Fake only the DSH process. Tests use the real shell, Node, tar and filesystem.
+  // Stub DSH and the non-root identity check; installation uses the real shell, Node, tar and filesystem.
   await executable('id', '#!/bin/sh\nprintf "1000\\n"\n')
+  if (nodeVersion) {
+    // Pin the fake host's advertised version independently of the test runner. Boundary cases override it;
+    // later Node operations remain real and the release smoke exercises the actual supported DSH host.
+    await executable('node', `#!${process.execPath}\nconst args = process.argv.slice(2);
+if (args[0] === '-e' && args[1].includes('process.versions.node')) {
+  Object.defineProperty(process.versions, 'node', { value: ${JSON.stringify(nodeVersion)} });
+  eval(args[1]);
+} else {
+  const result = require('node:child_process').spawnSync(${JSON.stringify(process.execPath)}, args, { stdio: 'inherit' });
+  if (result.error) throw result.error;
+  process.exit(result.status ?? 1);
+}
+`)
+  }
   await executable('dsh', `#!${process.execPath}\nconst fs = require('node:fs'), path = require('node:path');
 const args = process.argv.slice(2);
 if (args[0] === '--version') { console.log('0.2.2-rc.5'); process.exit(0); }
@@ -64,6 +78,27 @@ test('installs a verified package into a new path without starting the service',
   assert(actions.every(args => !args.includes('--no-open')))
   assert.match(result.stdout, /Installed/)
 })
+
+for (const nodeVersion of ['22.19.0', '24.0.0', '24.8.9']) {
+  test(`refuses Node ${nodeVersion} before creating deployment data or running DSH mutations`, async t => {
+    const f = await fixture(t, { nodeVersion })
+    const result = f.run()
+    assert.notEqual(result.status, 0)
+    assert.match(result.stderr, /DSH 0\.2\.2-rc\.5 requires Node\.js 24\.9\.0 or newer/)
+    assert.equal(await f.exists(f.target), false)
+    assert.equal(await f.exists(join(f.root, 'dsh-operations.log')), false)
+  })
+}
+
+for (const nodeVersion of ['24.9.0', '24.10.0', '25.0.0']) {
+  test(`allows Node ${nodeVersion} through the DSH host version gate`, async t => {
+    const f = await fixture(t, { nodeVersion })
+    const result = f.run()
+    assert.equal(result.status, 0, result.stderr || result.stdout)
+    assert.equal(await f.exists(join(f.target, 'service.json')), true)
+    assert.match(result.stdout, /Installed/)
+  })
+}
 
 test('refuses a missing build manifest before creating the deployment or running DSH mutations', async t => {
   const f = await fixture(t)
