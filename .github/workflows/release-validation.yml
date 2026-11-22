@@ -110,7 +110,11 @@ jobs:
         env:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          sha256sum release-candidate/dsh-enterprise-release.zip > release-candidate/SHA256SUMS
+          (
+            cd release-candidate
+            sha256sum dsh-enterprise-release.zip > SHA256SUMS
+            sha256sum --check SHA256SUMS
+          )
           node --input-type=module <<'NODE'
           import { execFileSync } from 'node:child_process';
           import { writeFileSync } from 'node:fs';

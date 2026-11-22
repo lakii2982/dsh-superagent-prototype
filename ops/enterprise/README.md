@@ -18,7 +18,7 @@ GitHub 目标分支启用 Active ruleset，至少要求人工审批和指定 CI 
 
 ## 2. 安装并启动统一服务
 
-从工作流产物下载后，先解压外层产物 ZIP，保留 `SOURCE.json`、`SMOKE-REPORT.json` 和 `SHA256SUMS`；再解压其中的 `dsh-enterprise-release.zip`，进入 `dsh-enterprise-release` 目录。地址默认只监听本机，其他 DSH profile 保留独立。核对 `BUILD-INFO.json` 记录的包版本与 SHA-256 后运行一次安装。
+从工作流产物下载后，先解压外层产物 ZIP，保留 `SOURCE.json`、`SMOKE-REPORT.json` 和 `SHA256SUMS`。在解压目录运行 `sha256sum --check SHA256SUMS`（Linux）或 `shasum -a 256 -c SHA256SUMS`（macOS）；通过后再解压其中的 `dsh-enterprise-release.zip`，进入 `dsh-enterprise-release` 目录。地址默认只监听本机，其他 DSH profile 保留独立。核对 `BUILD-INFO.json` 记录的包版本与 SHA-256 后运行一次安装。
 
 ```bash
 ./install.sh --home "$HOME/dsh-enterprise" --port 3082 --capacity 12
