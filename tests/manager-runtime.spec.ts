@@ -252,7 +252,7 @@ it('isolates concurrent ingress from 120 identities across 5 teams and 12 reposi
   await vi.waitFor(async () => {
     const state = await view()
     expect(state.repositories).toHaveLength(12)
-    expect(state.queues).toEqual({ total: 0, byRepository: Object.fromEntries(repositories.map(repo => [repo.id, 0])), byChat: {} })
+    expect(state.queues).toEqual({ total: 0, byRepository: Object.fromEntries(repositories.map(repo => [repo.id, 0])), byChat: {}, byBinding: [] })
     expect(state.pending).toEqual([])
     expect(state.repositories.every(repo => repo.status.online && repo.pending.total === 0)).toBe(true)
     for (const [index, fake] of instances.entries()) {
