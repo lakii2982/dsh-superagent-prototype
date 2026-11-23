@@ -14,7 +14,7 @@ import { PanelProvider, usePanel, usePanelData } from './provider.tsx'
 import { Field, Fields } from './settings-kit.tsx'
 import { errorText, setupText, type T } from './text.ts'
 import { CheckSetupButton, Hint, KeyValues, Section, SetupMessage } from './widgets.tsx'
-import { bindingBot, managerBots, type ManagerBotView, type ManagerView } from './manager-view.ts'
+import { bindingBot, botHealthView, managerBots, type ManagerBotView, type ManagerView } from './manager-view.ts'
 import type { ManagerArea } from './route.ts'
 import STYLES from './client.css?raw'
 
@@ -223,19 +223,21 @@ function ManagerPluginPage({ t, form, onOpenManager }: { t: T; form: DeploymentF
       <section className="dt-plugin-connection">
         <div className="dt-settings-section-head"><div className="dt-row-title"><Icon name="message" size={18} />
           <h3>{tr('飞书机器人连接', 'Feishu bot connections')}</h3></div>
-          <Tag tone={bots.some(bot => bot.connected && bot.enabled) ? 'success' : 'warning'}>{tr(`${bots.filter(bot => bot.connected && bot.enabled).length} / ${bots.length} 可用`, `${bots.filter(bot => bot.connected && bot.enabled).length} / ${bots.length} available`)}</Tag></div>
+          <Tag tone={bots.some(bot => bot.connected && bot.enabled) ? 'success' : 'warning'}>{tr(`${bots.filter(bot => bot.connected && bot.enabled).length} / ${bots.length} 连接已验证`, `${bots.filter(bot => bot.connected && bot.enabled).length} / ${bots.length} connections verified`)}</Tag></div>
         <p className="dt-settings-caption">{tr('每个机器人可接入多个群，按“机器人 → 群聊 → 仓库”分配工作。', 'Each bot can serve multiple groups. Work follows bot → group → repository bindings.')}</p>
         {view.legacyConnection && <div className="dt-settings-notice"><div><strong>{tr('原有机器人连接待恢复', 'Previous bot connection needs recovery')}</strong>
           <p className="dt-error" role="alert">{view.legacyConnection.error}</p><p className="dt-hint dt-mono">{view.legacyConnection.cli}</p>
           <Button size="sm" disabled={busy || editing !== undefined} onClick={() => { setEditing('legacy'); initialConnection.current = { cli: view.legacyConnection!.cli, profile: '' }; setCli(view.legacyConnection!.cli); setProfile(''); editRevision.current = view.revision; setNotice(undefined) }}>{tr('恢复原有连接', 'Restore previous connection')}</Button></div></div>}
         {bots.length ? <div className="dt-plugin-bot-list">{bots.map(bot => {
           const bindings = view.bindings.filter(binding => bindingBot(view, binding)?.id === bot.id && binding.enabled)
-          const failure = Object.values(bot.health).find(health => health.state === 'error')
+          const health = botHealthView(bot, tr)
           return <div className="dt-plugin-bot-row" key={bot.id}><div className="dt-row-main"><p className="dt-plugin-bot-name">{bot.name || bot.id}</p>
             {bot.profile && <p className="dt-settings-caption">{tr('CLI 档案', 'CLI profile')} · {bot.profile}</p>}
             <p className="dt-settings-caption">{tr(`${Object.keys(bot.chats).length} 个已加入的群 · ${bindings.length} 个启用绑定`, `${Object.keys(bot.chats).length} joined groups · ${bindings.length} enabled bindings`)}</p>
-            {failure && <p className="dt-error" role="status">{failure.detail || tr('机器人连接需要处理', 'Bot connection needs attention')}</p>}</div>
-            <Tag tone={!bot.enabled ? 'quiet' : bot.connected && !failure ? 'success' : 'danger'}>{!bot.enabled ? tr('已停用', 'Disabled') : bot.connected ? tr('已连接', 'Connected') : tr('连接异常', 'Disconnected')}</Tag>
+            {health.liveSummary && <p className="dt-hint" role="status">{health.liveSummary}</p>}
+            {health.issues.map(issue => <div key={issue.key} role="status"><p className={issue.tone === 'danger' ? 'dt-error' : 'dt-hint'}><strong>{issue.label}</strong>：{issue.summary}</p>
+              {issue.detail && <details className="dt-manager-checks"><summary>{tr('原始详情', 'Original details')}</summary><p className="dt-hint dt-mono">{issue.detail}</p></details>}</div>)}</div>
+            <Tag tone={health.tone}>{health.label}</Tag>
             <Button size="sm" variant="outline" disabled={busy || editing !== undefined} onClick={() => beginConnection(bot)}>{tr('修改连接', 'Edit connection')}</Button></div>
         })}</div> : <p className="dt-plugin-bot-name">{tr('连接第一个机器人，接收研发群中的工作请求。', 'Connect the first bot to receive work from development groups.')}</p>}
         {bots.length > 0 && !bound && <p className="dt-settings-caption">{tr('还没有启用群聊绑定。先把机器人加入研发群，再绑定对应仓库。', 'No group bindings are enabled. Add a bot to a development group, then map it to a repository.')}</p>}

@@ -277,7 +277,7 @@ it('manages multiple verified connections from native settings without replacing
   await act(async () => { root.render(<PluginConfig t={translator(zh)} view="page" form={{ state: form.getSnapshot(), mutate: form.mutate }} onOpenManager={open} />) })
   await settle()
   expect(container.querySelectorAll('.dt-plugin-bot-row')).toHaveLength(2)
-  expect(text()).toContain('2 / 2 可用')
+  expect(text()).toContain('2 / 2 连接已验证')
   await click('添加机器人'); await type(field<HTMLInputElement>('机器人 CLI 路径或命令'), '/bin/lark'); await type(field<HTMLInputElement>('CLI 配置档案（Profile）'), 'qa'); await click('验证并保存')
   expect(writes[0]).toEqual({ path: '/orchestrator/manager/bots', body: { cli: '/bin/lark', profile: 'qa', revision: 4 } })
   expect(container.querySelectorAll('.dt-plugin-bot-row')).toHaveLength(3)
@@ -290,4 +290,27 @@ it('manages multiple verified connections from native settings without replacing
   expect(state.bots!.map(bot => [bot.cli, bot.profile])).toEqual([['/bin/lark', 'platform'], ['/bin/lark', 'device-v2'], ['/bin/lark', 'qa']])
   await click('管理机器人连接'); expect(open).toHaveBeenCalledWith('feishu')
   await click('管理群聊绑定'); expect(open).toHaveBeenCalledWith('bindings')
+})
+
+it('explains restricted history in native settings while retaining the healthy live connection', async () => {
+  const { form } = fakeForm()
+  const diagnostic = 'oc_team: Error: access denied for this bot operation (230027)'
+  const state: ManagerView = { revision: 1, bot: null, botCli: '', workspaces: [], repositories: [], bindings: [], chats: {}, health: {}, pending: [], bots: [
+    { id: 'bot-a', botId: 'ou_a', appId: 'cli_a', brand: 'feishu', name: '研发助手', cli: '/bin/lark', enabled: true, connected: true,
+      chats: { oc_team: '研发群' }, health: { feishu: { state: 'ready', detail: 'Listening' }, history: { state: 'error', detail: diagnostic } } },
+  ] }
+  vi.stubGlobal('fetch', (url: string) => Promise.resolve(url === '/orchestrator/mode' ? Response.json({ mode: 'manager' }) : Response.json(state)))
+  const container = document.createElement('div'); document.body.append(container)
+  const root = createRoot(container)
+  onTestFinished(() => { act(() => { root.unmount() }); container.remove() })
+  await act(async () => { root.render(<PluginConfig t={translator(zh)} view="page" form={{ state: form.getSnapshot(), mutate: form.mutate }} />) })
+  await settle()
+  const bot = container.querySelector('.dt-plugin-bot-row')!
+  expect(bot.textContent).toContain('实时消息已连接；历史补收受限')
+  expect(bot.textContent).toContain('历史消息补收：应用权限不足')
+  expect(bot.textContent).not.toContain('连接异常')
+  expect(bot.querySelector('.dt-tag')?.getAttribute('data-tone')).toBe('warning')
+  const details = bot.querySelector('details')!
+  expect(details.open).toBe(false)
+  expect(details.textContent).toContain(diagnostic)
 })

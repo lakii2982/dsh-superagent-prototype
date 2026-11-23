@@ -592,3 +592,24 @@ it('preserves the selected binding on a member permission failure and retries in
   expect(text()).toContain('May')
   expect(text()).not.toContain('im:chat.members:read')
 })
+
+it('distinguishes history permission failures from live message intake and keeps raw diagnostics', async () => {
+  const original = globalThis.fetch, state = multipleBots()
+  const diagnostic = 'oc_team: Error: access denied for this bot operation (230027)'
+  state.bots![0]!.health = { feishu: { state: 'ready', detail: 'Listening' }, history: { state: 'error', detail: diagnostic } }
+  state.bots![1]!.health = { feishu: { state: 'error', detail: 'Event stream unavailable' }, chats: { state: 'error', detail: diagnostic } }
+  vi.stubGlobal('fetch', (url: string, options?: RequestInit) => url === '/orchestrator/manager/state' ? Promise.resolve(Response.json(state)) : original(url, options))
+  await mount(); await click(rail('飞书机器人'))
+  const history = all('.dt-bot-card').find(card => card.textContent?.includes('平台助手'))!
+  const live = all('.dt-bot-card').find(card => card.textContent?.includes('设备助手'))!
+  expect(history.textContent).toContain('实时消息已连接；历史补收受限')
+  expect(history.textContent).toContain('历史消息补收：应用权限不足')
+  expect(history.textContent).not.toContain('连接异常')
+  expect(history.querySelector('.dt-tag')?.getAttribute('data-tone')).toBe('warning')
+  const details = [...history.querySelectorAll('details')].find(item => item.querySelector('summary')?.textContent === '原始详情')!
+  expect(details.open).toBe(false)
+  expect(details.textContent).toContain(diagnostic)
+  expect(live.textContent).toContain('实时消息接入：实时消息接收异常')
+  expect(live.textContent).toContain('群信息读取：应用权限不足')
+  expect(live.querySelector('.dt-tag')?.getAttribute('data-tone')).toBe('danger')
+})

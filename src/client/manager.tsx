@@ -15,7 +15,7 @@ import { Field, Fields } from './settings-kit.tsx'
 import type { SetupProblem } from '../setup.ts'
 import { errorText, setupText, type T } from './text.ts'
 import { Hint, LabelValue, Section } from './widgets.tsx'
-import { allowedFeishuForBot, bindingBot, feishuIdentityCount, managerBots, type ManagerBotView, type RepositoryReadiness, type RepositoryView, type ManagerView } from './manager-view.ts'
+import { allowedFeishuForBot, bindingBot, botHealthView, feishuIdentityCount, managerBots, type ManagerBotView, type RepositoryReadiness, type RepositoryView, type ManagerView } from './manager-view.ts'
 import type { DshSuperagentKey } from './locales.ts'
 import STYLES from './client.css?raw'
 
@@ -915,7 +915,7 @@ function FeishuPage() {
         'Connect bots for your teams. Each bot has its own groups, access and status, and can serve multiple groups.')}</p></div>
       <Button variant="primary" disabled={busy || editing !== undefined || !!view.legacyConnection || (!view.bots && bots.length > 0)} title={!view.bots && bots.length ? tr('更新管理服务后可添加多个机器人。', 'Update the manager service to add multiple bots.') : undefined} icon={<Icon name="plus" />} onClick={() => begin()}>{tr('添加机器人', 'Add bot')}</Button></div>
     <div className="dt-manager-metrics dt-bot-metrics">
-      {[[tr('已登记机器人', 'Registered bots'), bots.length], [tr('可用连接', 'Available connections'), bots.filter(bot => bot.enabled && bot.connected).length],
+      {[[tr('已登记机器人', 'Registered bots'), bots.length], [tr('已验证连接', 'Verified connections'), bots.filter(bot => bot.enabled && bot.connected).length],
         [tr('群聊绑定', 'Group bindings'), view.bindings.length]].map(([label, count]) => <div className="dt-manager-metric" key={label}><span>{label}</span><strong>{count}</strong></div>)}
     </div>
     {saved && <p className="dt-success-note" role="status">{saved}</p>}
@@ -927,14 +927,16 @@ function FeishuPage() {
     <Section title={tr('机器人连接', 'Bot connections')} count={bots.length}>
       {bots.length ? <div className="dt-bot-grid">{bots.map(bot => {
         const bindings = view.bindings.filter(binding => bindingBot(view, binding)?.id === bot.id)
-        const errors = Object.entries(bot.health).filter(([, value]) => value.state === 'error')
+        const health = botHealthView(bot, tr)
         return <article className="dt-card dt-bot-card" key={bot.id}>
           <div className="dt-card-head"><span className="dt-connection-icon"><Icon name="message" size={24} /></span><div className="dt-row-main"><h3>{bot.name || bot.id}</h3>
             <p className="dt-hint">{bot.brand === 'lark' ? 'Lark' : tr('飞书', 'Feishu')}{bot.appId ? ` · ${bot.appId}` : ''}</p></div>
-            <Tag tone={!bot.enabled ? 'quiet' : !bot.connected || errors.length ? 'danger' : 'success'}>{!bot.enabled ? tr('已停用', 'Disabled') : !bot.connected ? tr('连接异常', 'Disconnected') : errors.length ? tr('需要处理', 'Needs attention') : tr('已连接', 'Connected')}</Tag></div>
+            <Tag tone={health.tone}>{health.label}</Tag></div>
           <div className="dt-bot-stats"><span>{tr(`${Object.keys(bot.chats).length} 个已加入的群`, `${Object.keys(bot.chats).length} joined groups`)}</span>
             <span>{tr(`${bindings.filter(binding => binding.enabled).length} 个已启用绑定`, `${bindings.filter(binding => binding.enabled).length} enabled bindings`)}</span></div>
-          {errors.length ? errors.map(([name, value]) => <p className="dt-error" role="status" key={name}>{value.detail || tr('连接需要处理', 'Connection needs attention')}</p>)
+          {health.liveSummary && <p className="dt-hint" role="status">{health.liveSummary}</p>}
+          {health.issues.length ? health.issues.map(issue => <div key={issue.key} role="status"><p className={issue.tone === 'danger' ? 'dt-error' : 'dt-hint'}><strong>{issue.label}</strong>：{issue.summary}</p>
+            {issue.detail && <details className="dt-manager-checks"><summary>{tr('原始详情', 'Original details')}</summary><p className="dt-hint dt-mono">{issue.detail}</p></details>}</div>)
             : <p className="dt-hint">{!bot.enabled ? tr('接单与回复已暂停，绑定和历史记录保留。', 'Intake and replies are paused; bindings and history are retained.') : !bindings.length ? tr('绑定研发群后开始接收需求。', 'Bind development groups to receive work.') : tr('消息按机器人与群聊的绑定关系路由。', 'Messages follow this bot’s group bindings.')}</p>}
           <div className="dt-actions"><Button variant="primary" size="sm" disabled={busy || !bot.enabled || !bot.connected}
             onClick={() => navigate(managerRoute('bindings', undefined, bot.id))}>{tr('绑定群聊', 'Bind groups')}</Button>
