@@ -6,7 +6,7 @@ import { feishuLink, sendFeishu } from './feishu-channel.ts'
 import { feishuThreadContext } from './feishu-read.ts'
 import { pause } from './poll.ts'
 import { pollThreads, refreshChatNames, runFeishu } from './feishu-loops.ts'
-import { SOURCE, feishuTriggerId } from './feishu-trigger.ts'
+import { SOURCE, feishuParent } from './feishu-trigger.ts'
 import { sourceContext } from './host.ts'
 import type { Localized, SourceKind } from './kind.ts'
 import type { SourceRegistry } from './registry.ts'
@@ -67,7 +67,7 @@ export const feishuKind: SourceKind<FeishuConfig> = {
   threadContext: feishuThreadContext,
   find: query => ({ threads: [], terms: [...new Set(query.match(/om_[A-Za-z0-9_-]+/g) ?? [])] }),
   // A message's Trigger is named after the message, so the one it answers is named after its parent.
-  repliesTo: trigger => typeof trigger.meta.parentId === 'string' ? feishuTriggerId(trigger.meta.parentId) : undefined,
+  repliesTo: feishuParent,
   policy: {
     unnamed: { person: { zh: '飞书用户', en: 'Feishu user' }, bot: { zh: '飞书机器人', en: 'Feishu bot' } },
     schema: z.object({
@@ -121,7 +121,9 @@ export const feishuKind: SourceKind<FeishuConfig> = {
       { key: 'DSH_SUPERAGENT_FEISHU_BOT', description: { zh: '飞书机器人；lark-cli 以它行事', en: 'The Feishu bot; lark-cli acts as it' } },
       { key: 'DSH_SUPERAGENT_FEISHU_CHAT', description: { zh: '接下工单的飞书群 chat_id；工单不是从飞书来的时为空', en: 'chat_id of the Feishu chat that started the ticket; empty when the ticket did not start on Feishu' } },
     ],
-    values: ({ deployment, trigger }) => ({ DSH_SUPERAGENT_FEISHU_BOT: deployment.feishu ? deployment.feishu.name || deployment.feishu.botId : '', DSH_SUPERAGENT_FEISHU_CHAT: trigger?.source === SOURCE ? String(trigger.meta.chatId ?? '') : '' }),
+    values: ({ deployment, trigger }) => ({ DSH_SUPERAGENT_FEISHU_BOT: trigger?.source === SOURCE && typeof trigger.meta.managerBotName === 'string'
+      ? trigger.meta.managerBotName : deployment.feishu ? deployment.feishu.name || deployment.feishu.botId : '',
+      DSH_SUPERAGENT_FEISHU_CHAT: trigger?.source === SOURCE ? String(trigger.meta.chatId ?? '') : '' }),
   },
   facts: (deployment): Record<string, Localized | string> => deployment?.feishu ? { cli: { zh: `当前机器人 ${deployment.feishu.name || deployment.feishu.botId}`, en: `Current bot ${deployment.feishu.name || deployment.feishu.botId}` } } : {},
 }

@@ -4,7 +4,18 @@
     "productLines": 12,
     "members": 120
   },
-  "feishuCli": null,
+  "feishuBots": [
+    {
+      "key": "platform",
+      "cli": "/usr/local/bin/lark-cli",
+      "profile": "platform"
+    },
+    {
+      "key": "apps",
+      "cli": "/usr/local/bin/lark-cli",
+      "profile": "apps"
+    }
+  ],
   "teams": [
     {
       "id": "platform",
@@ -12,7 +23,8 @@
       "members": [
         {
           "id": "platform-member-001",
-          "github": "platform-placeholder"
+          "github": "platform-placeholder",
+          "feishuByBot": {}
         }
       ],
       "productLines": [
@@ -45,7 +57,7 @@
           "requiredChecks": [
             "build-and-test"
           ],
-          "chatIds": []
+          "groups": []
         },
         {
           "id": "repo-02",
@@ -62,7 +74,7 @@
           "requiredChecks": [
             "build-and-test"
           ],
-          "chatIds": []
+          "groups": []
         },
         {
           "id": "repo-03",
@@ -79,7 +91,7 @@
           "requiredChecks": [
             "build-and-test"
           ],
-          "chatIds": []
+          "groups": []
         }
       ]
     },
@@ -89,7 +101,8 @@
       "members": [
         {
           "id": "commerce-member-001",
-          "github": "commerce-placeholder"
+          "github": "commerce-placeholder",
+          "feishuByBot": {}
         }
       ],
       "productLines": [
@@ -122,7 +135,7 @@
           "requiredChecks": [
             "build-and-test"
           ],
-          "chatIds": []
+          "groups": []
         },
         {
           "id": "repo-05",
@@ -139,7 +152,7 @@
           "requiredChecks": [
             "build-and-test"
           ],
-          "chatIds": []
+          "groups": []
         },
         {
           "id": "repo-06",
@@ -156,7 +169,7 @@
           "requiredChecks": [
             "build-and-test"
           ],
-          "chatIds": []
+          "groups": []
         }
       ]
     },
@@ -166,7 +179,8 @@
       "members": [
         {
           "id": "experience-member-001",
-          "github": "experience-placeholder"
+          "github": "experience-placeholder",
+          "feishuByBot": {}
         }
       ],
       "productLines": [
@@ -195,7 +209,7 @@
           "requiredChecks": [
             "build-and-test"
           ],
-          "chatIds": []
+          "groups": []
         },
         {
           "id": "repo-08",
@@ -212,7 +226,7 @@
           "requiredChecks": [
             "build-and-test"
           ],
-          "chatIds": []
+          "groups": []
         }
       ]
     },
@@ -222,7 +236,8 @@
       "members": [
         {
           "id": "data-member-001",
-          "github": "data-placeholder"
+          "github": "data-placeholder",
+          "feishuByBot": {}
         }
       ],
       "productLines": [
@@ -251,7 +266,7 @@
           "requiredChecks": [
             "build-and-test"
           ],
-          "chatIds": []
+          "groups": []
         },
         {
           "id": "repo-10",
@@ -268,7 +283,7 @@
           "requiredChecks": [
             "build-and-test"
           ],
-          "chatIds": []
+          "groups": []
         }
       ]
     },
@@ -278,7 +293,8 @@
       "members": [
         {
           "id": "operations-member-001",
-          "github": "operations-placeholder"
+          "github": "operations-placeholder",
+          "feishuByBot": {}
         }
       ],
       "productLines": [
@@ -307,7 +323,7 @@
           "requiredChecks": [
             "build-and-test"
           ],
-          "chatIds": []
+          "groups": []
         },
         {
           "id": "repo-12",
@@ -324,7 +340,7 @@
           "requiredChecks": [
             "build-and-test"
           ],
-          "chatIds": []
+          "groups": []
         }
       ]
     }

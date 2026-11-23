@@ -8,7 +8,7 @@ import { feishuChatLink } from './feishu-channel.ts'
 import type { FeishuBot } from '../deployment.ts'
 import { validItems, type Tally } from '../infra/commands.ts'
 import { readFeishu, type FeishuRef } from './feishu-read.ts'
-import { feishuRef, feishuTime, feishuTrigger, HistoricalMessageSchema, historyEvent, HistoryPageSchema, SOURCE, topicEvent }
+import { feishuRef, feishuTime, feishuTrigger, HistoricalMessageSchema, historyEvent, HistoryPageSchema, SOURCE, topicEvent, scopeManagedFeishuTrigger }
   from './feishu-trigger.ts'
 import { health, type SourceContext } from './host.ts'
 import { KV } from '../kv.ts'
@@ -68,7 +68,10 @@ async function watch(ctx: SourceContext, signal: AbortSignal): Promise<void> {
 export const consumerRetry = (previous: number | undefined, ranMs: number): number =>
   previous === undefined || ranMs >= 60_000 ? 1000 : Math.min(previous * 2, 60_000)
 async function consume(ctx: SourceContext, signal: AbortSignal): Promise<void> {
-  const child = spawn(bot(ctx).cli, ['event', 'consume', 'im.message.receive_v1', '--as', 'bot'],
+  await ctx.commands.verifyFeishuIdentity()
+  if (signal.aborted) return
+  const identity = bot(ctx)
+  const child = spawn(identity.cli, ['event', 'consume', 'im.message.receive_v1', '--as', 'bot', ...(identity.profile ? [`--profile=${identity.profile}`] : [])],
     { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, LARKSUITE_CLI_NO_UPDATE_NOTIFIER: '1',
       LARKSUITE_CLI_NO_SKILLS_NOTIFIER: '1' } })
   const stdout = createInterface({ input: child.stdout }); const stderr = createInterface({ input: child.stderr })
@@ -212,12 +215,18 @@ export async function backfillChat(ctx: SourceContext, chatId: string, direct: b
 
 /** Resolves the retained source message reference for polling a subscribed thread. */
 export function threadRef(ctx: SourceContext, thread: Thread): FeishuRef | undefined {
-  const meta = thread.meta as { sourceTriggerId?: string; chatId?: string; messageId?: string }
+  const latest = ctx.triggers.latest(thread.key)
+  const retained = latest ? feishuRef(latest) : undefined
+  const meta = thread.meta as { sourceTriggerId?: string; chatId?: string; messageId?: string; managerBotId?: string;
+    managerLegacyBot?: boolean; managerOriginalThreadId?: string; rootId?: string }
   if (meta.chatId && meta.messageId && meta.sourceTriggerId) {
-    return { triggerId: meta.sourceTriggerId, chatId: meta.chatId, messageId: meta.messageId }
+    return { triggerId: meta.sourceTriggerId, chatId: meta.chatId, messageId: meta.messageId,
+      ...(meta.managerBotId || retained?.botId ? { botId: meta.managerBotId ?? retained?.botId,
+        legacyBot: meta.managerLegacyBot ?? retained?.legacyBot } : {}),
+      ...(meta.managerOriginalThreadId || retained?.originalThreadId ? { originalThreadId: meta.managerOriginalThreadId ?? retained?.originalThreadId } : {}),
+      ...(meta.rootId || retained?.rootId ? { rootId: meta.rootId ?? retained?.rootId } : {}) }
   }
-  const trigger = ctx.triggers.latest(thread.key)
-  return trigger ? feishuRef(trigger) : undefined
+  return retained
 }
 /** Polls subscribed Feishu threads within the polling horizon so replies missed by the live stream become triggers. */
 export async function pollThreads(ctx: SourceContext, signal?: AbortSignal, tally?: Tally): Promise<void> {
@@ -229,7 +238,15 @@ async function pollThread(ctx: SourceContext, thread: Thread, signal?: AbortSign
   const config = enabled(ctx)
   // The Source was turned off; the next round polls again.
   if (!config) return
-  const commands = ctx.commands.withSignal(signal)
+  let commands = ctx.commands.withSignal(signal)
+  let identity: Pick<FeishuBot, 'botId' | 'appId' | 'name' | 'brand'> & { id?: string; legacy?: boolean }
+  if (ctx.deployment.managed) {
+    const identities = await commands.feishuBots()
+    const selected = ref.botId ? identities.find(item => item.id === ref.botId) : identities.find(item => item.legacy)
+    if (!selected) throw new Error('The subscribed topic bot is not connected or no longer belongs to this repository')
+    identity = selected
+    commands = commands.withFeishuBot(selected.id)
+  } else identity = bot(ctx)
   const pageSize = config.readPageSize
   const checkpoint = KV.feishu.seen(thread.key)
   const known = new Set(ctx.state.get(checkpoint) ?? [])
@@ -244,7 +261,8 @@ async function pollThread(ctx: SourceContext, thread: Thread, signal?: AbortSign
   }
   const direct = ctx.state.get(KV.feishu.chats)?.[ref.chatId] === true
   const since = Date.parse(thread.createdAt)
-  const root = thread.ref.id.slice(thread.ref.id.indexOf(':') + 1)
+  const originalThread = ref.originalThreadId ?? thread.ref.id
+  const root = ref.rootId ?? originalThread.slice(originalThread.indexOf(':') + 1)
   let resource: string | null = `feishu/${ref.triggerId}/thread`
   while (resource) {
     if (signal?.aborted) return
@@ -255,12 +273,14 @@ async function pollThread(ctx: SourceContext, thread: Thread, signal?: AbortSign
       ctx.threads.patch(thread.key, { threadId: result.thread_id })
     }
     const encounteredKnown = result.messages.some(message => known.has(message.message_id))
-    const { botId, appId } = bot(ctx)
+    const { botId, appId } = identity
     for (const message of result.messages.filter(item => !known.has(item.message_id) && !item.deleted).reverse()) {
       if (signal?.aborted) return
-      const trigger = feishuTrigger(topicEvent(message, ref.chatId, direct, root), botId, appId)
+      let trigger = feishuTrigger(topicEvent(message, ref.chatId, direct, root), botId, appId)
       // Ignore messages older than the thread subscription on initial poll.
       if (!trigger || (!initialized && Date.parse(trigger.at) < since)) continue
+      if (identity.id) trigger = scopeManagedFeishuTrigger(trigger, identity.id,
+        { legacy: identity.legacy === true, brand: identity.brand, name: identity.name })
       await receive(ctx, trigger)
     }
     result.messages.forEach(message => known.add(message.message_id))

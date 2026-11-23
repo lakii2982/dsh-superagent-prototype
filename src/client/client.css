@@ -493,7 +493,6 @@ a.dt-btn, a.dt-btn:hover { text-decoration: none; }
 .dt-checks { display: flex; flex-wrap: wrap; gap: 8px 16px; gap: 8px; max-height: 240px; overflow: auto; }
 .dt-check { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; line-height: 20px; padding: 7px 10px; border: 1px solid var(--dt-border); border-radius: 7px; background: var(--dt-surface); font-size: 12px; }
 .dt-check input { accent-color: var(--dt-accent); }
-.dt-connection-card { padding: 22px; border: 1px solid var(--dt-border); border-radius: 12px; background: var(--dt-surface); }
 .dt-binding-preview { padding: 14px 16px; border: 1px solid color-mix(in srgb, var(--dt-accent) 24%, transparent); border-radius: 9px; background: color-mix(in srgb, var(--dt-accent) 7%, transparent); font-size: 12px; line-height: 1.8; }
 .dt-binding-preview p { margin: 0; }
 .dt-header-options { position: relative; font-size: 12px; }
@@ -626,4 +625,23 @@ a.dt-btn, a.dt-btn:hover { text-decoration: none; }
   .dt-repository-modal .dt-grid2 { grid-template-columns: 1fr; }
   .dt-repository-modal .dt-modal-body, .dt-repository-modal .dt-modal-footer { padding-inline: 16px; }
   .dt-repository-modal .dt-modal-footer { flex-wrap: wrap; }
+}
+
+/* Bot connections retain the shared workspace layout and adapt to the native settings column. */
+.dt-bot-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.dt-bot-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(340px, 100%), 1fr)); gap: 16px; }
+.dt-bot-card { display: flex; flex-direction: column; gap: 12px; }
+.dt-bot-card h3 { margin: 0; font-size: 15px; }
+.dt-bot-card .dt-card-head { align-items: center; }
+.dt-bot-card .dt-connection-icon { flex: 0 0 auto; }
+.dt-bot-card .dt-actions { margin-top: auto; flex-wrap: wrap; }
+.dt-bot-stats { display: flex; flex-wrap: wrap; gap: 8px 16px; color: var(--dt-muted); font-size: 12px; }
+.dt-plugin-bot-list { display: flex; flex-direction: column; gap: 8px; }
+.dt-plugin-bot-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 12px 0; border-bottom: 1px solid var(--dt-border); }
+.dt-plugin-bot-row:last-child { border-bottom: 0; }
+.dt-plugin-bot-row .dt-row-main { min-width: 160px; }
+.dt-plugin-bot-row .dt-plugin-bot-name { margin: 0 0 5px; font-size: 14px; }
+@media (max-width: 620px) {
+  .dt-bot-metrics { grid-template-columns: 1fr; }
+  .dt-plugin-bot-row { gap: 10px; }
 }

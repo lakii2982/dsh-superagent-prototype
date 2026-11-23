@@ -103,6 +103,7 @@ function checkEmptyManager(value) {
   assert.equal(value.capacity.runningRepositories, 0)
   assert.deepEqual(value.repositories, [])
   assert.equal(value.bot, null)
+  assert.deepEqual(value.bots, [])
 }
 
 try {

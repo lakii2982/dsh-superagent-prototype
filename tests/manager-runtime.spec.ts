@@ -69,7 +69,7 @@ const fakeInstance = async (): Promise<Fake> => {
   return fake
 }
 const repositoryFor = (fake: Fake, name: string, remote: string): Repository => {
-  const created: Repository = { ...ManagerStore.identity(), port: fake.port, name, remote, directory: `/repo/${name}`, githubCli: '/bin/false', allowedGithub: [], allowedFeishu: [], enabled: true }
+  const created: Repository = { ...ManagerStore.identity(), port: fake.port, name, remote, directory: `/repo/${name}`, githubCli: '/bin/false', allowedGithub: [], allowedFeishu: ['ou_alice'], enabled: true }
   fake.id = created.id; fake.token = created.token
   return created
 }

@@ -15,7 +15,40 @@ const EventSchema = z.object({ message_id: z.string(), chat_id: z.string(), chat
 export type FeishuEvent = z.infer<typeof EventSchema>
 export const feishuThreadId = (chatId: string, rootId: string | undefined, messageId: string): string => `${chatId}:${rootId ?? messageId}`
 /** Deterministic trigger ID for a Feishu message; every read path for this message produces the same ID. */
-export const feishuTriggerId = (messageId: string): string => key('feishu', messageId)
+export const feishuTriggerId = (messageId: string, botScope?: string): string =>
+  botScope ? key('feishu-bot', botScope, key('feishu', messageId)) : key('feishu', messageId)
+/** Keep existing bot work stable while giving every new managed bot its own conversation namespace. */
+export function scopeManagedFeishuTrigger(trigger: Trigger, botId: string,
+  options: { legacy: boolean; brand?: 'feishu' | 'lark'; name?: string }): Trigger {
+  if (trigger.source !== SOURCE || !trigger.channel || !botId) throw new Error('A Feishu trigger and bot identity are required')
+  if (trigger.meta.managerBotId !== undefined && trigger.meta.managerBotId !== botId) throw new Error('Feishu trigger belongs to another bot')
+  const chat = String(trigger.meta.chatId ?? ''), message = String(trigger.meta.messageId ?? '')
+  if (!chat || !message || trigger.channel.address.chatId !== chat || trigger.channel.address.messageId !== message) {
+    throw new Error('Feishu trigger has an inconsistent message reference')
+  }
+  const originalThread = feishuThreadId(chat, typeof trigger.meta.rootId === 'string' ? trigger.meta.rootId : undefined, message)
+  const originalId = feishuTriggerId(message)
+  if ((trigger.meta.managerOriginalThreadId !== undefined && trigger.meta.managerOriginalThreadId !== originalThread)
+    || (trigger.meta.managerOriginalTriggerId !== undefined && trigger.meta.managerOriginalTriggerId !== originalId)) {
+    throw new Error('Feishu trigger has an inconsistent original message reference')
+  }
+  const id = options.legacy ? originalId : feishuTriggerId(message, botId)
+  const thread = options.legacy ? originalThread : `${chat}:bot:${botId}:${originalThread.slice(chat.length + 1)}`
+  const scoped = trigger.meta.managerBotId !== undefined
+  if (trigger.threads.length !== 1 || trigger.threads[0]?.id !== (scoped ? thread : originalThread)
+    || trigger.id !== (scoped ? id : originalId)
+    || (scoped && trigger.meta.managerLegacyBot !== options.legacy)
+    || (trigger.channel.address.botId !== undefined && trigger.channel.address.botId !== botId)) {
+    throw new Error('Feishu trigger has an inconsistent bot namespace')
+  }
+  return { ...trigger, id, threads: [{ source: SOURCE, id: thread }],
+    channel: { ...trigger.channel, thread: options.legacy ? `feishu:${chat}` : `feishu:${botId}:${chat}`,
+      address: { ...trigger.channel.address, botId, ...(options.legacy ? { legacyBot: 'true' } : { legacyBot: 'false' }),
+        ...(options.brand ? { brand: options.brand } : {}) } },
+    meta: { ...trigger.meta, managerBotId: botId, managerLegacyBot: options.legacy,
+      managerOriginalTriggerId: originalId, managerOriginalThreadId: originalThread,
+      ...(options.name ? { managerBotName: options.name } : {}), ...(options.brand ? { managerBotBrand: options.brand } : {}) } }
+}
 export const withMentionNames = (text: string, mentions: { key?: string | undefined; name?: string | undefined }[]): string =>
   mentions.reduce((result, mention) => mention.key && mention.name ? result.replaceAll(mention.key, `@${mention.name}`) : result, text)
 /**
@@ -43,11 +76,15 @@ export function feishuTrigger(input: unknown, botId: string, botAppId: string): 
       ...(event.parent_id ? { parentId: event.parent_id } : {}), ...(event.thread_id ? { threadId: event.thread_id } : {}) } }
 }
 export const feishuParent = (trigger: Trigger): string | undefined =>
-  trigger.source === SOURCE && typeof trigger.meta.parentId === 'string' ? feishuTriggerId(trigger.meta.parentId) : undefined
+  trigger.source === SOURCE && typeof trigger.meta.parentId === 'string' ? feishuTriggerId(trigger.meta.parentId,
+    typeof trigger.meta.managerBotId === 'string' && trigger.meta.managerLegacyBot !== true ? trigger.meta.managerBotId : undefined) : undefined
 export function feishuRef(trigger: Trigger): FeishuRef | undefined {
   const meta = trigger.meta as { chatId?: string; messageId?: string }
   if (trigger.source !== SOURCE || !meta.chatId || !meta.messageId) return undefined
-  return { triggerId: trigger.id, chatId: meta.chatId, messageId: meta.messageId, at: trigger.at }
+  return { triggerId: trigger.id, chatId: meta.chatId, messageId: meta.messageId, at: trigger.at,
+    ...(typeof trigger.meta.managerBotId === 'string' ? { botId: trigger.meta.managerBotId, legacyBot: trigger.meta.managerLegacyBot === true } : {}),
+    ...(typeof trigger.meta.managerOriginalThreadId === 'string' ? { originalThreadId: trigger.meta.managerOriginalThreadId } : {}),
+    ...(typeof trigger.meta.managerBotId === 'string' && typeof trigger.meta.rootId === 'string' ? { rootId: trigger.meta.rootId } : {}) }
 }
 
 /** A message from the history API; a deleted message may have no body/content. */

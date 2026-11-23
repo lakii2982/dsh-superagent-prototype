@@ -56,7 +56,11 @@ it('isolates profile storage and CLI environment while reusing only model creden
   expect(realpathSync(join(home, '.credentials.yaml'))).toBe(realpathSync(join(directory, 'operator', '.credentials.yaml')))
   expect(existsSync(join(directory, 'operator', 'profiles'))).toBe(false)
   const store = new Store(join(directory, 'repositories', repository.id, 'orchestrator.sqlite'))
-  try { expect(store.settings().executor.repositoryPath).toBe(repository.directory) } finally { store.close() }
+  try {
+    expect(store.settings().executor.repositoryPath).toBe(repository.directory)
+    expect(store.settings().sources.feishu?.config.cli).toBe('dsh-manager-bridge')
+    expect(JSON.stringify(store.settings().sources.feishu)).not.toContain('/bin/false')
+  } finally { store.close() }
 })
 it('preserves settings and avoids reprovisioning an initialized instance on restart', async () => {
   await prepare()

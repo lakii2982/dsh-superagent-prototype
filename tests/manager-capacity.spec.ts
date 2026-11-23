@@ -277,8 +277,8 @@ it('refuses to start a disabled enterprise repository', async () => {
   expect(await start(instance.repository.id)).toEqual({ status: 400, value: { error: 'Enable the enterprise repository before starting it' } })
 })
 
-it('makes the production start endpoint enforce rules before provisioning, including named checks', async () => {
-  setupManager({ enterprisePilot: true, requireProtectedBranches: true })
+it.each([false, true])('enforces named checks before provisioning (deployment gate: %s)', async requireProtectedBranches => {
+  setupManager({ enterprisePilot: true, requireProtectedBranches })
   const protectedRepo = registerInstance(1, 1, false, true), missingCheck = registerInstance(2, 1, false, true)
   const fixture = join(directory, 'github-fixture')
   writeFileSync(fixture, `#!/usr/bin/env node
@@ -297,7 +297,7 @@ console.log(JSON.stringify(path.includes('/rules/') ? rules : {full_name:path.sl
   const repositories = [{ ...protectedRepo.repository, requiredChecks: ['unit'] }, { ...missingCheck.repository, requiredChecks: ['integration'] }]
   manager.store.save(repositories, [], manager.store.revision())
   await manager.start()
-  expect((await request('state')).value).toMatchObject({ requireProtectedBranches: true })
+  expect((await request('state')).value).toMatchObject({ requireProtectedBranches })
   const provision = vi.spyOn(instanceRuntime, 'provision').mockResolvedValue(undefined)
   const launch = vi.spyOn(instanceRuntime, 'startInstance').mockImplementation(async repo => {
     instances.get(repo.id)!.online = true

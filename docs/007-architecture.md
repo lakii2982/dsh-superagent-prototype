@@ -469,7 +469,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 
 | `tests/repository.spec.ts` | Checkout identity and shared-workspace slot protection |
 | `tests/worktree.spec.ts` | Two Tickets of one repository preparing their worktrees side by side, overlapping write scopes queued, an interrupted preparation resumed, a scene someone else changed refused, cleanup, and the person's checkout left untouched |
-| `tests/manager-store.spec.ts` | Multi-repository routing, durable replay, binding changes and local protocol guards |
+| `tests/manager-store.spec.ts` | Multi-repository and bot-scoped routing, durable replay, legacy migration, authorization holds, binding changes and local protocol guards |
+| `tests/manager-multibot.spec.ts` | Multiple bot connections, bot/group/repository bindings, scoped member grants, replies, identity changes, lifecycle isolation and recovery through the management handler |
 
 | `tests/manager-instances.spec.ts` | Isolated DSH storage, CLI environment, restart preservation and legacy session migration guard |
 | `tests/manager-bootstrap.spec.ts` | Cordis manager activation, configuration and route registration without a socket listener |

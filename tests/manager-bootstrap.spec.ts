@@ -110,7 +110,7 @@ it('takes a local DSH settings change across a restart without migrating standal
     changeMode(true)
     await expect.poll(() => request('/orchestrator/mode')).toMatchObject({ mode: 'manager', desktopMultiRepository: true })
     await expect.poll(() => sourceMounted).toBe(false)
-    expect(await request('/orchestrator/manager/state')).toMatchObject({ enterprisePilot: true, requireProtectedBranches: true,
+    expect(await request('/orchestrator/manager/state')).toMatchObject({ enterprisePilot: true, requireProtectedBranches: false,
       capacity: { maxRunningRepositories: 12, runningRepositories: 0 }, repositories: [] })
     expect(existsSync(join(stateDir, 'enterprise-manager', 'manager.sqlite'))).toBe(true)
     expect(existsSync(join(stateDir, 'manager.sqlite'))).toBe(false)

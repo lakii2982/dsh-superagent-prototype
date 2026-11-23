@@ -19,7 +19,8 @@ export type RepoRoute = ({ page: 'overview' | 'source' | 'repository'; id?: unde
   | ({ page: 'execution'; id?: undefined; query?: { filter?: TicketFilter } } & RepoScope)
   | ({ page: 'execution'; id: string; query?: undefined } & RepoScope)
   | ({ page: 'settings'; id?: undefined; query: { group: SettingsGroup; source?: string; version?: string } } & RepoScope)
-export type Route = RepoRoute | { page: 'manager'; id?: undefined; query: { area: ManagerArea; bindingRepositoryId?: string } }
+export type Route = RepoRoute | { page: 'manager'; id?: undefined; query: { area: ManagerArea; editRepositoryId?: string; bindingRepositoryId?: string; bindingBotId?: string } }
+export const repositoryEditorRoute = (id: string): Route => ({ page: 'manager', query: { area: 'repositories', editRepositoryId: id } })
 export const HOME: Route = { page: 'overview' }
 export const MANAGER_HOME: Route = { page: 'manager', query: { area: 'repositories' } }
 export const MANAGER_ROUTE_KEY = 'dsh-superagent/manager/route'
@@ -65,7 +66,7 @@ export function parseRoute(value: unknown): Route | undefined {
       ...compact({ source: text('source'), version: text('version') }) } })
     case 'manager': {
       const area = pick(MANAGER_AREAS, query?.area) ?? 'repositories'
-      return { page, query: { area, ...compact({ bindingRepositoryId: area === 'bindings' ? text('bindingRepositoryId') : undefined }) } }
+      return { page, query: { area, ...compact({ editRepositoryId: area === 'repositories' ? text('editRepositoryId') : undefined, bindingRepositoryId: area === 'bindings' ? text('bindingRepositoryId') : undefined, bindingBotId: area === 'bindings' ? text('bindingBotId') : undefined }) } }
     }
     default: return undefined
   }

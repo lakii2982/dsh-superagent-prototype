@@ -15,7 +15,7 @@ const remoteName = /^[\w.-]+\/[\w.-]+$/
 const feishuUser = /^ou_[a-zA-Z0-9]+$/
 const chat = /^oc_[a-zA-Z0-9]+$/
 const repositoryUuid = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/
-const fields = ['name', 'teamName', 'directory', 'remote', 'githubCli', 'productLines', 'allowedGithub', 'allowedFeishu', 'requiredChecks']
+const fields = ['name', 'teamName', 'directory', 'remote', 'githubCli', 'productLines', 'allowedGithub', 'allowedFeishu', 'allowedFeishuByBot', 'requiredChecks']
 function equalArray(a, b) {
   if (!Array.isArray(a) || a.length !== b.length) return false
   const sorted = [...b].sort()
@@ -58,12 +58,26 @@ function unique(seen, key, label) {
 
 /** Validate the entire company before issuing a management request. */
 export function validateCompany(raw) {
-  const input = object(raw, 'company', ['expectedCounts', 'feishuCli', 'teams'])
+  const input = object(raw, 'company', ['expectedCounts', 'feishuCli', 'feishuBots', 'teams'])
   const expected = object(input.expectedCounts, 'expectedCounts', ['teams', 'productLines', 'members'])
   for (const key of ['teams', 'productLines', 'members']) {
     requireValue(Number.isSafeInteger(expected[key]) && expected[key] > 0, `expectedCounts.${key} must be a positive integer`)
   }
   const feishuCli = input.feishuCli == null ? undefined : absolute(input.feishuCli, 'feishuCli')
+  const botKeys = new Set(), botConnections = new Set()
+  const feishuBots = array(input.feishuBots ?? [], 'feishuBots').map(entry => {
+    const bot = object(entry, 'feishuBots[]', ['key', 'cli', 'profile'])
+    const key = string(bot.key, 'feishuBots[].key', identifier), cli = absolute(bot.cli, `${key}.cli`)
+    const profile = bot.profile === undefined ? undefined : string(bot.profile, `${key}.profile`)
+    requireValue(profile === undefined || profile.length <= 200, `${key}.profile exceeds 200 characters`)
+    unique(botKeys, key, 'Feishu bot key'); unique(botConnections, JSON.stringify([cli, profile ?? '']), 'Feishu bot connection')
+    return { key, cli, ...profile === undefined ? {} : { profile } }
+  })
+  if (feishuCli) {
+    unique(botKeys, 'legacy', 'Feishu bot key'); unique(botConnections, JSON.stringify([feishuCli, '']), 'Feishu bot connection')
+    feishuBots.unshift({ key: 'legacy', cli: feishuCli, legacy: true })
+  }
+  const defaultBotKey = feishuCli ? 'legacy' : feishuBots.length === 1 ? feishuBots[0].key : undefined
   const teams = array(input.teams, 'teams')
   const teamIds = new Set(), teamNames = new Set(), products = new Set(), memberIds = new Set()
   const githubUsers = new Set(), feishuUsers = new Set(), repositoryIds = new Set(), remotes = new Set(), directories = new Set(), chats = new Set()
@@ -77,15 +91,25 @@ export function validateCompany(raw) {
     unique(teamNames, teamName.toLowerCase(), 'team name')
     const members = new Map(), lines = new Map(), lineNames = new Set(), usedMembers = new Set(), usedLines = new Set()
     for (const entry of array(team.members, `${teamId}.members`)) {
-      const member = object(entry, `${teamId}.member`, ['id', 'github', 'feishu'])
+      const member = object(entry, `${teamId}.member`, ['id', 'github', 'feishu', 'feishuByBot'])
       const id = string(member.id, `${teamId}.member.id`, identifier)
       unique(memberIds, id.toLowerCase(), 'member ID')
       const github = member.github == null ? undefined : string(member.github, `${id}.github`, githubUser)
       const feishu = member.feishu == null ? undefined : string(member.feishu, `${id}.feishu`, feishuUser)
-      requireValue(github || feishu, `${id} needs a GitHub login or Feishu open_id`)
+      const scoped = object(member.feishuByBot ?? {}, `${id}.feishuByBot`, [...botKeys])
+      const feishuByBot = Object.assign(Object.create(null), Object.fromEntries(Object.entries(scoped)
+        .map(([key, value]) => [key, string(value, `${id}.feishuByBot.${key}`, feishuUser)])))
+      if (feishu) {
+        requireValue(defaultBotKey || !feishuBots.length, `${id}.feishu is ambiguous; use feishuByBot with an explicit bot key`)
+        if (defaultBotKey) {
+          requireValue(!feishuByBot[defaultBotKey] || feishuByBot[defaultBotKey] === feishu, `${id} supplies conflicting Feishu identities for ${defaultBotKey}`)
+          feishuByBot[defaultBotKey] = feishu
+        }
+      }
+      requireValue(github || Object.keys(feishuByBot).length, `${id} needs a GitHub login or Feishu open_id`)
       if (github) unique(githubUsers, github.toLowerCase(), 'GitHub identity')
-      if (feishu) unique(feishuUsers, feishu.toLowerCase(), 'Feishu identity')
-      members.set(id, { github, feishu })
+      for (const [key, openId] of Object.entries(feishuByBot)) unique(feishuUsers, `${key}:${openId}`, 'Feishu identity within a bot')
+      members.set(id, { github, feishu, feishuByBot })
     }
     for (const entry of array(team.productLines, `${teamId}.productLines`)) {
       const product = object(entry, `${teamId}.productLine`, ['id', 'name'])
@@ -99,7 +123,7 @@ export function validateCompany(raw) {
     const teamRepos = array(team.repositories, `${teamId}.repositories`)
     requireValue(teamRepos.length && lines.size, `${teamId} requires repositories and product lines`)
     for (const entry of teamRepos) {
-      const repo = object(entry, `${teamId}.repository`, ['id', 'name', 'remote', 'directory', 'githubCli', 'productLineIds', 'memberIds', 'chatIds', 'requiredChecks', 'modelCredentialsFile'])
+      const repo = object(entry, `${teamId}.repository`, ['id', 'name', 'remote', 'directory', 'githubCli', 'productLineIds', 'memberIds', 'chatIds', 'groups', 'requiredChecks', 'modelCredentialsFile'])
       const id = string(repo.id, `${teamId}.repository.id`, identifier)
       const name = string(repo.name, `${id}.name`)
       requireValue(name.length <= 100, `${id}.name exceeds 100 characters`)
@@ -119,28 +143,35 @@ export function validateCompany(raw) {
         usedLines.add(lineId)
         return lines.get(lineId)
       })
-      const chatIds = array(repo.chatIds ?? [], `${id}.chatIds`).map(chatId => {
-        const value = string(chatId, `${id}.chatId`, chat)
-        unique(chats, value.toLowerCase(), 'Feishu group')
-        return value
+      const legacyChats = array(repo.chatIds ?? [], `${id}.chatIds`)
+      requireValue(!legacyChats.length || defaultBotKey, `${id}.chatIds requires one unambiguous bot; use groups with botKey`)
+      const groups = [...legacyChats.map(chatId => ({ botKey: defaultBotKey, chatId })), ...array(repo.groups ?? [], `${id}.groups`)].map(entry => {
+        const group = object(entry, `${id}.group`, ['botKey', 'chatId'])
+        const botKey = string(group.botKey, `${id}.group.botKey`, identifier)
+        requireValue(botKeys.has(botKey), `${id} refers to an unknown Feishu bot key: ${botKey}`)
+        const chatId = string(group.chatId, `${id}.group.chatId`, chat)
+        unique(chats, `${botKey}:${chatId}`, 'Feishu bot/group binding')
+        return { botKey, chatId }
       })
-      requireValue(!chatIds.length || feishuCli, `${id} uses Feishu groups without a shared bot CLI`)
+      const chatIds = [...new Set(groups.map(group => group.chatId))]
+      const usedBots = [...new Set(groups.map(group => group.botKey))]
       const roles = allowedIds.map(memberId => {
         requireValue(members.has(memberId), `${id} refers to a member outside ${teamId}: ${memberId}`)
         const member = members.get(memberId)
-        requireValue(member.github || (member.feishu && chatIds.length), `${memberId} has no usable source for ${id}`)
+        requireValue(member.github || usedBots.some(key => member.feishuByBot[key]), `${memberId} has no usable source for ${id}`)
         usedMembers.add(memberId)
         return member
       })
       const allowedGithub = roles.flatMap(member => member.github ? [member.github] : [])
-      const allowedFeishu = chatIds.length ? roles.flatMap(member => member.feishu ? [member.feishu] : []) : []
-      requireValue(!chatIds.length || allowedFeishu.length, `${id} binds Feishu groups without authorized Feishu members`)
+      const allowedFeishuByKey = Object.fromEntries(usedBots.map(key => [key, roles.flatMap(member => member.feishuByBot[key] ? [member.feishuByBot[key]] : [])]))
+      for (const [key, ids] of Object.entries(allowedFeishuByKey)) requireValue(ids.length, `${id} binds groups through ${key} without authorized Feishu members`)
+      const allowedFeishu = feishuCli ? allowedFeishuByKey.legacy ?? [] : []
       const requiredChecks = array(repo.requiredChecks ?? [], `${id}.requiredChecks`).map(check => string(check, `${id}.requiredCheck`))
       requireValue(requiredChecks.length <= 100 && requiredChecks.every(check => check.length <= 200)
         && new Set(requiredChecks).size === requiredChecks.length, `${id}.requiredChecks must have at most 100 distinct names of at most 200 characters`)
       const modelCredentialsFile = repo.modelCredentialsFile == null ? undefined : absolute(repo.modelCredentialsFile, `${id}.modelCredentialsFile`)
       repositories.push({ id, name, directory, remote, githubCli, teamName, productLines, allowedGithub, allowedFeishu,
-        chatIds, requiredChecks, modelCredentialsFile })
+        chatIds, groups, allowedFeishuByKey, requiredChecks, modelCredentialsFile })
     }
     for (const id of lines.keys()) requireValue(usedLines.has(id), `Product line ${id} needs a repository`)
     for (const id of members.keys()) requireValue(usedMembers.has(id), `Member ${id} needs an explicit repository grant`)
@@ -150,14 +181,14 @@ export function validateCompany(raw) {
     requireValue(counts[key] === expected[key], `Expected ${expected[key]} ${key} but found ${counts[key]}`)
   }
   requireValue(repositories.length <= 12, 'A single shared manager can run at most 12 repository instances')
-  return { counts, repositories, feishuCli }
+  return { counts, repositories, feishuCli, feishuBots }
 }
 
 const git = async (directory, ...args) => (await exec('git', ['-C', directory, ...args], { timeout: 15_000 })).stdout.trim()
 
 export async function preflightLocal(company) {
   const executables = new Set(company.repositories.map(repo => repo.githubCli))
-  if (company.feishuCli) executables.add(company.feishuCli)
+  for (const bot of company.feishuBots) executables.add(bot.cli)
   await Promise.all([...executables].map(path => access(path, constants.X_OK).then(async () => {
     requireValue((await stat(path)).isFile(), `CLI must be an executable file: ${path}`)
   }).catch(error => { throw new Error(`CLI is unavailable at ${path}: ${error.code ?? error.message}`) })))
@@ -283,16 +314,43 @@ export function managerClient(raw, token, fetcher = fetch) {
 
 const repoPath = id => `repositories/${encodeURIComponent(id)}`
 const currentRepo = (state, repo) => state.repositories.find(value => nameEqual(value.remote, repo.remote))
-const hasChat = (state, id) => Object.hasOwn(state.chats ?? {}, id)
+const managerBots = state => Array.isArray(state.bots) ? state.bots : state.bot && state.botCli
+  ? [{ ...state.bot, cli: state.botCli, legacy: true, enabled: true, connected: true, chats: state.chats ?? {}, health: state.health ?? {} }] : []
+const bindingBotId = (state, binding) => binding.botId ?? managerBots(state).find(bot => bot.legacy)?.id
+const hasChat = (bot, id) => !!bot && Object.hasOwn(bot.chats ?? {}, id)
+function configuredBots(company, state) {
+  const connected = managerBots(state)
+  return new Map(company.feishuBots.map(wanted => {
+    const matches = connected.filter(bot => bot.cli === wanted.cli && (bot.profile ?? '') === (wanted.profile ?? ''))
+    requireValue(matches.length <= 1, `Several manager bots use ${wanted.key}'s CLI and profile; resolve the duplicate before applying`)
+    if (wanted.legacy && !Array.isArray(state.bots) && state.botCli) {
+      requireValue(state.botCli === wanted.cli, 'The manager already has a different Feishu CLI. Keep the existing bot identity or migrate it deliberately.')
+    }
+    return [wanted.key, matches[0]]
+  }))
+}
+function desiredRepository(repo, existing, bots) {
+  // A partial company manifest does not revoke another bot's grants on an already registered repository.
+  const allowedFeishuByBot = { ...existing?.allowedFeishuByBot }
+  for (const [key, allowed] of Object.entries(repo.allowedFeishuByKey)) {
+    const bot = bots.get(key)
+    if (bot) allowedFeishuByBot[bot.id] = allowed
+  }
+  const addressesLegacy = Object.keys(repo.allowedFeishuByKey).some(key => bots.get(key)?.legacy)
+  const allowedFeishu = bots.get('legacy')?.legacy ? repo.allowedFeishu : addressesLegacy ? [] : existing?.allowedFeishu ?? []
+  return { ...repo, allowedFeishu, allowedFeishuByBot }
+}
+const equalGrants = (a = {}, b = {}) => Object.keys(a).length === Object.keys(b).length
+  && Object.entries(b).every(([id, members]) => equalArray(a[id], members))
 
-/** Preserve existing pauses and unmentioned registrations. Refuse moves of existing repo or group ownership. */
+/** Preserve existing pauses and unmentioned registrations. Refuse moves of existing repo or bot/group ownership. */
 export function planCompany(company, state) {
   requireValue(state.enterprisePilot === true && Number.isSafeInteger(state.revision) && Array.isArray(state.repositories)
     && Array.isArray(state.bindings), 'Target is not an enterprise-mode DSH manager')
   requireValue(state.requireProtectedBranches === true, 'Target manager does not enforce production branch protections')
   requireValue(state.capacity?.maxRunningRepositories >= company.repositories.length,
     `Manager capacity ${state.capacity?.maxRunningRepositories ?? 'unknown'} cannot cover ${company.repositories.length} repositories`)
-  if (company.feishuCli && state.botCli) requireValue(company.feishuCli === state.botCli, 'The manager already has a different Feishu CLI. Keep the existing bot identity or migrate it deliberately.')
+  const bots = configuredBots(company, state)
   return company.repositories.map(repo => {
     const existing = currentRepo(state, repo)
     const checkout = state.repositories.find(entry => entry.directory === repo.directory && entry.id !== existing?.id)
@@ -301,21 +359,28 @@ export function planCompany(company, state) {
       requireValue(existing.directory === repo.directory && existing.githubCli === repo.githubCli,
         `${repo.id} already uses a different checkout or GitHub execution CLI. A migration is required.`)
     }
-    const bindings = repo.chatIds.map(id => {
-      const bound = state.bindings.find(row => row.chatId === id)
-      requireValue(!bound || bound.repositoryId === existing?.id, `Feishu group ${id} is already bound to another repository`)
-      return { id, action: !bound ? 'bind' : bound.enabled ? 'unchanged' : 'paused', verified: hasChat(state, id) }
+    const bindings = repo.groups.map(({ botKey, chatId }) => {
+      const bot = bots.get(botKey)
+      const bound = bot && state.bindings.find(row => row.chatId === chatId && bindingBotId(state, row) === bot.id)
+      requireValue(!bound || bound.repositoryId === existing?.id, `Feishu group ${chatId} for bot ${botKey} is already bound to another repository`)
+      return { id: chatId, botKey, botId: bot?.id ?? null, botEnabled: bot?.enabled !== false, botConnected: bot?.connected === true,
+        action: !bound ? 'bind' : bound.enabled ? 'unchanged' : 'paused', verified: hasChat(bot, chatId) }
     })
+    const desired = desiredRepository(repo, existing, bots)
     const changed = !!existing && (existing.name !== repo.name || existing.teamName !== repo.teamName
       || !equalArray(existing.productLines, repo.productLines) || !setEqual(existing.allowedGithub, repo.allowedGithub)
-      || !equalArray(existing.allowedFeishu, repo.allowedFeishu) || !equalArray(existing.requiredChecks ?? [], repo.requiredChecks))
-    return { repo, existing, action: !existing ? 'register' : changed ? 'update' : 'unchanged', bindings }
+      || !equalArray(existing.allowedFeishu, desired.allowedFeishu) || !equalGrants(existing.allowedFeishuByBot, desired.allowedFeishuByBot)
+      || !equalArray(existing.requiredChecks ?? [], repo.requiredChecks))
+    return { repo: desired, existing, action: !existing ? 'register' : changed ? 'update' : 'unchanged', bindings }
   })
 }
 
 export const planOutput = plan => plan.map(({ repo, existing, action, bindings }) => ({ id: repo.id, team: repo.teamName,
   products: repo.productLines, repository: repo.remote, action, enabled: existing?.enabled ?? true,
-  registrationId: existing?.id ?? null, githubMembers: repo.allowedGithub.length, feishuMembers: repo.allowedFeishu.length, groups: bindings }))
+  registrationId: existing?.id ?? null, githubMembers: repo.allowedGithub.length,
+  feishuMembers: Object.values(repo.allowedFeishuByKey).reduce((count, members) => count + members.length, 0), groups: bindings }))
+const botOutput = (company, state) => [...configuredBots(company, state)].map(([key, bot]) => ({ key, id: bot?.id ?? null,
+  name: bot?.name ?? null, action: bot ? 'unchanged' : 'connect', enabled: bot?.enabled !== false, connected: bot?.connected === true }))
 
 export async function applyCompany(company, request, start = false, checkBranches = checkAllBranchRules, stateDir) {
   let state = await request('state')
@@ -332,23 +397,48 @@ export async function applyCompany(company, request, start = false, checkBranche
     state = await request('state')
     plan = planCompany(company, state)
   }
-  if (company.feishuCli) {
-    const connecting = !state.bot || !state.botCli
-    if (connecting) state = await request('bot', 'PUT', { cli: company.feishuCli })
-    const activeGroups = plan.filter(({ repo, existing, action, bindings }) => repo.chatIds.length > 0
-      && (connecting || (start && existing?.enabled !== false) || action !== 'unchanged' || bindings.some(group => group.action === 'bind' || !group.verified)))
-    if (activeGroups.length) state = await request('chats/refresh', 'POST', {})
-    for (const { repo } of activeGroups) {
-      for (const id of repo.chatIds) requireValue(hasChat(state, id), `${repo.id} uses a Feishu group the configured bot has not joined: ${id}`)
-      const members = new Set()
-      for (const id of repo.chatIds) {
-        const response = await request(`chats/${encodeURIComponent(id)}/members`)
-        requireValue(Array.isArray(response.users), `Cannot verify members of Feishu group ${id}`)
-        for (const user of response.users) members.add(user.member_id)
-      }
-      const missing = repo.allowedFeishu.filter(id => !members.has(id)).length
-      requireValue(!missing, `${repo.id} has ${missing} allowlisted Feishu open_id(s) missing from its configured groups`)
+  const newlyConnected = new Set()
+  for (const wanted of company.feishuBots) {
+    if (configuredBots(company, state).get(wanted.key)) continue
+    if (!Array.isArray(state.bots)) {
+      requireValue(wanted.legacy && company.feishuBots.length === 1, 'This manager does not support multiple bots; update the manager before importing feishuBots')
+      state = await request('bot', 'PUT', { cli: wanted.cli, revision: state.revision })
+    } else state = await request('bots', 'POST', { cli: wanted.cli, ...wanted.profile === undefined ? {} : { profile: wanted.profile }, revision: state.revision })
+    requireValue(configuredBots(company, state).get(wanted.key), `Manager did not persist the verified bot connection for ${wanted.key}`)
+    newlyConnected.add(wanted.key)
+  }
+  plan = planCompany(company, state)
+  const activeGroups = plan.flatMap(({ repo, existing, bindings }) => [...new Set(repo.groups.map(group => group.botKey))].flatMap(botKey => {
+    const matching = bindings.filter(group => group.botKey === botKey)
+    const bot = configuredBots(company, state).get(botKey)
+    const currentMembers = existing?.allowedFeishuByBot?.[bot?.id] ?? (bot?.legacy ? existing?.allowedFeishu : [])
+    const changed = !existing || !equalArray(currentMembers, repo.allowedFeishuByKey[botKey])
+      || matching.some(group => group.action === 'bind' || !group.verified)
+    if (bot?.enabled === false) {
+      requireValue(!changed, `${repo.id} requires changes through paused bot ${botKey}; resume it explicitly before changing its groups or grants`)
+      return []
     }
+    return newlyConnected.has(botKey) || changed || (start && existing?.enabled !== false)
+      ? [{ repo, botKey, groups: repo.groups.filter(group => group.botKey === botKey) }] : []
+  }))
+  for (const botKey of new Set(activeGroups.map(group => group.botKey))) {
+    const bot = configuredBots(company, state).get(botKey)
+    const route = Array.isArray(state.bots) ? `bots/${encodeURIComponent(bot.id)}/chats/refresh` : 'chats/refresh'
+    state = await request(route, 'POST', {})
+  }
+  for (const { repo, botKey, groups } of activeGroups) {
+    const bot = configuredBots(company, state).get(botKey)
+    const members = new Set()
+    for (const { chatId } of groups) {
+      requireValue(hasChat(bot, chatId), `${repo.id} uses a Feishu group bot ${botKey} has not joined: ${chatId}`)
+      const route = Array.isArray(state.bots) ? `bots/${encodeURIComponent(bot.id)}/chats/${encodeURIComponent(chatId)}/members`
+        : `chats/${encodeURIComponent(chatId)}/members`
+      const response = await request(route)
+      requireValue(Array.isArray(response.users) && !response.has_more && !response.truncations?.length, `Cannot verify the complete member list of Feishu group ${chatId} for bot ${botKey}`)
+      for (const user of response.users) members.add(user.member_id)
+    }
+    const missing = repo.allowedFeishuByKey[botKey].filter(id => !members.has(id)).length
+    requireValue(!missing, `${repo.id} has ${missing} allowlisted Feishu open_id(s) missing from bot ${botKey}'s configured groups`)
   }
   const checked = planCompany(company, state)
   for (const { repo, existing, action } of checked) {
@@ -367,9 +457,9 @@ export async function applyCompany(company, request, start = false, checkBranche
     }
   }
   const plannedBindings = planCompany(company, state).flatMap(({ existing, bindings }) => bindings
-    .filter(binding => binding.action === 'bind').map(binding => ({ chatId: binding.id, repositoryId: existing.id, enabled: true })))
+    .filter(binding => binding.action === 'bind').map(binding => ({ botId: binding.botId, chatId: binding.id, repositoryId: existing.id, enabled: true })))
   if (plannedBindings.length) {
-    const preserved = state.bindings.map(({ chatId, repositoryId, enabled }) => ({ chatId, repositoryId, enabled }))
+    const preserved = state.bindings.map(binding => ({ ...bindingBotId(state, binding) ? { botId: bindingBotId(state, binding) } : {}, chatId: binding.chatId, repositoryId: binding.repositoryId, enabled: binding.enabled }))
     state = await request('bindings', 'PUT', { revision: state.revision, bindings: [...preserved, ...plannedBindings] })
   }
   const starts = []
@@ -382,7 +472,7 @@ export async function applyCompany(company, request, start = false, checkBranche
   }
   const output = planOutput(planCompany(company, state))
   requireValue(output.every(row => row.action === 'unchanged' && row.groups.every(group => group.action !== 'bind')), 'Manager did not persist the complete desired configuration; re-run after checking the current state')
-  return { action: 'applied', counts: company.counts, capacity: state.capacity, repositories: output, started: starts,
+  return { action: 'applied', counts: company.counts, capacity: state.capacity, bots: botOutput(company, state), repositories: output, started: starts,
     ...(modelCredentialsStaged.length ? { modelCredentialsStaged } : {}),
     ...(branchRules === undefined ? {} : { branchRules }) }
 }
@@ -392,6 +482,7 @@ async function repoStatus(request, repo, existing, action, bindings) {
   if (action !== 'unchanged') blockers.push(action === 'register' ? 'repository not registered' : 'repository configuration differs from manifest')
   if (existing?.enabled === false) blockers.push('repository paused in manager')
   if (bindings.some(binding => binding.action !== 'unchanged' || !binding.verified)) blockers.push('one or more Feishu groups are unverified or paused')
+  if (bindings.some(binding => !binding.botEnabled || !binding.botConnected)) blockers.push('one or more configured Feishu bots are paused or unavailable')
   if (!existing?.status?.online) blockers.push('repository worker is not running')
   else if (!existing.status.configured || existing.status.error || existing.status.state === 'error') blockers.push('repository worker setup is incomplete or unhealthy')
   else {
@@ -417,9 +508,14 @@ export async function statusCompany(company, request) {
   const plan = planCompany(company, state)
   const repositories = await Promise.all(plan.map(({ repo, existing, action, bindings }) => repoStatus(request, repo, existing, action, bindings)))
   const managerErrors = Object.entries(state.health ?? {}).filter(([, component]) => component.state === 'error').map(([name]) => name)
-  if (company.repositories.some(repo => repo.chatIds.length) && !state.bot) managerErrors.push('feishu-bot-unavailable')
+  const wantedBots = configuredBots(company, state)
+  for (const key of new Set(company.repositories.flatMap(repo => repo.groups.map(group => group.botKey)))) {
+    const bot = wantedBots.get(key)
+    if (!bot || bot.enabled === false || !bot.connected) managerErrors.push(`feishu-bot-unavailable:${key}`)
+    else for (const [component, health] of Object.entries(bot.health ?? {})) if (health.state === 'error') managerErrors.push(`feishu-bot-error:${key}:${component}`)
+  }
   return { action: 'status', readiness: !managerErrors.length && repositories.every(repo => repo.ready), counts: company.counts,
-    capacity: state.capacity, managerErrors, repositories, checks: 'Configuration and provider routing only. Complete a real end-to-end ticket before declaring rollout ready.' }
+    capacity: state.capacity, bots: botOutput(company, state), managerErrors, repositories, checks: 'Configuration and provider routing only. Complete a real end-to-end ticket before declaring rollout ready.' }
 }
 
 const usage = `Usage: node configure.mjs validate company.json
@@ -456,7 +552,7 @@ async function main(args) {
     const local = await preflightLocal(company)
     if (action === 'plan') {
       const state = await request('state')
-      output = { action, counts: local.counts, capacity: state.capacity, repositories: planOutput(planCompany(local, state)) }
+      output = { action, counts: local.counts, capacity: state.capacity, bots: botOutput(local, state), repositories: planOutput(planCompany(local, state)) }
     } else if (action === 'apply') {
       output = await applyCompany(local, request, start, checkAllBranchRules, stateDir)
       if (start) {

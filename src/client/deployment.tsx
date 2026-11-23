@@ -8,13 +8,13 @@ import type { ConfigPageForm } from '@deepseek-ai/dsh-client-ui-plugin-manager/c
 import { confirmPanelMode, usePanelMode, type PanelMode } from './mode.ts'
 import { LIMITS } from '../limits.ts'
 import { usePoll, type SetupView } from './api.ts'
-import { Button, Icon, InfoTip, Input, Tag } from './controls.tsx'
+import { Button, Icon, InfoTip, Input, Modal, Tag } from './controls.tsx'
 import { SaveBar, useDraft } from './draft.tsx'
 import { PanelProvider, usePanel, usePanelData } from './provider.tsx'
 import { Field, Fields } from './settings-kit.tsx'
 import { errorText, setupText, type T } from './text.ts'
 import { CheckSetupButton, Hint, KeyValues, Section, SetupMessage } from './widgets.tsx'
-import type { ManagerView } from './manager-view.ts'
+import { bindingBot, managerBots, type ManagerBotView, type ManagerView } from './manager-view.ts'
 import type { ManagerArea } from './route.ts'
 import STYLES from './client.css?raw'
 
@@ -154,25 +154,33 @@ async function readManager(): Promise<ManagerView> {
 function ManagerPluginPage({ t, form, onOpenManager }: { t: T; form: DeploymentForm; onOpenManager?: (area: ManagerArea) => void }) {
   const { data: view, error, reload } = usePoll(readManager, [], 10_000)
   const tr = (zh: string, en: string) => t('yes') === 'Yes' ? en : zh
-  const [editing, setEditing] = useState(false)
+  const [editing, setEditing] = useState<string>()
+  const editRevision = useRef<number>()
+  const initialConnection = useRef({ cli: '', profile: '' })
+  const [discard, setDiscard] = useState(false)
   const [cli, setCli] = useState('')
+  const [profile, setProfile] = useState('')
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<{ error: boolean; text: string }>()
   const connect = async (event: FormEvent) => {
     event.preventDefault()
-    if (busy || !cli.trim()) return
+    if (busy || !cli.trim() || !view) return
     setBusy(true); setNotice(undefined)
     try {
-      const response = await fetch('/orchestrator/manager/bot', { method: 'PUT',
-        headers: { 'x-orchestrator-request': '1', 'content-type': 'application/json' }, body: JSON.stringify({ cli: cli.trim() }),
+      const legacy = !view.bots
+      const path = legacy || editing === 'legacy' ? 'bot' : editing === 'new' ? 'bots' : `bots/${encodeURIComponent(editing!)}`
+      const response = await fetch(`/orchestrator/manager/${path}`, { method: legacy || editing !== 'new' ? 'PUT' : 'POST',
+        headers: { 'x-orchestrator-request': '1', 'content-type': 'application/json' }, body: JSON.stringify({ cli: cli.trim(), ...(!legacy || profile.trim() ? { profile: profile.trim() } : {}), ...(!legacy ? { revision: editRevision.current } : {}) }),
         signal: AbortSignal.timeout(90_000) })
       const result = await response.json() as { error?: string }
       if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`)
-      await reload(); setEditing(false)
+      await reload(); setEditing(undefined)
       setNotice({ error: false, text: tr('机器人连接已验证并保存。', 'Bot connection verified and saved.') })
     } catch (failure) { setNotice({ error: true, text: errorText(failure) }) }
     finally { setBusy(false) }
   }
+  const bots = view ? managerBots(view) : []
+  const beginConnection = (bot?: ManagerBotView) => { initialConnection.current = { cli: bot?.cli ?? '', profile: bot?.profile ?? '' }; setCli(bot?.cli ?? ''); setProfile(bot?.profile ?? ''); setEditing(bot?.id ?? 'new'); editRevision.current = view?.revision; setNotice(undefined) }
   const teams = new Set(view?.repositories.map(repo => repo.teamName?.trim()).filter(Boolean)).size
   const products = new Set(view?.repositories.flatMap(repo => repo.productLines ?? [])).size
   const online = view?.repositories.filter(repo => repo.status.online).length ?? 0
@@ -214,30 +222,44 @@ function ManagerPluginPage({ t, form, onOpenManager }: { t: T; form: DeploymentF
       </div>
       <section className="dt-plugin-connection">
         <div className="dt-settings-section-head"><div className="dt-row-title"><Icon name="message" size={18} />
-          <h3>{tr('飞书机器人', 'Feishu bot')}</h3></div>
-          <Tag tone={view.bot ? 'success' : 'warning'}>{view.bot ? tr('已连接', 'Connected') : tr('待连接', 'Not connected')}</Tag></div>
-        <p className="dt-plugin-bot-name">{view.bot?.name || (view.bot ? tr('机器人已验证', 'Verified bot') : tr('连接机器人，接收研发群中的工作请求', 'Connect a bot to receive requests from development groups'))}</p>
-        <p className="dt-settings-caption">{view.bot ? bound
-          ? tr(`已启用 ${bound} 个群聊绑定。工作请求按绑定关系分配到仓库。`, `${bound} group bindings are enabled. Requests are routed to their mapped repository.`)
-          : tr('还没有启用群聊绑定。先把机器人加入研发群，再绑定对应仓库。', 'No group bindings are enabled. Add the bot to a development group, then map it to a repository.')
-          : tr('使用已登录、仅以机器人身份运行的飞书 CLI 连接。', 'Connect a signed-in Feishu CLI restricted to the bot identity.')}</p>
-        {view.health.feishu?.state === 'error' && <p className="dt-error" role="status">{tr('消息接收需要处理', 'Message intake needs attention')} · {view.health.feishu.detail}</p>}
+          <h3>{tr('飞书机器人连接', 'Feishu bot connections')}</h3></div>
+          <Tag tone={bots.some(bot => bot.connected && bot.enabled) ? 'success' : 'warning'}>{tr(`${bots.filter(bot => bot.connected && bot.enabled).length} / ${bots.length} 可用`, `${bots.filter(bot => bot.connected && bot.enabled).length} / ${bots.length} available`)}</Tag></div>
+        <p className="dt-settings-caption">{tr('每个机器人可接入多个群，按“机器人 → 群聊 → 仓库”分配工作。', 'Each bot can serve multiple groups. Work follows bot → group → repository bindings.')}</p>
+        {view.legacyConnection && <div className="dt-settings-notice"><div><strong>{tr('原有机器人连接待恢复', 'Previous bot connection needs recovery')}</strong>
+          <p className="dt-error" role="alert">{view.legacyConnection.error}</p><p className="dt-hint dt-mono">{view.legacyConnection.cli}</p>
+          <Button size="sm" disabled={busy || editing !== undefined} onClick={() => { setEditing('legacy'); initialConnection.current = { cli: view.legacyConnection!.cli, profile: '' }; setCli(view.legacyConnection!.cli); setProfile(''); editRevision.current = view.revision; setNotice(undefined) }}>{tr('恢复原有连接', 'Restore previous connection')}</Button></div></div>}
+        {bots.length ? <div className="dt-plugin-bot-list">{bots.map(bot => {
+          const bindings = view.bindings.filter(binding => bindingBot(view, binding)?.id === bot.id && binding.enabled)
+          const failure = Object.values(bot.health).find(health => health.state === 'error')
+          return <div className="dt-plugin-bot-row" key={bot.id}><div className="dt-row-main"><p className="dt-plugin-bot-name">{bot.name || bot.id}</p>
+            {bot.profile && <p className="dt-settings-caption">{tr('CLI 档案', 'CLI profile')} · {bot.profile}</p>}
+            <p className="dt-settings-caption">{tr(`${Object.keys(bot.chats).length} 个已加入的群 · ${bindings.length} 个启用绑定`, `${Object.keys(bot.chats).length} joined groups · ${bindings.length} enabled bindings`)}</p>
+            {failure && <p className="dt-error" role="status">{failure.detail || tr('机器人连接需要处理', 'Bot connection needs attention')}</p>}</div>
+            <Tag tone={!bot.enabled ? 'quiet' : bot.connected && !failure ? 'success' : 'danger'}>{!bot.enabled ? tr('已停用', 'Disabled') : bot.connected ? tr('已连接', 'Connected') : tr('连接异常', 'Disconnected')}</Tag>
+            <Button size="sm" variant="outline" disabled={busy || editing !== undefined} onClick={() => beginConnection(bot)}>{tr('修改连接', 'Edit connection')}</Button></div>
+        })}</div> : <p className="dt-plugin-bot-name">{tr('连接第一个机器人，接收研发群中的工作请求。', 'Connect the first bot to receive work from development groups.')}</p>}
+        {bots.length > 0 && !bound && <p className="dt-settings-caption">{tr('还没有启用群聊绑定。先把机器人加入研发群，再绑定对应仓库。', 'No group bindings are enabled. Add a bot to a development group, then map it to a repository.')}</p>}
         {notice && <p className={notice.error ? 'dt-error' : 'dt-hint'} role={notice.error ? 'alert' : 'status'}>{notice.text}</p>}
-        {!editing && <div className="dt-actions">
-          {view.bot && <Button variant="primary" size="sm" disabled={!onOpenManager} onClick={() => onOpenManager?.('bindings')}>{tr('管理群聊绑定', 'Manage group bindings')}</Button>}
-          <Button variant={view.bot ? 'outline' : 'primary'} size="sm" onClick={() => { setCli(view.botCli); setEditing(true); setNotice(undefined) }}>
-            {view.bot ? tr('修改连接', 'Edit connection') : tr('连接机器人', 'Connect bot')}</Button>
-        </div>}
-        {editing && <form className="dt-form dt-plugin-bot-form" onSubmit={event => { void connect(event) }}>
+        {editing === undefined && <div className="dt-actions"><Button variant="primary" size="sm" disabled={!!view.legacyConnection || (!view.bots && bots.length > 0)} title={!view.bots && bots.length ? tr('更新管理服务后可添加多个机器人。', 'Update the manager service to add multiple bots.') : undefined} onClick={() => beginConnection()}>{tr('添加机器人', 'Add bot')}</Button>
+          <Button variant="outline" size="sm" disabled={!onOpenManager} onClick={() => onOpenManager?.('feishu')}>{tr('管理机器人连接', 'Manage bot connections')}</Button>
+          {bots.length > 0 && <Button variant="outline" size="sm" disabled={!onOpenManager} onClick={() => onOpenManager?.('bindings')}>{tr('管理群聊绑定', 'Manage group bindings')}</Button>}</div>}
+        {editing !== undefined && <form className="dt-form dt-plugin-bot-form" onSubmit={event => { void connect(event) }}>
+          <p className="dt-row-title">{editing === 'legacy' ? tr('恢复原有机器人连接', 'Restore the previous bot connection') : editing === 'new' ? tr('新增机器人连接', 'New bot connection') : tr('修改当前机器人连接', 'Edit this bot connection')}</p>
           <Fields disabled={busy}><Field label={tr('机器人 CLI 路径或命令', 'Bot CLI path or command')}
-            note={tr('验证通过后保存。账号凭据由飞书 CLI 管理，无需粘贴密钥。', 'Saved after verification. Credentials stay in the Feishu CLI; no secret is needed here.')}>
+            note={tr('验证通过后保存。每个连接使用对应的机器人 CLI，账号凭据由 CLI 管理。', 'Saved after verification. Each connection uses its own bot CLI; credentials remain managed by the CLI.')}>
             <Input autoFocus required value={cli} spellCheck={false} placeholder="lark-bot" onChange={event => setCli(event.target.value)} />
+          </Field><Field label={tr('CLI 配置档案（Profile）', 'CLI profile')} note={tr('可选。填写该 CLI 中已配置的档案名；同一 CLI 的不同档案可连接不同机器人。留空使用默认档案。', 'Optional. Use a configured CLI profile. Different profiles can connect different bots; leave empty for the default profile.')}>
+            <Input value={profile} spellCheck={false} onChange={event => setProfile(event.target.value)} placeholder="platform-team" />
           </Field></Fields>
-          <div className="dt-actions"><Button type="submit" variant="primary" disabled={busy || !cli.trim()}>
-            {busy ? tr('正在验证…', 'Verifying…') : tr('验证并保存', 'Verify and save')}</Button>
-            <Button disabled={busy} onClick={() => { setEditing(false); setNotice(undefined) }}>{tr('取消', 'Cancel')}</Button></div>
+          <div className="dt-actions"><Button type="submit" variant="primary" disabled={busy || !cli.trim()}>{busy ? tr('正在验证…', 'Verifying…') : tr('验证并保存', 'Verify and save')}</Button>
+            <Button disabled={busy} onClick={() => { if (cli !== initialConnection.current.cli || profile !== initialConnection.current.profile) setDiscard(true); else { setEditing(undefined); setNotice(undefined) } }}>{tr('取消', 'Cancel')}</Button></div>
         </form>}
       </section>
+      <Modal open={discard} closeLabel={tr('关闭', 'Close')} title={tr('放弃未保存的连接修改？', 'Discard connection changes?')} onClose={() => setDiscard(false)}>
+        <p>{tr('CLI 命令或配置档案的修改尚未保存。', 'Changes to the CLI command or profile have not been saved.')}</p>
+        <div className="dt-actions"><Button onClick={() => setDiscard(false)}>{tr('继续编辑', 'Continue editing')}</Button>
+          <Button variant="primary" onClick={() => { setDiscard(false); setEditing(undefined); setCli(''); setProfile(''); setNotice(undefined) }}>{tr('放弃修改', 'Discard changes')}</Button></div>
+      </Modal>
       <details className="dt-advanced-settings">
         <summary><Icon name="settings" /><span>{tr('高级部署设置', 'Advanced deployment settings')}</span></summary>
         <div><KeyValues rows={[[tr('运行方式', 'Deployment mode'), tr('统一多仓工作台', 'Shared multi-repository workspace')],

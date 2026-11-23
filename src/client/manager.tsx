@@ -9,12 +9,13 @@ import { usePanelMode } from './mode.ts'
 import { Content, Header, NavRail, Rail, ShellFrame, titleOf, type NavGroup } from './app.tsx'
 import { Button, Icon, Input, Modal, Tag } from './controls.tsx'
 import { PanelProvider, usePanel, usePanelData } from './provider.tsx'
-import { MANAGER_HOME, MANAGER_NAV_EVENT, initialLocation, lastSettingsGroup, remember, routeLabel, type Location, type ManagerArea, type RepoRoute,
+import { MANAGER_HOME, MANAGER_NAV_EVENT, initialLocation, lastSettingsGroup, remember, repositoryEditorRoute, routeLabel, type Location, type ManagerArea, type RepoRoute,
   type Route } from './route.ts'
 import { Field, Fields } from './settings-kit.tsx'
-import { errorText, type T } from './text.ts'
+import type { SetupProblem } from '../setup.ts'
+import { errorText, setupText, type T } from './text.ts'
 import { Hint, LabelValue, Section } from './widgets.tsx'
-import type { RepositoryReadiness, RepositoryView, ManagerView } from './manager-view.ts'
+import { allowedFeishuForBot, bindingBot, feishuIdentityCount, managerBots, type ManagerBotView, type RepositoryReadiness, type RepositoryView, type ManagerView } from './manager-view.ts'
 import type { DshSuperagentKey } from './locales.ts'
 import STYLES from './client.css?raw'
 
@@ -29,6 +30,8 @@ const DIMENSIONS = [
   ['delivery', '待投递', 'Deliveries'],
 ] as const satisfies readonly (readonly [keyof RepositoryReadiness, string, string])[]
 const HOLD_TEXT: Record<string, [string, string]> = {
+  'bot-disabled': ['机器人已停用，消息保留待恢复', 'bot paused; message kept'],
+  'bot-missing': ['机器人连接缺失，消息保留', 'bot connection missing; message kept'],
   'group-disabled': ['群已停用，消息保留待恢复', 'group paused; message kept'],
   'binding-missing': ['群绑定已移除，消息保留', 'binding removed; message kept'],
   'repository-disabled': ['原仓库已停用，消息保留', 'original repository disabled; message kept'],
@@ -40,16 +43,28 @@ const MANAGER_LABEL: Record<ManagerArea, DshSuperagentKey> = {
 }
 type ManagerRequest = <T>(path: string, body?: unknown, method?: string) => Promise<T>
 type ManagerModeAction = (view: ManagerView) => ReactNode
-const managerRoute = (area: ManagerArea, bindingRepositoryId?: string): Route => ({ page: 'manager', query: { area, bindingRepositoryId } })
+const managerRoute = (area: ManagerArea, bindingRepositoryId?: string, bindingBotId?: string): Route => ({ page: 'manager', query: { area, bindingRepositoryId, bindingBotId } })
 /** Signals that the operator must unlock the shared manager before requests can resume. */
 class OperatorAuthRequired extends Error {}
 /** One same-origin manager request; its `x-orchestrator-request` header is what the loopback guard checks. */
-async function managerRequest<T>(path: string, body?: unknown, method = body === undefined ? 'GET' : 'POST', token?: string): Promise<T> {
+async function managerRequest<Result>(t: T, path: string, body?: unknown, method = body === undefined ? 'GET' : 'POST', token?: string): Promise<Result> {
   const response = await fetch(`/orchestrator/manager/${path}`, { method, headers: { 'x-orchestrator-request': '1', 'content-type': 'application/json',
     ...(token ? { authorization: `Bearer ${token}` } : {}) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    signal: AbortSignal.timeout(90_000), ...(token ? { redirect: 'error' } : {}) })
-  const value = await response.json() as T & { error?: string; code?: string }
+    signal: AbortSignal.timeout(path.endsWith('/start') ? 360_000 : 90_000), ...(token ? { redirect: 'error' } : {}) })
+  const value = await response.json() as Result & { error?: string; code?: string | number; setup?: SetupProblem; branch?: string; missing?: string[] }
   if (response.status === 401 && value.code === 'operator_auth_required') throw new OperatorAuthRequired(value.error)
+  if (!response.ok && path.endsWith('/members') && (String(value.code) === '99991672' || value.error?.includes('(99991672)'))) {
+    throw new Error(managerText(t, '飞书未开放读取群成员权限。请让应用管理员为该机器人开通 im:chat.members:read，权限生效后重试。群绑定可单独保存。',
+      'Feishu denied the member list. Ask the app administrator to enable im:chat.members:read for this bot, then retry. You can save the group binding separately.'))
+  }
+  if (!response.ok && value.setup) throw new Error(setupText(t, value.setup))
+  if (!response.ok && value.code === 'branch_rules_missing' && value.missing) {
+    const labels: Record<string, string> = { 'required approving review': '至少一人批准 PR', 'required CI status check': '必需 CI 检查',
+      'force-push prevention': '禁止强制推送', 'branch-deletion prevention': '禁止删除分支' }
+    const missing = value.missing.map(item => labels[item] ?? item.replace('required CI status check ', '必需 CI 检查 ')).join('、')
+    throw new Error(managerText(t, `请在 GitHub 仓库的 Settings → Rules → Rulesets 为 ${value.branch} 启用以下规则，然后重试启动：${missing}。`,
+      `In the GitHub repository's Settings → Rules → Rulesets, enable ${value.missing.join(', ')} for ${value.branch}, then retry startup.`))
+  }
   if (!response.ok) throw new Error(value.error ?? `Request failed (${response.status})`)
   return value
 }
@@ -85,7 +100,7 @@ function managerGroups(view: ManagerView, repoId: string | undefined, area: Mana
         onSelect: () => navigate(managerRoute('deliveries')) },
       { key: 'bindings', label: t('manager.bindings'), icon: 'message', active: area === 'bindings',
         count: view.bindings.filter(binding => binding.enabled).length, onSelect: () => navigate(managerRoute('bindings')) },
-      { key: 'bot', label: t('manager.bot'), icon: 'user', active: area === 'feishu', dot: view.bot ? 'done' : 'warning',
+      { key: 'bot', label: t('manager.bot'), icon: 'user', active: area === 'feishu', dot: managerBots(view).some(bot => bot.enabled && bot.connected) ? 'done' : 'warning', count: managerBots(view).length,
         onSelect: () => navigate(managerRoute('feishu')) },
     ] },
     { title: tr('已登记仓库', 'Repositories'), items: view.repositories.map(repository => ({
@@ -100,7 +115,7 @@ function managerGroups(view: ManagerView, repoId: string | undefined, area: Mana
 /** The manager's control pages inside the shared shell: one rail, one detail column, no page tabs. */
 function ManagerControlShell({ query, manager, modeAction }: { query: Extract<Route, { page: 'manager' }>['query']; manager: ManagerApi
   modeAction?: ManagerModeAction }) {
-  const { area, bindingRepositoryId } = query
+  const { area, bindingRepositoryId, bindingBotId } = query
   const groups = managerGroups(manager.view, undefined, area, manager.navigate, manager.tr, manager.t)
   return <ShellFrame rail={<NavRail brand={{ name: manager.t('panel'), subtitle: manager.tr('统一研发底座', 'Shared development workspace') }} groups={groups}
     label={manager.t('pagesLabel')} />}>
@@ -115,15 +130,15 @@ function ManagerControlShell({ query, manager, modeAction }: { query: Extract<Ro
     </header>
     {manager.stateError && <p className="dt-error" role="status">{manager.stateError}</p>}
     {manager.error && <p className="dt-error" role="alert">{manager.error}</p>}
-    <Manager.Provider value={manager}><ManagerPage area={area} bindingRepositoryId={bindingRepositoryId} /></Manager.Provider>
+    <Manager.Provider value={manager}><ManagerPage area={area} editRepositoryId={query.editRepositoryId} bindingRepositoryId={bindingRepositoryId} bindingBotId={bindingBotId} /></Manager.Provider>
   </ShellFrame>
 }
 
-function ManagerPage({ area, bindingRepositoryId }: { area: ManagerArea; bindingRepositoryId?: string }) {
+function ManagerPage({ area, editRepositoryId, bindingRepositoryId, bindingBotId }: { area: ManagerArea; editRepositoryId?: string; bindingRepositoryId?: string; bindingBotId?: string }) {
   switch (area) {
-    case 'repositories': return <RepositoriesPage />
+    case 'repositories': return <RepositoriesPage editRepositoryId={editRepositoryId} />
     case 'deliveries': return <DeliveriesPage />
-    case 'bindings': return <BindingsPage key={bindingRepositoryId ?? ''} bindingRepositoryId={bindingRepositoryId} />
+    case 'bindings': return <BindingsPage key={`${bindingRepositoryId ?? ''}:${bindingBotId ?? ''}`} bindingRepositoryId={bindingRepositoryId} bindingBotId={bindingBotId} />
     case 'feishu': return <FeishuPage />
   }
 }
@@ -183,9 +198,9 @@ export function ManagerPanel({ t, modeAction }: { t: T; modeAction?: ManagerMode
 function ManagerWorkspace({ t, token, onUnauthorized, lock, modeAction }: { t: T; token?: string; onUnauthorized: () => void; lock?: () => void
   modeAction?: ManagerModeAction }) {
   const request: ManagerRequest = useCallback(async <T,>(path: string, body?: unknown, method?: string): Promise<T> => {
-    try { return await managerRequest<T>(path, body, method, token) }
+    try { return await managerRequest<T>(t, path, body, method, token) }
     catch (error) { if (error instanceof OperatorAuthRequired) onUnauthorized(); throw error }
-  }, [token, onUnauthorized])
+  }, [token, onUnauthorized, t])
   const { data: view, error, reload } = usePoll(() => request<ManagerView>('state'), [request], 10_000)
   const [location, setLocation] = useState<Location>(() => {
     const stored = initialLocation(MANAGER_KEY)
@@ -193,9 +208,14 @@ function ManagerWorkspace({ t, token, onUnauthorized, lock, modeAction }: { t: T
   })
   const [busy, setBusy] = useState(false)
   const [actionError, setActionError] = useState('')
+  const navigationVersion = useRef(0)
+  const working = useRef(false)
   useEffect(() => { remember(location, MANAGER_KEY) }, [location])
-  const move = useCallback((next: (current: Location) => Pick<Location, 'route' | 'stack'>) =>
-    setLocation(current => ({ ...next(current), group: lastSettingsGroup(current) })), [])
+  const move = useCallback((next: (current: Location) => Pick<Location, 'route' | 'stack'>) => {
+    navigationVersion.current++
+    setActionError('')
+    setLocation(current => ({ ...next(current), group: lastSettingsGroup(current) }))
+  }, [])
   const navigate = useCallback((route: Route, replace = false) => move(current => {
     const currentRepo = current.route.page === 'manager' ? undefined : current.route.repo
     return { route: scoped(route, currentRepo), stack: replace ? current.stack : [...current.stack, current.route].slice(-20) }
@@ -207,10 +227,13 @@ function ManagerWorkspace({ t, token, onUnauthorized, lock, modeAction }: { t: T
     return () => window.removeEventListener(MANAGER_NAV_EVENT, receive)
   }, [navigate])
   const run = useCallback(async (work: () => Promise<unknown>) => {
+    if (working.current) return false
+    const version = navigationVersion.current
+    working.current = true
     setBusy(true); setActionError('')
     try { await work(); await reload(); return true }
-    catch (failure) { setActionError(errorText(failure)); return false }
-    finally { setBusy(false) }
+    catch (failure) { if (navigationVersion.current === version) setActionError(errorText(failure)); return false }
+    finally { working.current = false; setBusy(false) }
   }, [reload])
   const tr = useCallback((zh: string, en: string) => managerText(t, zh, en), [t])
   const currentRepo = location.route.page === 'manager' ? undefined : location.route.repo
@@ -220,11 +243,11 @@ function ManagerWorkspace({ t, token, onUnauthorized, lock, modeAction }: { t: T
     if (view && currentRepo && !view.repositories.some(item => item.id === currentRepo)) navigate(MANAGER_HOME, true)
   }, [view, currentRepo, navigate])
   const openWorkspace = useCallback(async (repository: RepositoryView) => {
-    try {
+    await run(async () => {
       const launch = await request<{ url: string }>(`repositories/${repository.id}/open`, {})
       window.open(launch.url, '_blank', 'noopener,noreferrer')
-    } catch (failure) { setActionError(errorText(failure)) }
-  }, [request])
+    })
+  }, [request, run])
   if (!view) return <ShellFrame rail={<NavRail brand={{ name: t('panel'), subtitle: tr('管理', 'Manager') }} groups={[]}
     label={t('pagesLabel')} />}>
     <style>{STYLES}</style>
@@ -250,12 +273,12 @@ function ManagerWorkspace({ t, token, onUnauthorized, lock, modeAction }: { t: T
       <Tag tone={repo.starting ? 'info' : 'quiet'}>{repo.starting ? tr('启动中', 'Starting') : tr('未运行', 'Stopped')}</Tag></div>
       {actionError && <p className="dt-error" role="alert">{actionError}</p>}
       {error && <p className="dt-error" role="status">{errorText(error)}</p>}
-      <RepositoryCard repo={repo} editLabel={tr('返回仓库管理', 'Back to repositories')} onEdit={() => navigate(managerRoute('repositories'))} />
+      <RepositoryCard key={repo.id} repo={repo} onEdit={() => navigate(repositoryEditorRoute(repo.id))} />
     </Manager.Provider>
   </ShellFrame>
   return <PanelProvider key={repo.id} t={t} apiBase={`/orchestrator/manager/repositories/${encodeURIComponent(repo.id)}/api/`}
     apiAuthorization={token ? `Bearer ${token}` : undefined} onApiUnauthorized={onUnauthorized}
-    remote openSession={token ? null : () => openWorkspace(repo)} navigate={navigate} back={back}
+    remote managedRepositoryId={repo.id} enterprisePilot={view.enterprisePilot} openSession={token ? null : () => openWorkspace(repo)} navigate={navigate} back={back}
     backLabel={routeLabel(t, location.stack.at(-1) ?? MANAGER_HOME)}>
     <ManagerRepoShell location={location} route={location.route} repo={repo} manager={manager} />
   </PanelProvider>
@@ -278,9 +301,9 @@ function SetupGuide({ addRepository }: { addRepository: () => void }) {
     { title: tr('添加团队仓库', 'Add team repositories'), done: view.repositories.length > 0,
       detail: tr('用团队和产品线组织仓库，所有团队共用同一套 DSH。', 'Organize repositories by team and product line in one DSH.'),
       action: tr('添加仓库', 'Add repository'), onClick: addRepository },
-    { title: tr('连接飞书机器人', 'Connect the Feishu bot'), done: !!view.bot,
-      detail: view.bot ? view.bot.name || view.bot.id : tr('GitHub 接单可跳过；飞书接单只需连接一次。', 'Optional for GitHub. Connect once for Feishu intake.'),
-      action: view.bot ? tr('查看机器人', 'View bot') : tr('连接机器人', 'Connect bot'), onClick: () => navigate(managerRoute('feishu')) },
+    { title: tr('连接飞书机器人', 'Connect Feishu bots'), done: managerBots(view).some(bot => bot.enabled && bot.connected),
+      detail: managerBots(view).length ? tr(`已登记 ${managerBots(view).length} 个机器人，分别管理群聊接入。`, `${managerBots(view).length} registered bots with independent group connections.`) : tr('按团队连接机器人，一个机器人可服务多个群。', 'Connect bots for your teams; each bot can serve multiple groups.'),
+      action: managerBots(view).length ? tr('查看机器人', 'View bots') : tr('连接机器人', 'Connect bot'), onClick: () => navigate(managerRoute('feishu')) },
     { title: tr('把群聊绑定到仓库', 'Bind groups to repositories'), done: bound > 0,
       detail: bound ? tr(`已启用 ${bound} 个群绑定。`, `${bound} group bindings enabled.`)
         : tr('选择群、目标仓库和可提交任务的成员。', 'Choose a group, its repository and authorized requesters.'),
@@ -304,9 +327,21 @@ function SetupGuide({ addRepository }: { addRepository: () => void }) {
 function RepositoryCard({ repo, onEdit, editLabel }: { repo: RepositoryView; onEdit: (repo: RepositoryView) => void; editLabel?: string }) {
   const { t, tr, view, busy, run, request, navigate, lock } = useManager()
   const groups = view.bindings.filter(binding => binding.repositoryId === repo.id && binding.enabled)
+  const hasRequesters = repo.allowedGithub.length > 0 || feishuIdentityCount(repo) > 0
   const dimensions = repo.readiness ? DIMENSIONS.map(([key, zh, en]) => ({ key, label: tr(zh, en), item: repo.readiness![key] }))
     .filter(row => row.item.state !== 'ok') : []
-  const start = () => run(() => request(`repositories/${repo.id}/${repo.status.online ? 'stop' : 'start'}`, {}))
+  const [serviceAction, setServiceAction] = useState<'start' | 'stop'>()
+  const [serviceError, setServiceError] = useState('')
+  const start = async () => {
+    const action = repo.status.online ? 'stop' : 'start'
+    setServiceError(''); setServiceAction(action)
+    try {
+      await run(async () => {
+        try { await request(`repositories/${repo.id}/${action}`, {}) }
+        catch (failure) { setServiceError(errorText(failure)) }
+      })
+    } finally { setServiceAction(undefined) }
+  }
   const open = () => {
     void run(async () => {
       const launch = await request<{ url: string }>(`repositories/${repo.id}/open`, {})
@@ -317,27 +352,27 @@ function RepositoryCard({ repo, onEdit, editLabel }: { repo: RepositoryView; onE
     <div className="dt-card-head">
       <div className="dt-row-main"><div className="dt-row-title">{repo.name}</div>
         <div className="dt-row-meta dt-mono">{repo.remote}</div></div>
-      <Tag tone={repo.status.error ? 'danger' : !repo.status.online ? 'quiet' : repo.status.configured === true ? 'success' : 'warning'}>
-        {repo.starting ? tr('启动中', 'Starting') : repo.status.error ? tr('需要处理', 'Needs attention')
-          : repo.status.online ? repo.status.configured === true ? tr('已就绪', 'Ready') : tr('需要完成设置', 'Setup needed') : tr('未运行', 'Stopped')}</Tag>
+      <Tag tone={repo.status.error ? 'danger' : !repo.status.online ? 'quiet' : repo.status.configured === true && hasRequesters ? 'success' : 'warning'}>
+        {!repo.enabled ? tr('已停用', 'Disabled') : repo.starting ? tr('启动中', 'Starting') : repo.status.error ? tr('需要处理', 'Needs attention')
+          : repo.status.online ? repo.status.configured === true ? hasRequesters ? tr('已就绪', 'Ready') : tr('运行中 · 待授权', 'Running · authorize requesters') : tr('需要完成设置', 'Setup needed') : tr('未运行', 'Stopped')}</Tag>
     </div>
     <div className="dt-repository-meta"><RepositoryMetadata repo={repo} />
       {!repo.teamName && <p className="dt-hint">{tr('尚未分配团队', 'No team assigned')}</p>}
       <div className="dt-row-meta"><Icon name="message" size={14} /><LabelValue label={tr('接单群聊', 'Intake groups')} value={groups.length
-        ? groups.map(group => view.chats[group.chatId] || group.chatId).join(tr('、', ', ')) : tr('尚未绑定', 'None bound')} /></div>
+        ? groups.map(group => bindingBot(view, group)?.chats[group.chatId] || group.chatId).join(tr('、', ', ')) : tr('尚未绑定', 'None bound')} /></div>
       <div className="dt-row-meta"><Icon name="shield" size={14} /><span>{tr(
-        `GitHub ${repo.allowedGithub.length} 人 · 飞书 ${repo.allowedFeishu.length} 人已授权`,
-        `${repo.allowedGithub.length} GitHub · ${repo.allowedFeishu.length} Feishu identities authorized`)}</span></div>
+        `GitHub ${repo.allowedGithub.length} 人 · 飞书 ${feishuIdentityCount(repo)} 人已授权`,
+        `${repo.allowedGithub.length} GitHub · ${feishuIdentityCount(repo)} Feishu identities authorized`)}</span></div>
     </div>
-    {repo.status.error && <p className="dt-error" role="alert">{repo.status.error}</p>}
+    {(serviceError || repo.status.error) && <p className="dt-error" role="alert">{serviceError || repo.status.error}</p>}
     {dimensions.length > 0 && <details className="dt-manager-checks"><summary>{tr('查看运行检查', 'Service checks')}
       <span className="dt-count">{dimensions.length}</span></summary>
       <ul className="dt-list">{dimensions.map(row => <li className="dt-row" key={row.key}>
         <div className="dt-row-main"><div className="dt-row-title">{row.label}</div>
           <div className="dt-row-meta">{row.item.detail}</div>
           {row.item.repair === 'feishu' && <div className="dt-actions"><Button size="sm" disabled={busy}
-            onClick={() => navigate(managerRoute(view.bot ? 'bindings' : 'feishu', view.bot ? repo.id : undefined))}>
-            {view.bot ? tr('配置群聊绑定', 'Set up group bindings') : tr('连接机器人', 'Connect bot')}</Button></div>}
+            onClick={() => navigate(managerRoute(managerBots(view).length ? 'bindings' : 'feishu', managerBots(view).length ? repo.id : undefined))}>
+            {managerBots(view).length ? tr('配置群聊绑定', 'Set up group bindings') : tr('连接机器人', 'Connect bot')}</Button></div>}
           {row.item.repair === 'agent' && <div className="dt-actions">{repo.status.online
             ? <Button size="sm" disabled={busy} onClick={() => navigate({ page: 'settings', repo: repo.id, query: { group: 'execution' } })}>
               {tr('检查执行设置', 'Review execution settings')}</Button>
@@ -349,8 +384,8 @@ function RepositoryCard({ repo, onEdit, editLabel }: { repo: RepositoryView; onE
     {!!repo.pending?.total && <p className="dt-hint">{tr(`${repo.pending.total} 条待投递`, `${repo.pending.total} queued`)}</p>}
     <div className="dt-actions">
       <Button variant={repo.status.online ? 'outline' : 'primary'} size="sm" icon={<Icon name={repo.status.online ? 'pause' : 'play'} size={14} />}
-        disabled={busy || repo.starting} onClick={() => { void start() }}>
-        {repo.starting ? tr('启动中', 'Starting') : repo.status.online ? tr('停止服务', 'Stop service') : tr('启动服务', 'Start service')}</Button>
+        disabled={busy || repo.starting || (!repo.enabled && !repo.status.online)} onClick={() => { void start() }}>
+        {serviceAction === 'stop' ? tr('正在停止…', 'Stopping…') : serviceAction === 'start' || repo.starting ? tr('启动中', 'Starting') : repo.status.online ? tr('停止服务', 'Stop service') : tr('启动服务', 'Start service')}</Button>
       <Button variant="ghost" size="sm" disabled={busy} onClick={() => onEdit(repo)}>{editLabel ?? tr('仓库设置', 'Repository settings')}</Button>
       <Button variant="ghost" size="sm" disabled={busy} onClick={() => navigate(managerRoute('bindings', repo.id))}>
         {tr('绑定飞书群', 'Bind a Feishu group')}</Button>
@@ -362,12 +397,12 @@ function RepositoryCard({ repo, onEdit, editLabel }: { repo: RepositoryView; onE
   </article>
 }
 
-const EMPTY_REPOSITORY_FORM = { name: '', directory: '', remote: '', githubCli: '', allowedGithub: '', allowedFeishu: '', teamName: '', productLines: '', requiredChecks: '' }
+const EMPTY_REPOSITORY_FORM = { enabled: true, name: '', directory: '', remote: '', githubCli: '', allowedGithub: '', allowedFeishu: '', allowedFeishuByBot: {} as Record<string, string>, teamName: '', productLines: '', requiredChecks: '' }
 const teamKey = (name: string | undefined) => name ? `team:${name}` : 'unassigned'
 const normalizeRemote = (value: string) => value.trim().replace(/^https:\/\/github\.com\//i, '').replace(/\.git\/?$/, '').replace(/\/$/, '')
 
-function RepositoriesPage() {
-  const { tr, view, busy, run, request, error } = useManager()
+function RepositoriesPage({ editRepositoryId }: { editRepositoryId?: string }) {
+  const { tr, view, busy, run, request, error, navigate } = useManager()
   const [editingId, setEditingId] = useState('')
   const [editorOpen, setEditorOpen] = useState(false)
   const [discard, setDiscard] = useState(false)
@@ -380,6 +415,9 @@ function RepositoriesPage() {
   const [selectedStatus, setSelectedStatus] = useState('')
   const [search, setSearch] = useState('')
   const [memberChat, setMemberChat] = useState('')
+  const [accessBotId, setAccessBotId] = useState(() => managerBots(view)[0]?.id ?? '')
+  const accessBot = managerBots(view).find(bot => bot.id === accessBotId)
+  const memberSequence = useRef(0)
   const [members, setMembers] = useState<FeishuMember[]>([])
   const [notice, setNotice] = useState('')
   const [validation, setValidation] = useState('')
@@ -400,7 +438,16 @@ function RepositoriesPage() {
   const running = view.repositories.filter(repo => repo.status.online || repo.starting).length
   const pending = visible.reduce((count, repo) => count + (view.queues?.byRepository[repo.id] ?? repo.pending?.total ?? 0), 0)
   const github = new Set(visible.flatMap(repo => repo.allowedGithub.map(id => id.toLowerCase()))).size
-  const feishu = new Set(visible.flatMap(repo => repo.allowedFeishu)).size
+  const feishu = new Set(visible.flatMap(repo => [...repo.allowedFeishu.map(id => `legacy:${id}`),
+    ...Object.entries(repo.allowedFeishuByBot ?? {}).flatMap(([bot, users]) => users.map(id => `${bot}:${id}`))])).size
+  const accessValue = accessBot?.legacy ? [form.allowedFeishu, form.allowedFeishuByBot[accessBot.id] ?? ''].filter(Boolean).join(' ')
+    : accessBot ? form.allowedFeishuByBot[accessBot.id] ?? '' : ''
+  const setAccess = (value: string) => {
+    if (!accessBot) return
+    setForm(current => accessBot.legacy ? { ...current, allowedFeishu: value, allowedFeishuByBot: { ...current.allowedFeishuByBot, [accessBot.id]: '' } }
+      : { ...current, allowedFeishuByBot: { ...current.allowedFeishuByBot, [accessBot.id]: value } })
+  }
+  const accessCount = ids(form.allowedFeishu).length + Object.values(form.allowedFeishuByBot).reduce((sum, value) => sum + ids(value).length, 0)
   const clearFilters = () => { setSelectedTeam(''); setSelectedProduct(''); setSelectedStatus(''); setSearch('') }
   const reset = () => { setEditingId(''); setMemberChat(''); setMembers([]); setEditorOpen(false); setDiscard(false); setValidation(''); setForm(EMPTY_REPOSITORY_FORM) }
   const closeEditor = () => {
@@ -415,17 +462,25 @@ function RepositoriesPage() {
     setForm(next); initialForm.current = next; setEditorOpen(true)
   }
   const edit = (repo: RepositoryView) => {
-    const next = { name: repo.name, directory: repo.directory, remote: repo.remote, githubCli: repo.githubCli,
+    const next = { enabled: repo.enabled, name: repo.name, directory: repo.directory, remote: repo.remote, githubCli: repo.githubCli,
       allowedGithub: repo.allowedGithub.join(' '), allowedFeishu: repo.allowedFeishu.join(' '),
+      allowedFeishuByBot: Object.fromEntries(Object.entries(repo.allowedFeishuByBot ?? {}).map(([bot, users]) => [bot, users.join(' ')])),
       teamName: repo.teamName ?? '', productLines: repo.productLines?.join('\n') ?? '', requiredChecks: repo.requiredChecks?.join('\n') ?? '' }
     setEditingId(repo.id); setMemberChat(''); setMembers([]); setValidation(''); setDiscard(false); setAdvanced(false)
     setForm(next); initialForm.current = next; editingRevision.current = view.revision; setEditorOpen(true)
   }
+  useEffect(() => {
+    if (!editRepositoryId) return
+    const target = view.repositories.find(repo => repo.id === editRepositoryId)
+    if (target) edit(target)
+    navigate(managerRoute('repositories'), true)
+  }, [editRepositoryId])
   const loadMembers = async (chat: string) => {
     setMemberChat(chat); setMembers([])
-    if (chat) await run(async () => {
-      const result = await request<{ users: FeishuMember[] }>(`chats/${encodeURIComponent(chat)}/members`)
-      setMembers(result.users)
+    const sequence = ++memberSequence.current
+    if (chat && accessBot) await run(async () => {
+      const result = await request<{ users: FeishuMember[] }>(`${view.bots ? `bots/${encodeURIComponent(accessBot.id)}/` : ''}chats/${encodeURIComponent(chat)}/members`)
+      if (sequence === memberSequence.current) setMembers(result.users)
     })
   }
   const revealAdvanced = (event: FormEvent<HTMLInputElement>) => {
@@ -445,15 +500,15 @@ function RepositoriesPage() {
     if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(remote)) {
       setValidation(tr('请输入 GitHub 仓库链接或「组织名/仓库名」。', 'Enter a GitHub URL or owner/repository.')); return
     }
-    const { teamName: team, productLines: lines, requiredChecks: checks, ...names } = form
+    const { teamName: team, productLines: lines, requiredChecks: checks, allowedFeishuByBot: access, ...names } = form
     const teamName = team.trim()
     const productLines = [...new Set(lines.split(/\r?\n/).map(line => line.trim()).filter(Boolean))]
     const requiredChecks = [...new Set(checks.split(/\r?\n/).map(check => check.trim()).filter(Boolean))]
-    const enabled = view.repositories.find(repo => repo.id === editingId)?.enabled ?? true
     const done = await run(() => request(editingId ? `repositories/${editingId}` : 'repositories', { ...names,
       name: names.name.trim() || remote.split('/')[1], remote, githubCli: names.githubCli.trim(), revision: editingId ? editingRevision.current : view.revision,
       ...(teamName ? { teamName } : editingId ? { teamName: null } : {}), productLines, requiredChecks,
-      allowedGithub: ids(form.allowedGithub), allowedFeishu: ids(form.allowedFeishu), enabled }, editingId ? 'PUT' : 'POST'))
+      allowedGithub: ids(form.allowedGithub), allowedFeishu: ids(form.allowedFeishu),
+      allowedFeishuByBot: Object.fromEntries(Object.entries(access).map(([bot, users]) => [bot, ids(users)])) }, editingId ? 'PUT' : 'POST'))
     if (done) {
       setNotice(editingId ? tr('仓库设置已保存。', 'Repository settings saved.')
         : tr(`已添加 ${form.name || remote}，可继续绑定飞书群或启动服务。`, `${form.name || remote} was added. Bind a group or start its service next.`))
@@ -476,7 +531,7 @@ function RepositoriesPage() {
           ? tr(`运行名额 ${view.capacity.runningRepositories} / ${view.capacity.maxRunningRepositories}`, `${view.capacity.runningRepositories} / ${view.capacity.maxRunningRepositories} slots used`)
           : tr('包含启动中的服务', 'Including services starting')],
         [tr('飞书接单群', 'Feishu intake groups'), view.bindings.filter(binding => binding.enabled).length,
-          view.bot ? tr('机器人已连接', 'Bot connected') : tr('待连接机器人', 'Bot not connected')],
+          managerBots(view).some(bot => bot.connected && bot.enabled) ? tr(`${managerBots(view).filter(bot => bot.connected && bot.enabled).length} 个机器人已连接`, `${managerBots(view).filter(bot => bot.connected && bot.enabled).length} bots connected`) : tr('待连接机器人', 'Bot not connected')],
       ].map(([label, value, detail]) => <div className="dt-manager-metric" key={label}><span>{label}</span><strong>{value}</strong><small>{detail}</small></div>)}
     </div>
     <SetupGuide addRepository={addRepository} />
@@ -531,6 +586,9 @@ function RepositoriesPage() {
             <div className="dt-grid2"><Field label={tr('名称', 'Name')}><Input required value={form.name} onChange={event => setForm({ ...form, name: event.target.value })} /></Field>
               <Field label={tr('研发团队', 'Team')}><Input maxLength={100} list="dt-manager-teams" value={form.teamName}
                 placeholder={tr('选择已有团队或填写新团队', 'Select or enter a team')} onChange={event => setForm({ ...form, teamName: event.target.value })} /></Field></div>
+            {editingId && <label className="dt-check"><input type="checkbox" checked={form.enabled}
+              disabled={view.repositories.some(repo => repo.id === editingId && (repo.status.online || repo.starting))}
+              onChange={event => setForm({ ...form, enabled: event.target.checked })} />{tr('启用仓库（停止服务后可修改）', 'Enable repository (editable when stopped)')}</label>}
             <datalist id="dt-manager-teams">{teams.map(team => <option key={team} value={team} />)}</datalist>
             <Field label={tr('产品线', 'Product lines')} note={tr('每行一条，可关联多条产品线。', 'One product line per row; multiple lines are supported.')}>
               <textarea rows={2} className="dt-textarea" value={form.productLines} onChange={event => setForm({ ...form, productLines: event.target.value })} /></Field>
@@ -540,22 +598,25 @@ function RepositoriesPage() {
               note={tr('仅这些身份可以从 GitHub 发起新任务。', 'Only these identities can start new tasks from GitHub.')}>
               <Input value={form.allowedGithub} placeholder="alice bob" onChange={event => setForm({ ...form, allowedGithub: event.target.value })} /></Field>
             <details className="dt-manager-checks"><summary>{tr('飞书成员权限', 'Feishu member access')}
-              <span className="dt-count">{ids(form.allowedFeishu).length}</span></summary>
-              <p className="dt-hint">{tr('也可以在「群聊绑定」时按成员姓名授权。', 'You can also authorize members by name while binding a group.')}</p>
+              <span className="dt-count">{accessCount}</span></summary>
+              <p className="dt-hint">{tr('按机器人分别授权。同一个人的飞书身份在不同机器人下可能不同，也可在群聊绑定时按姓名选择。', 'Grant access per bot. A person may have different Feishu IDs under different bots; select people by name in Group bindings.')}</p>
+              <Field label={tr('授权所属机器人', 'Bot for these grants')}><select className="dt-select" value={accessBotId} onChange={event => { setAccessBotId(event.target.value); setMemberChat(''); setMembers([]); memberSequence.current++ }}>
+                <option value="">{tr('请选择机器人', 'Choose a bot')}</option>{managerBots(view).map(bot => <option key={bot.id} value={bot.id}>{bot.name || bot.id}</option>)}
+              </select></Field>
               <Field label={tr('选择群以读取成员', 'Choose a group to load members')}>
-                <select className="dt-select" value={memberChat} disabled={!view.bot} onChange={event => { void loadMembers(event.target.value) }}>
-                  <option value="">{tr('请选择', 'Choose')}</option>{Object.entries(view.chats).map(([id, name]) => <option key={id} value={id}>{name || id}</option>)}
+                <select className="dt-select" value={memberChat} disabled={!accessBot?.connected || !accessBot.enabled} onChange={event => { void loadMembers(event.target.value) }}>
+                  <option value="">{tr('请选择', 'Choose')}</option>{Object.entries(accessBot?.chats ?? {}).map(([id, name]) => <option key={id} value={id}>{name || id}</option>)}
                 </select></Field>
               {members.length > 0 && <div className="dt-checks">{members.map(member => <label className="dt-check" key={member.member_id}>
-                <input type="checkbox" checked={ids(form.allowedFeishu).includes(member.member_id)} onChange={event => {
-                  const selected = ids(form.allowedFeishu).filter(id => id !== member.member_id)
+                <input type="checkbox" checked={ids(accessValue).includes(member.member_id)} onChange={event => {
+                  const selected = ids(accessValue).filter(id => id !== member.member_id)
                   if (event.target.checked) selected.push(member.member_id)
-                  setForm({ ...form, allowedFeishu: selected.join(' ') })
+                  setAccess(selected.join(' '))
                 }} /> {member.name}</label>)}</div>}
               <Field label={tr('已授权的飞书用户 ID', 'Authorized Feishu user IDs')} note={tr('可在这里移除已有授权，多个 ID 用空格分隔。', 'Remove existing grants here; separate IDs with spaces.')}>
-                <Input value={form.allowedFeishu} onChange={event => setForm({ ...form, allowedFeishu: event.target.value })} /></Field>
+                <Input value={accessValue} disabled={!accessBot} onChange={event => setAccess(event.target.value)} /></Field>
             </details>
-            {!ids(form.allowedGithub).length && !ids(form.allowedFeishu).length && <p className="dt-hint">{tr(
+            {!ids(form.allowedGithub).length && !accessCount && <p className="dt-hint">{tr(
               '尚未授权接单人。仓库可以先保存，授权后才能开始新任务。', 'No requesters are authorized. Save now and grant access before starting new tasks.')}</p>}
           </section>
           <details className="dt-form-section" open={advanced} onToggle={event => setAdvanced(event.currentTarget.open)}>
@@ -568,9 +629,9 @@ function RepositoriesPage() {
               <Input required={!view.enterprisePilot} onInvalid={revealAdvanced} value={form.directory} disabled={!!editingId} list="dt-manager-workspaces"
                 onChange={event => setForm({ ...form, directory: event.target.value })} placeholder="/projects/my-repo" /></Field>
             <datalist id="dt-manager-workspaces">{view.workspaces.map(path => <option key={path} value={path} />)}</datalist>
-            <Field label={tr('必需的 CI 检查', 'Required CI checks')} note={tr(
-              '每行一个 GitHub 检查名称。企业模式启动时会核对默认分支规则；留空仍要求至少一个必需的 CI 检查。此项不会修改 GitHub 规则。',
-              'One GitHub check name per line. Enterprise startup verifies default-branch rules; an empty list still requires at least one CI check. This does not change GitHub rules.')}>
+            <Field label={tr('必需的 CI 检查', 'Required CI checks')} note={view.requireProtectedBranches
+              ? tr('企业部署要求默认分支启用审批、必需 CI、禁止强推和删除。每行可指定一个必须通过的 CI 名称。', 'This deployment requires review, CI, and protection against force pushes and deletion. Enter one required check name per line.')
+              : tr('选填。填写后，启动此仓库时会核验默认分支的保护规则和下列 CI 名称，每行一个。', 'Optional. Enter one check name per line to require default-branch protections and these checks at startup.')}>
               <textarea rows={3} className="dt-textarea" value={form.requiredChecks} placeholder={'ci/test\nci/typecheck'}
                 onChange={event => setForm({ ...form, requiredChecks: event.target.value })} /></Field>
           </details>
@@ -587,144 +648,163 @@ function RepositoriesPage() {
   </>
 }
 
-function BindingsPage({ bindingRepositoryId }: { bindingRepositoryId?: string }) {
+function BindingsPage({ bindingRepositoryId, bindingBotId }: { bindingRepositoryId?: string; bindingBotId?: string }) {
   const { tr, view, busy, run, request, navigate } = useManager()
+  const bots = managerBots(view)
+  const [selectedBot, setSelectedBot] = useState(() => bots.find(bot => bot.id === bindingBotId)?.id ?? (bots.length === 1 ? bots[0]!.id : ''))
   const [selectedChat, setSelectedChat] = useState('')
   const [selectedRepo, setSelectedRepo] = useState(() => view.repositories.find(repo => repo.id === bindingRepositoryId && repo.enabled)?.id ?? '')
   const [members, setMembers] = useState<FeishuMember[]>()
   const [memberIds, setMemberIds] = useState<string[]>([])
   const [saved, setSaved] = useState('')
+  const [validation, setValidation] = useState('')
   const [memberSearch, setMemberSearch] = useState('')
+  const draftRevision = useRef(view.revision)
+  const [memberError, setMemberError] = useState('')
+  const memberRequest = useRef(0)
+  const bot = bots.find(item => item.id === selectedBot)
   const repository = view.repositories.find(repo => repo.id === selectedRepo && repo.enabled)
-  const chats = Object.entries(view.chats)
-  const knownChat = selectedChat && Object.hasOwn(view.chats, selectedChat)
-  const hasRequester = memberIds.length > 0 || members?.some(member => repository?.allowedFeishu.includes(member.member_id))
-  const refresh = () => run(() => request('chats/refresh', {}))
-  const loadMembers = (chatId: string) => run(async () => {
-    const result = await request<{ users: FeishuMember[] }>(`chats/${encodeURIComponent(chatId)}/members`)
-    setMembers(result.users)
-  })
+  const chats = Object.entries(bot?.chats ?? {})
+  const knownChat = !!bot && !!selectedChat && Object.hasOwn(bot.chats, selectedChat)
+  const allowed = repository ? allowedFeishuForBot(repository, bot) : []
+  const hasRequester = memberIds.length > 0 || members?.some(member => allowed.includes(member.member_id))
+  const botRoute = (connection: ManagerBotView, suffix: string) => view.bots ? `bots/${encodeURIComponent(connection.id)}/${suffix}` : suffix
+  const refresh = () => bot && run(() => request(botRoute(bot, 'chats/refresh'), {}))
+  const clearMembers = () => { memberRequest.current++; setMemberError(''); setMembers(undefined); setMemberIds([]); setSaved(''); setValidation(''); setMemberSearch('') }
+  const chooseBot = (id: string) => { setSelectedBot(id); setSelectedChat(''); clearMembers(); draftRevision.current = view.revision }
+  const loadMembers = (connection: ManagerBotView, chatId: string) => {
+    const sequence = ++memberRequest.current
+    return run(async () => {
+      setMemberError('')
+      try {
+        const result = await request<{ users: FeishuMember[] }>(botRoute(connection, `chats/${encodeURIComponent(chatId)}/members`))
+        if (memberRequest.current === sequence) setMembers(result.users)
+      } catch (failure) {
+        if (memberRequest.current === sequence) setMemberError(errorText(failure))
+      }
+    })
+  }
   const chooseChat = (chatId: string) => {
-    setSelectedChat(chatId); setMembers(undefined); setMemberIds([]); setSaved(''); setMemberSearch('')
-    const binding = view.bindings.find(item => item.chatId === chatId)
+    setSelectedChat(chatId); clearMembers(); draftRevision.current = view.revision
+    const binding = view.bindings.find(item => bindingBot(view, item)?.id === selectedBot && item.chatId === chatId)
     if (binding && view.repositories.some(repo => repo.id === binding.repositoryId && repo.enabled)) setSelectedRepo(binding.repositoryId)
-    if (chatId) void loadMembers(chatId)
+    if (chatId && bot) void loadMembers(bot, chatId)
   }
   const save = async (event: FormEvent) => {
-    event.preventDefault()
-    if (!knownChat || !repository || !view.bot) return
-    const bindings = view.bindings.filter(item => item.chatId !== selectedChat).map(({ effectiveAt, ...binding }) => binding)
-    bindings.push({ chatId: selectedChat, repositoryId: repository.id, enabled: true })
-    const grant = memberIds.length ? { chatId: selectedChat, repositoryId: repository.id, memberIds } : undefined
-    const done = await run(() => request('bindings', { revision: view.revision, bindings, grant }, 'PUT'))
+    event.preventDefault(); setValidation('')
+    if (!knownChat || !repository || !bot?.connected || !bot.enabled) return
+    if (draftRevision.current !== view.revision) {
+      setValidation(tr('配置已被其他操作更新。请重新选择群聊后保存，当前选择尚未提交。', 'Configuration changed elsewhere. Select the group again before saving; no changes were submitted.')); return
+    }
+    const bindings = view.bindings.filter(item => !(bindingBot(view, item)?.id === bot.id && item.chatId === selectedChat))
+      .map(({ effectiveAt, ...binding }) => binding)
+    bindings.push({ ...(view.bots ? { botId: bot.id } : {}), chatId: selectedChat, repositoryId: repository.id, enabled: true })
+    const grant = memberIds.length ? { ...(view.bots ? { botId: bot.id } : {}), chatId: selectedChat, repositoryId: repository.id, memberIds } : undefined
+    const done = await run(() => request('bindings', { revision: draftRevision.current, bindings, grant }, 'PUT'))
     if (done) {
-      const chatName = view.chats[selectedChat] || selectedChat
-      setSaved(tr(`已将 ${chatName} 绑定到 ${repository.name}。`, `${chatName} is now bound to ${repository.name}.`))
-      setSelectedChat(''); setSelectedRepo(''); setMembers(undefined); setMemberIds([])
+      const chatName = bot.chats[selectedChat] || selectedChat
+      setSaved(tr(`已绑定：${bot.name || bot.id} → ${chatName} → ${repository.name}。`, `Bound: ${bot.name || bot.id} → ${chatName} → ${repository.name}.`))
+      setSelectedChat(''); setMembers(undefined); setMemberIds([])
     }
   }
-  const toggle = (chatId: string) => run(() => request('bindings', { revision: view.revision,
-    bindings: view.bindings.map(({ effectiveAt, ...item }) => item.chatId === chatId ? { ...item, enabled: !item.enabled } : item) }, 'PUT'))
+  const toggle = (connectionId: string | undefined, chatId: string) => run(() => request('bindings', { revision: view.revision,
+    bindings: view.bindings.map(({ effectiveAt, ...item }) => bindingBot(view, item)?.id === connectionId && item.chatId === chatId
+      ? { ...item, enabled: !item.enabled } : item) }, 'PUT'))
   return <>
     <div className="dt-manager-hero"><div><p className="dt-manager-eyebrow">{tr('飞书接单', 'Feishu intake')}</p>
-      <h2>{tr('把需求送到正确的仓库', 'Route every request to the right repository')}</h2>
-      <p>{tr('为每个研发群指定目标仓库，并按成员授权。一个仓库可以连接多个群。',
-        'Assign a repository to each development group and authorize its members. One repository can serve multiple groups.')}</p></div>
+      <h2>{tr('机器人、群聊、仓库，逐一对应', 'Connect bots, groups and repositories')}</h2>
+      <p>{tr('一个机器人可以服务多个群。每个“机器人＋群聊”对应一个仓库，多个群可以协作同一仓库。',
+        'One bot can serve many groups. Each bot and group pair routes to one repository; several groups can share a repository.')}</p></div>
       <Tag tone={view.bindings.some(binding => binding.enabled) ? 'success' : 'quiet'}>{tr(
-        `${view.bindings.filter(binding => binding.enabled).length} 个群接单中`, `${view.bindings.filter(binding => binding.enabled).length} groups enabled`)}</Tag>
+        `${view.bindings.filter(binding => binding.enabled).length} 个绑定已启用`, `${view.bindings.filter(binding => binding.enabled).length} bindings enabled`)}</Tag>
     </div>
-    <Section title={tr('机器人已加入的群', 'Groups the bot has joined')} action={<Button variant="outline" size="sm"
-      icon={<Icon name="refresh" size={14} />} disabled={busy || !view.bot} onClick={() => { void refresh() }}>
-      {tr('刷新群列表', 'Refresh groups')}</Button>} hint={tr('只接收 @机器人的新需求；群停用后暂停接单与自动回复，队列保留。',
-      'Only new requests mentioning the bot are accepted. Disabling a group pauses intake and replies but keeps its queue.')}>
-      {view.bot ? <Hint>{tr(`机器人 ${view.bot.name || view.bot.id} · 已找到 ${chats.length} 个群。加群后请刷新群列表。`,
-        `Bot ${view.bot.name || view.bot.id} · ${chats.length} groups found. Refresh after adding the bot to a group.`)}</Hint>
-        : <div className="dt-actions"><Hint>{tr('先连接机器人，再把它加入要接单的群。', 'Connect a bot and add it to the groups that will submit tasks.')}</Hint>
-          <Button variant="primary" size="sm" disabled={busy} onClick={() => navigate(managerRoute('feishu'))}>
-            {tr('连接机器人', 'Connect bot')}</Button></div>}
-      {!view.repositories.some(repo => repo.enabled) && <div className="dt-actions">
-        <Hint>{tr('先添加至少一个可用的目标仓库。', 'Register at least one enabled target repository first.')}</Hint>
-        <Button variant="outline" size="sm" disabled={busy} onClick={() => navigate(managerRoute('repositories'))}>
-          {tr('添加团队仓库', 'Register a team repository')}</Button>
-      </div>}
-    </Section>
-    <Section title={tr('把群聊绑定到仓库', 'Bind a group to a repository')} hint={tr('一个群只能绑定一个仓库；一个仓库可以绑定多个群。',
-      'A group binds to one repository; a repository may have several groups.')}>
+    <Section title={tr('把群聊绑定到仓库', 'Bind a group to a repository')}>
+      {!bots.length && <div className="dt-actions"><Hint>{tr('先连接机器人，再把它加入需要接单的群。', 'Connect a bot and add it to the groups that will submit tasks.')}</Hint>
+        <Button variant="primary" size="sm" disabled={busy} onClick={() => navigate(managerRoute('feishu'))}>{tr('连接机器人', 'Connect bot')}</Button></div>}
       <form className="dt-form dt-block" onSubmit={event => { void save(event) }}>
-        <Fields disabled={busy || !view.bot || !chats.length}>
-          <Field label={tr('飞书群', 'Feishu group')}><select className="dt-select" required value={selectedChat}
-            onChange={event => chooseChat(event.target.value)}><option value="">{tr('请选择', 'Choose')}</option>
+        <Fields disabled={busy || !bots.length}>
+          <Field label={tr('飞书机器人', 'Feishu bot')}><select className="dt-select" required value={selectedBot} onChange={event => chooseBot(event.target.value)}>
+            <option value="">{tr('先选择机器人', 'Choose a bot first')}</option>{bots.map(item => <option key={item.id} value={item.id}>{item.name || item.id}{!item.enabled ? tr('（已停用）', ' (disabled)') : !item.connected ? tr('（连接异常）', ' (disconnected)') : ''}</option>)}</select></Field>
+          <Field label={tr('飞书群', 'Feishu group')}><select className="dt-select" required value={selectedChat} disabled={!bot?.connected || !bot.enabled}
+            onChange={event => chooseChat(event.target.value)}><option value="">{tr('选择该机器人已加入的群', 'Choose a group joined by this bot')}</option>
             {chats.map(([id, name]) => <option key={id} value={id}>{name || id}</option>)}</select></Field>
           <Field label={tr('目标仓库', 'Target repository')}><select className="dt-select" required value={selectedRepo}
             onChange={event => { setSelectedRepo(event.target.value); setMemberIds([]); setSaved('') }}>
-            <option value="">{tr('请选择', 'Choose')}</option>
-            {view.repositories.filter(repo => repo.enabled).map(repo => <option key={repo.id} value={repo.id}>
-              {[repo.teamName, repo.name].filter(Boolean).join(' · ')}</option>)}
-          </select></Field>
+            <option value="">{tr('请选择', 'Choose')}</option>{view.repositories.filter(repo => repo.enabled).map(repo => <option key={repo.id} value={repo.id}>
+              {[repo.teamName, repo.name].filter(Boolean).join(' · ')}</option>)}</select></Field>
         </Fields>
+        {bot && <div className="dt-actions"><Hint>{tr(`${bot.name || bot.id} · ${chats.length} 个已加入的群。`, `${bot.name || bot.id} · ${chats.length} joined groups.`)}</Hint>
+          <Button variant="outline" size="sm" icon={<Icon name="refresh" size={14} />} disabled={busy || !bot.connected || !bot.enabled}
+            onClick={() => { void refresh() }}>{tr('刷新群列表', 'Refresh groups')}</Button></div>}
+        {bot && (!bot.enabled || !bot.connected) && <p className="dt-error" role="status">{tr('这个机器人当前不可接单。请先在机器人连接中恢复服务。', 'This bot cannot receive work now. Restore its connection first.')}</p>}
+        {!view.repositories.some(repo => repo.enabled) && <div className="dt-actions"><Hint>{tr('先添加至少一个可用的目标仓库。', 'Register at least one enabled target repository first.')}</Hint>
+          <Button variant="outline" size="sm" onClick={() => navigate(managerRoute('repositories'))}>{tr('添加团队仓库', 'Register a team repository')}</Button></div>}
         {repository && <div className="dt-binding-preview"><Icon name="message" size={18} /><div>
-          <strong>{knownChat ? view.chats[selectedChat] || selectedChat : tr('选择一个飞书群', 'Choose a Feishu group')}</strong>
-          <span> → {repository.name}</span><p className="dt-hint">{[repository.teamName, ...(repository.productLines ?? [])].filter(Boolean).join(' · ') || repository.remote}</p>
-          <p className="dt-hint">{repository.status.online ? tr('目标仓库运行中', 'The target repository is running')
-            : tr('目标仓库尚未运行，保存绑定后需要启动服务。', 'The target repository is stopped. Start its service after saving the binding.')}</p>
+          <strong>{bot?.name || tr('选择机器人', 'Choose a bot')} → {knownChat ? bot?.chats[selectedChat] || selectedChat : tr('选择飞书群', 'Choose a Feishu group')} → {repository.name}</strong>
+          <p className="dt-hint">{[repository.teamName, ...(repository.productLines ?? [])].filter(Boolean).join(' · ') || repository.remote}</p>
+          <p className="dt-hint">{repository.status.online ? tr('目标仓库运行中', 'The target repository is running') : tr('目标仓库尚未运行，保存绑定后需要启动服务。', 'The target repository is stopped. Start its service after saving the binding.')}</p>
         </div></div>}
         {knownChat && <Section title={tr('允许接单的群成员', 'Group members allowed to submit tasks')}>
-          <Hint>{tr('只授权勾选的成员，已有的仓库授权会保留。可在「仓库设置」中撤销。',
-            'Only selected members receive new access. Existing repository grants are kept and can be revoked in Repository settings.')}</Hint>
+          <Hint>{tr('授权仅对当前机器人与目标仓库生效。已有授权会保留，可在仓库设置中按机器人撤销。', 'Access applies to this bot and repository. Existing grants are preserved and can be revoked per bot in Repository settings.')}</Hint>
+          {memberError && <p className="dt-error" role="alert">{memberError}</p>}
           {members?.length ? <fieldset className="dt-fieldset" disabled={busy || !repository}>
-            <Input type="search" icon={<Icon name="search" />} aria-label={tr('搜索群成员', 'Search group members')}
-              placeholder={tr('按姓名搜索成员', 'Search members by name')} value={memberSearch} onChange={event => setMemberSearch(event.target.value)} />
+            <Input type="search" icon={<Icon name="search" />} aria-label={tr('搜索群成员', 'Search group members')} placeholder={tr('按姓名搜索成员', 'Search members by name')}
+              value={memberSearch} onChange={event => setMemberSearch(event.target.value)} />
             <p className="dt-hint">{tr(`本次新增授权 ${memberIds.length} 人`, `${memberIds.length} new access grants selected`)}</p>
-            <div className="dt-checks">{members.filter(member => !memberSearch.trim()
-              || member.name.toLowerCase().includes(memberSearch.trim().toLowerCase())).map(member => {
-              const alreadyAllowed = repository?.allowedFeishu.includes(member.member_id) ?? false
-              return <label className="dt-check" key={member.member_id}>
-                <input type="checkbox" checked={alreadyAllowed || memberIds.includes(member.member_id)} disabled={alreadyAllowed}
-                  onChange={event => {
-                    const { checked } = event.target
-                    setMemberIds(ids => checked ? [...ids, member.member_id] : ids.filter(id => id !== member.member_id))
-                  }} />
-                {member.name || member.member_id}{alreadyAllowed && tr('（已授权）', ' (authorized)')}
-              </label>
+            <div className="dt-checks">{members.filter(member => !memberSearch.trim() || member.name.toLowerCase().includes(memberSearch.trim().toLowerCase())).map(member => {
+              const alreadyAllowed = allowed.includes(member.member_id)
+              return <label className="dt-check" key={member.member_id}><input type="checkbox" checked={alreadyAllowed || memberIds.includes(member.member_id)} disabled={alreadyAllowed}
+                onChange={event => { const checked = event.target.checked; setMemberIds(ids => checked ? [...ids, member.member_id] : ids.filter(id => id !== member.member_id)) }} />
+                {member.name || member.member_id}{alreadyAllowed && tr('（已授权）', ' (authorized)')}</label>
             })}</div>
           </fieldset> : members ? <Hint>{tr('这个群没有可授权的用户。', 'No eligible users were found in this group.')}</Hint>
-            : <Button variant="outline" size="sm" disabled={busy} onClick={() => { void loadMembers(selectedChat) }}>
-              {busy ? tr('正在读取群成员', 'Loading group members') : tr('读取群成员', 'Load group members')}
-            </Button>}
-          {repository && members && !hasRequester && <Hint>{tr('这个群还没有获得接单权限的成员。勾选至少一人后可从群里试单。',
-            'Nobody in this group can submit tasks yet. Select at least one person to try a request from the group.')}</Hint>}
+            : <Button variant="outline" size="sm" disabled={busy} onClick={() => { if (bot) void loadMembers(bot, selectedChat) }}>{tr('读取群成员', 'Load group members')}</Button>}
+          {repository && members && !hasRequester && <Hint>{tr('这个群还没有获得接单权限的成员。勾选至少一人后可从群里试单。', 'Nobody in this group can submit tasks yet. Select at least one person to try a request from the group.')}</Hint>}
         </Section>}
-        <p className="dt-hint">{tr('换绑只影响新话题，旧话题继续回到原仓库；有未送达消息或开放工单时不能换绑。',
-          'Rebinding affects new topics only; old topics stay with their original repository. Queued messages or open tickets block rebinding.')}</p>
-        <div className="dt-actions"><Button variant="primary" type="submit" disabled={busy || !view.bot || !knownChat || !repository}>
+        <p className="dt-hint">{tr('换绑只影响新话题，旧话题继续回到原仓库；有未送达消息或开放工单时不能换绑。', 'Rebinding affects new topics only; old topics stay with their original repository. Queued messages or open tickets block rebinding.')}</p>
+        {validation && <p className="dt-error" role="alert">{validation}</p>}
+        <div className="dt-actions"><Button variant="primary" type="submit" disabled={busy || !bot?.connected || !bot.enabled || !knownChat || !repository}>
           {memberIds.length ? tr('保存绑定与授权', 'Save binding and access') : tr('保存绑定', 'Save binding')}</Button></div>
-        {saved && <div className="dt-actions"><p className="dt-hint" role="status">{saved}</p>
-          <Button variant="outline" size="sm" onClick={() => navigate(managerRoute('repositories'))}>
-            {tr('回仓库管理启动服务', 'Return to repositories to start service')}</Button></div>}
+        {saved && <div className="dt-actions"><p className="dt-hint" role="status">{saved}</p><Button variant="outline" size="sm" onClick={() => navigate(managerRoute('repositories'))}>
+          {tr('回仓库管理启动服务', 'Return to repositories to start service')}</Button></div>}
       </form>
     </Section>
     <Section title={tr('当前绑定', 'Current bindings')} count={view.bindings.length}>
-      {view.bindings.length ? <div className="dt-list dt-cards dt-binding-grid">{view.bindings.map(binding => <div className="dt-card" key={binding.chatId}>
-        <div className="dt-card-head"><div className="dt-row-main"><div className="dt-row-title">{view.chats[binding.chatId] || binding.chatId}</div>
-          <div className="dt-row-meta">→ {view.repositories.find(repository => repository.id === binding.repositoryId)?.name
-            ?? binding.repositoryId}</div></div><Tag tone={binding.enabled ? 'success' : 'quiet'}>{binding.enabled
-              ? tr('接单中', 'Enabled') : tr('已暂停', 'Paused')}</Tag>
-          <Button variant="outline" size="sm" disabled={busy} onClick={() => { void toggle(binding.chatId) }}>{binding.enabled
-            ? tr('停用群接单与回复', 'Disable group intake and replies') : tr('恢复群接单与回复', 'Enable group intake and replies')}</Button>
-        </div>
-      </div>)}</div> : <Hint>{tr('还没有绑定。', 'No binding yet.')}</Hint>}
+      {view.bindings.length ? <div className="dt-list dt-cards dt-binding-grid">{view.bindings.map(binding => {
+        const connection = bindingBot(view, binding)
+        const target = view.repositories.find(item => item.id === binding.repositoryId)
+        const bindingStatus = !binding.enabled ? tr('已暂停', 'Paused')
+          : !connection?.enabled || !connection.connected ? tr('机器人不可用', 'Bot unavailable')
+          : !target?.enabled ? tr('仓库已停用', 'Repository disabled')
+          : !allowedFeishuForBot(target, connection).length ? tr('待授权成员', 'Authorize requesters')
+          : !target.status.online ? tr('等待仓库启动', 'Waiting for repository')
+          : target.status.error || !target.status.configured ? tr('待完成仓库设置', 'Repository setup needed') : undefined
+        return <div className="dt-card" key={`${connection?.id ?? binding.botId}:${binding.chatId}`}>
+          <div className="dt-card-head"><div className="dt-row-main"><p className="dt-manager-eyebrow">{connection?.name || binding.botId || tr('待确认机器人', 'Bot needs verification')}</p>
+            <div className="dt-row-title">{connection?.chats[binding.chatId] || binding.chatId}</div>
+            <div className="dt-row-meta">→ {view.repositories.find(item => item.id === binding.repositoryId)?.name ?? binding.repositoryId}</div></div>
+            <Tag tone={bindingStatus ? 'quiet' : 'success'}>{bindingStatus ?? tr('接单中', 'Enabled')}</Tag>
+            <Button variant="outline" size="sm" disabled={busy || (!binding.enabled && (!connection?.connected || !connection.enabled))}
+              onClick={() => { void toggle(connection?.id, binding.chatId) }}>{binding.enabled ? tr('停用群接单与回复', 'Disable group intake and replies') : tr('恢复群接单与回复', 'Enable group intake and replies')}</Button>
+          </div></div>
+      })}</div> : <Hint>{tr('还没有绑定。', 'No binding yet.')}</Hint>}
     </Section>
-    <Hint>{tr('试单：启动目标仓库后，在绑定群中 @机器人并提出一个小需求。保存配置不会自动向群发消息。',
-      'Try a task: start the repository, then mention the bot in its bound group with a small request. Saving configuration sends no group messages.')}</Hint>
+    <Hint>{tr('试单：启动目标仓库后，在绑定群中 @选定机器人提出需求。保存配置不会自动向群发消息。', 'Try a task: start the repository, then mention the selected bot in its bound group. Saving configuration sends no group messages.')}</Hint>
   </>
 }
 
 function DeliveriesPage() {
   const { tr, view, busy, run, request, navigate } = useManager()
   const [tasks, setTasks] = useState<Record<string, { items?: TaskRow[]; error?: string }>>({})
-  const health = Object.entries(view.health)
-  const healthName = (name: string) => ({ feishu: tr('飞书消息接入', 'Feishu intake'), delivery: tr('消息投递', 'Message delivery'),
+  const bots = managerBots(view)
+  const health: [string, { state: string; detail?: string }][] = [...Object.entries(view.health).filter(([name]) => !view.bots || view.legacyConnection || !['feishu', 'history'].includes(name)),
+    ...(view.bots ? bots.flatMap(bot => Object.entries(bot.health).map(([component, value]) => [`bot:${bot.id}:${component}`, value] as [string, typeof value])) : [])]
+  const componentName = (name: string): string => ({ feishu: tr('飞书消息接入', 'Feishu intake'), history: tr('消息恢复', 'Message recovery'), delivery: tr('消息投递', 'Message delivery'),
     github: tr('GitHub 接入', 'GitHub intake') })[name] ?? name
+  const healthName = (name: string) => {
+    const bot = bots.find(item => name.startsWith(`bot:${item.id}:`))
+    return bot ? `${bot.name || bot.id} · ${componentName(name.slice(`bot:${bot.id}:`.length))}` : componentName(name)
+  }
   const healthLabel = (state: string) => ({ ready: tr('正常', 'Ready'), ok: tr('正常', 'Ready'), paused: tr('已暂停', 'Paused'),
     error: tr('需要处理', 'Needs attention'), pending: tr('等待中', 'Pending'), starting: tr('启动中', 'Starting') })[state]
     ?? tr('待检查', 'Check required')
@@ -760,7 +840,12 @@ function DeliveriesPage() {
     <Section title={tr('待投递消息', 'Queued deliveries')} count={view.queues?.total ?? view.pending.length}>
       <Hint>{tr(`${view.queues?.total ?? view.pending.length} 条消息待投递。离线消息保持原目标，不会转投。`,
         `${view.queues?.total ?? view.pending.length} queued messages. Offline messages keep their original destination.`)}</Hint>
-      {view.queues && Object.keys(view.queues.byChat).length > 0 && <ul className="dt-list">{Object.entries(view.queues.byChat).map(([chat, count]) =>
+      {view.queues?.byBinding ? <ul className="dt-list">{view.queues.byBinding.map(item => {
+        const bot = bots.find(connection => connection.id === item.botId)
+        return <li className="dt-row" key={`${item.repositoryId}:${item.botId}:${item.chatId}`}><div className="dt-row-main"><div className="dt-row-title">
+          {bot?.name || item.botId} → {bot?.chats[item.chatId] || item.chatId} → {view.repositories.find(repo => repo.id === item.repositoryId)?.name || item.repositoryId}
+        </div></div><span className="dt-row-meta">{item.count}</span></li>
+      })}</ul> : view.queues && Object.keys(view.queues.byChat).length > 0 && <ul className="dt-list">{Object.entries(view.queues.byChat).map(([chat, count]) =>
         <li className="dt-row" key={chat}><div className="dt-row-main"><div className="dt-row-title">{view.chats[chat] || chat}</div></div>
           <span className="dt-row-meta">{count}</span></li>)}</ul>}
       {view.pending.filter(item => item.error || item.hold).map(item => <p key={item.id} role={item.error ? 'alert' : 'status'}
@@ -785,8 +870,9 @@ function DeliveriesPage() {
           : <Hint>{tr('点击「刷新任务」读取该仓库的开放任务。', 'Select Refresh tasks to read open tasks for this repository.')}</Hint>}
         {repository.status.online && <div className="dt-actions">
           <Button variant="outline" size="sm" disabled={busy} onClick={() => open(repository.id)}>{tr('打开仓库工单', 'Open repository tickets')}</Button>
-          <Button variant="ghost" size="sm" disabled={busy} onClick={() => { void pause(repository.id, true) }}>{tr('暂停新调度', 'Pause dispatch')}</Button>
-          <Button variant="ghost" size="sm" disabled={busy} onClick={() => { void pause(repository.id, false) }}>{tr('恢复调度', 'Resume dispatch')}</Button>
+          {repository.status.paused !== undefined && <Tag tone={repository.status.paused ? 'warning' : 'success'}>{repository.status.paused ? tr('调度已暂停', 'Dispatch paused') : tr('调度运行中', 'Dispatch active')}</Tag>}
+          <Button variant="ghost" size="sm" disabled={busy || repository.status.paused === true} onClick={() => { void pause(repository.id, true) }}>{tr('暂停新调度', 'Pause dispatch')}</Button>
+          <Button variant="ghost" size="sm" disabled={busy || repository.status.paused === false} onClick={() => { void pause(repository.id, false) }}>{tr('恢复调度', 'Resume dispatch')}</Button>
         </div>}
       </div>)}
     </Section>
@@ -794,61 +880,94 @@ function DeliveriesPage() {
 }
 
 function FeishuPage() {
-  const { tr, view, busy, run, request, navigate, error } = useManager()
+  const { tr, view, busy, run, request, navigate } = useManager()
+  const bots = managerBots(view)
+  const [editing, setEditing] = useState<string | undefined>(() => view.legacyConnection ? undefined : bots.length ? undefined : 'new')
   const [botCli, setBotCli] = useState('')
-  const [editing, setEditing] = useState(!view.bot)
-  const [saved, setSaved] = useState(false)
-  const health = view.health.feishu
-  const bound = view.bindings.filter(binding => binding.enabled).length
+  const [botProfile, setBotProfile] = useState('')
+  const [saved, setSaved] = useState('')
+  const [discard, setDiscard] = useState(false)
+  const [deleting, setDeleting] = useState<ManagerBotView>()
+  const editRevision = useRef(view.revision)
+  const initialCli = useRef('')
+  const initialProfile = useRef('')
+  const begin = (bot?: ManagerBotView) => {
+    setEditing(bot?.id ?? 'new'); setBotCli(bot?.cli ?? ''); setBotProfile(bot?.profile ?? ''); initialCli.current = bot?.cli ?? ''; initialProfile.current = bot?.profile ?? ''; editRevision.current = view.revision; setSaved('')
+  }
+  const close = () => { if (botCli !== initialCli.current || botProfile !== initialProfile.current) setDiscard(true); else setEditing(undefined) }
   const connect = async (event: FormEvent) => {
-    event.preventDefault(); setSaved(false)
-    const done = await run(() => request('bot', { cli: botCli.trim() }, 'PUT'))
-    if (done) { setBotCli(''); setEditing(false); setSaved(true) }
+    event.preventDefault(); setSaved('')
+    const legacy = !view.bots
+    const recovering = editing === 'legacy'
+    const path = legacy || recovering ? 'bot' : editing === 'new' ? 'bots' : `bots/${encodeURIComponent(editing!)}`
+    const done = await run(() => request(path, { cli: botCli.trim(), ...(!legacy || botProfile.trim() ? { profile: botProfile.trim() } : {}), ...(!legacy ? { revision: editRevision.current } : {}) }, legacy || recovering || editing !== 'new' ? 'PUT' : 'POST'))
+    if (done) { setBotCli(''); setBotProfile(''); setEditing(undefined); setSaved(tr('机器人连接已验证并保存。', 'Bot connection verified and saved.')) }
+  }
+  const toggle = (bot: ManagerBotView) => run(() => request(`bots/${encodeURIComponent(bot.id)}`, { enabled: !bot.enabled, revision: view.revision }, 'PUT'))
+  const remove = async () => {
+    if (!deleting) return
+    if (await run(() => request(`bots/${encodeURIComponent(deleting.id)}`, { revision: view.revision }, 'DELETE'))) setDeleting(undefined)
   }
   return <>
-    <div className="dt-manager-hero"><div><p className="dt-manager-eyebrow">{tr('共享集成', 'Shared integration')}</p>
-      <h2>{tr('一个机器人，连接所有团队', 'One bot, every team')}</h2>
-      <p>{tr('机器人连接在整个工作台共享，群聊按仓库独立路由，成员按权限提交任务。',
-        'Share one bot across the workspace. Route each group to its repository and authorize requesters explicitly.')}</p></div></div>
-    <Section title={tr('当前机器人', 'Current bot')}>
-      {view.bot ? <div className="dt-connection-card"><span className="dt-connection-icon"><Icon name="message" size={26} /></span>
-        <div className="dt-row-main"><h3>{view.bot.name || view.bot.id}</h3><p className="dt-hint">{tr('飞书机器人身份已验证', 'Feishu bot identity verified')}</p>
-          <div className="dt-row-meta"><span>{tr(`${Object.keys(view.chats).length} 个已加入的群`, `${Object.keys(view.chats).length} joined groups`)}</span>
-            <span>{tr(`${bound} 个已启用的群绑定`, `${bound} active group bindings`)}</span></div></div>
-        <Tag tone="success">{tr('已连接', 'Connected')}</Tag></div>
-        : <div className="dt-manager-empty"><Icon name="message" size={28} /><h3>{tr('连接飞书，让团队在群里交需求', 'Connect Feishu to receive requests in groups')}</h3>
-          <p>{tr('GitHub 接单不依赖飞书。需要群聊协作时，在下方连接机器人。', 'GitHub intake works independently. Connect a bot below for group collaboration.')}</p></div>}
-      {saved && <p className="dt-success-note" role="status">{tr('机器人连接已更新。', 'Bot connection updated.')}</p>}
-      {view.bot && <>
-        {health && <p className={health.state === 'error' ? 'dt-error' : 'dt-hint'} role={health.state === 'error' ? 'alert' : undefined}>
-          {bound === 0 && health.state !== 'error' ? tr('连接已就绪。绑定研发群后开始接收需求。', 'Connected. Bind a development group to receive requests.') : health.detail}</p>}
-        <div className="dt-actions"><Button variant="primary" disabled={busy} icon={<Icon name="plus" size={14} />}
-          onClick={() => navigate(managerRoute('bindings'))}>{tr('继续绑定群聊', 'Continue to group bindings')}</Button>
-          <Button variant="outline" disabled={busy} onClick={() => { setEditing(!editing); setBotCli(view.botCli); setSaved(false) }}>
-            {editing ? tr('收起连接设置', 'Hide connection settings') : tr('修改机器人连接', 'Change bot connection')}</Button></div>
-        <details className="dt-manager-checks"><summary>{tr('连接详情', 'Connection details')}</summary>
-          <div className="dt-kv"><span>{tr('机器人标识', 'Bot ID')}</span><code>{view.bot.id}</code>
-            <span>{tr('执行命令', 'CLI command')}</span><code>{view.botCli}</code></div></details>
-      </>}
+    <div className="dt-manager-hero"><div><p className="dt-manager-eyebrow">{tr('飞书机器人连接', 'Feishu bot connections')}</p>
+      <h2>{tr('多个机器人，一套研发工作台', 'Multiple bots, one development workspace')}</h2>
+      <p>{tr('按团队连接机器人。每个机器人独立管理群聊、权限和运行状态，一个机器人可对应多个群。',
+        'Connect bots for your teams. Each bot has its own groups, access and status, and can serve multiple groups.')}</p></div>
+      <Button variant="primary" disabled={busy || editing !== undefined || !!view.legacyConnection || (!view.bots && bots.length > 0)} title={!view.bots && bots.length ? tr('更新管理服务后可添加多个机器人。', 'Update the manager service to add multiple bots.') : undefined} icon={<Icon name="plus" />} onClick={() => begin()}>{tr('添加机器人', 'Add bot')}</Button></div>
+    <div className="dt-manager-metrics dt-bot-metrics">
+      {[[tr('已登记机器人', 'Registered bots'), bots.length], [tr('可用连接', 'Available connections'), bots.filter(bot => bot.enabled && bot.connected).length],
+        [tr('群聊绑定', 'Group bindings'), view.bindings.length]].map(([label, count]) => <div className="dt-manager-metric" key={label}><span>{label}</span><strong>{count}</strong></div>)}
+    </div>
+    {saved && <p className="dt-success-note" role="status">{saved}</p>}
+    {view.legacyConnection && <Section title={tr('原有机器人连接待恢复', 'Previous bot connection needs recovery')}>
+      <p className="dt-error" role="alert">{view.legacyConnection.error}</p><p className="dt-hint dt-mono">{view.legacyConnection.cli}</p>
+      <Hint>{tr('先恢复原有机器人，保留它的群绑定和工作记录，再添加其他机器人。', 'Restore the original bot and its group bindings and work history before adding another bot.')}</Hint>
+      <Button variant="primary" disabled={busy || editing !== undefined} onClick={() => { setEditing('legacy'); setBotCli(view.legacyConnection!.cli); setBotProfile(''); initialCli.current = view.legacyConnection!.cli; initialProfile.current = ''; editRevision.current = view.revision }}>{tr('恢复原有连接', 'Restore previous connection')}</Button>
+    </Section>}
+    <Section title={tr('机器人连接', 'Bot connections')} count={bots.length}>
+      {bots.length ? <div className="dt-bot-grid">{bots.map(bot => {
+        const bindings = view.bindings.filter(binding => bindingBot(view, binding)?.id === bot.id)
+        const errors = Object.entries(bot.health).filter(([, value]) => value.state === 'error')
+        return <article className="dt-card dt-bot-card" key={bot.id}>
+          <div className="dt-card-head"><span className="dt-connection-icon"><Icon name="message" size={24} /></span><div className="dt-row-main"><h3>{bot.name || bot.id}</h3>
+            <p className="dt-hint">{bot.brand === 'lark' ? 'Lark' : tr('飞书', 'Feishu')}{bot.appId ? ` · ${bot.appId}` : ''}</p></div>
+            <Tag tone={!bot.enabled ? 'quiet' : !bot.connected || errors.length ? 'danger' : 'success'}>{!bot.enabled ? tr('已停用', 'Disabled') : !bot.connected ? tr('连接异常', 'Disconnected') : errors.length ? tr('需要处理', 'Needs attention') : tr('已连接', 'Connected')}</Tag></div>
+          <div className="dt-bot-stats"><span>{tr(`${Object.keys(bot.chats).length} 个已加入的群`, `${Object.keys(bot.chats).length} joined groups`)}</span>
+            <span>{tr(`${bindings.filter(binding => binding.enabled).length} 个已启用绑定`, `${bindings.filter(binding => binding.enabled).length} enabled bindings`)}</span></div>
+          {errors.length ? errors.map(([name, value]) => <p className="dt-error" role="status" key={name}>{value.detail || tr('连接需要处理', 'Connection needs attention')}</p>)
+            : <p className="dt-hint">{!bot.enabled ? tr('接单与回复已暂停，绑定和历史记录保留。', 'Intake and replies are paused; bindings and history are retained.') : !bindings.length ? tr('绑定研发群后开始接收需求。', 'Bind development groups to receive work.') : tr('消息按机器人与群聊的绑定关系路由。', 'Messages follow this bot’s group bindings.')}</p>}
+          <div className="dt-actions"><Button variant="primary" size="sm" disabled={busy || !bot.enabled || !bot.connected}
+            onClick={() => navigate(managerRoute('bindings', undefined, bot.id))}>{tr('绑定群聊', 'Bind groups')}</Button>
+            <Button variant="outline" size="sm" disabled={busy || editing !== undefined} onClick={() => begin(bot)}>{tr('修改连接', 'Edit connection')}</Button>
+            {view.bots && <Button variant="ghost" size="sm" disabled={busy} onClick={() => { void toggle(bot) }}>{bot.enabled ? tr('停用机器人', 'Disable bot') : tr('启用机器人', 'Enable bot')}</Button>}</div>
+          <details className="dt-manager-checks"><summary>{tr('连接详情', 'Connection details')}</summary><div className="dt-kv">
+            <span>{tr('机器人标识', 'Bot ID')}</span><code>{bot.botId}</code><span>{tr('执行命令', 'CLI command')}</span><code>{bot.cli}</code>{bot.profile && <><span>{tr('CLI 配置档案', 'CLI profile')}</span><code>{bot.profile}</code></>}</div>
+            {view.bots && <div className="dt-actions"><Button variant="ghost" size="sm" disabled={busy || bindings.length > 0} onClick={() => setDeleting(bot)}>{tr('移除连接', 'Remove connection')}</Button>
+              <span className="dt-hint">{tr('存在绑定或历史投递的连接不能移除，可停用。', 'Connections with bindings or delivery history can be disabled but not removed.')}</span></div>}</details>
+        </article>
+      })}</div> : <div className="dt-manager-empty"><Icon name="message" size={28} /><h3>{tr('连接第一个飞书机器人', 'Connect your first Feishu bot')}</h3>
+        <p>{tr('连接后选择机器人、群聊、仓库和可接单成员。', 'Then choose its groups, repositories and authorized requesters.')}</p></div>}
     </Section>
-    {editing && <Section title={view.bot ? tr('修改机器人连接', 'Change bot connection') : tr('连接飞书机器人', 'Connect the Feishu bot')}>
+    {editing !== undefined && <Section title={editing === 'legacy' ? tr('恢复原有机器人连接', 'Restore the previous bot connection') : editing === 'new' ? tr('添加机器人连接', 'Add a bot connection') : tr('修改机器人连接', 'Edit bot connection')}>
       <form className="dt-form dt-block" onSubmit={event => { void connect(event) }}>
-        <p className="dt-hint">{tr('填写已登录的机器人 CLI。连接时验证机器人身份，验证成功才会保存。',
-          'Enter a signed-in bot CLI. The connection is saved only after its bot identity is verified.')}</p>
-        <Fields disabled={busy}><Field label={tr('机器人 CLI 路径或命令', 'Bot CLI path or command')} note={tr(
-          '该命令必须仅使用机器人身份，不使用个人身份发送消息。', 'The command must act as the bot, without sending as a personal account.')}>
-          <Input required value={botCli} onChange={event => setBotCli(event.target.value)} placeholder="lark-bot" /></Field></Fields>
-        <div className="dt-actions"><Button variant="primary" type="submit" disabled={busy || !botCli.trim()}>
-          {busy ? tr('正在验证连接…', 'Verifying connection…') : tr('检查并连接', 'Verify and connect')}</Button>
-          {view.bot && <Button disabled={busy} onClick={() => setEditing(false)}>{tr('取消', 'Cancel')}</Button>}</div>
-        {error && <p className="dt-error" role="alert">{error}</p>}
+        <p className="dt-hint">{tr('每个 CLI 与配置档案组合对应一个已登录的机器人身份。验证成功后保存，已有连接不会被新机器人覆盖。', 'Each CLI and profile pair uses a signed-in bot identity. Verification saves the connection while preserving other bots.')}</p>
+        <Fields disabled={busy}><Field label={tr('机器人 CLI 路径或命令', 'Bot CLI path or command')} note={tr('使用仅以机器人身份运行的 CLI；账号凭据由 CLI 管理。', 'Use a CLI restricted to the bot identity; credentials remain managed by the CLI.')}>
+          <Input autoFocus required value={botCli} onChange={event => setBotCli(event.target.value)} placeholder="lark-cli" /></Field>
+          <Field label={tr('CLI 配置档案（Profile）', 'CLI profile')} note={tr('可选。填写该 CLI 中已配置的档案名，同一 CLI 可通过不同档案连接多个机器人。留空使用默认档案。', 'Optional. Enter a profile already configured in the CLI. One CLI can connect multiple bots through different profiles. Leave empty for the default profile.')}>
+            <Input value={botProfile} onChange={event => setBotProfile(event.target.value)} placeholder={tr('例如 platform-team', 'e.g. platform-team')} /></Field></Fields>
+        <div className="dt-actions"><Button variant="primary" type="submit" disabled={busy || !botCli.trim()}>{busy ? tr('正在验证连接…', 'Verifying connection…') : tr('检查并连接', 'Verify and connect')}</Button>
+          <Button disabled={busy} onClick={close}>{tr('取消', 'Cancel')}</Button></div>
       </form>
     </Section>}
-    <Section title={tr('接下来', 'Next steps')}><ol className="dt-manager-next">
-      <li>{tr('将上方机器人加入需要接单的飞书群。', 'Add the bot above to your development groups.')}</li>
-      <li>{tr('打开「群聊绑定」，刷新群列表并指定目标仓库和成员。', 'Open Group bindings, refresh groups, and choose the repository and members.')}</li>
-      <li>{tr('启动仓库服务后，已授权的成员在群中 @机器人提交需求。', 'Start the repository service. Authorized members can then mention the bot with a request.')}</li>
-    </ol></Section>
+    <Modal open={discard} closeLabel={tr('关闭', 'Close')} title={tr('放弃未保存的连接修改？', 'Discard connection changes?')} onClose={() => setDiscard(false)}>
+      <p>{tr('当前 CLI 修改尚未保存。', 'The CLI change has not been saved.')}</p><div className="dt-actions"><Button onClick={() => setDiscard(false)}>{tr('继续编辑', 'Continue editing')}</Button>
+        <Button variant="primary" onClick={() => { setDiscard(false); setEditing(undefined); setBotCli(''); setBotProfile('') }}>{tr('放弃修改', 'Discard changes')}</Button></div></Modal>
+    <Modal open={!!deleting} closeLabel={tr('关闭', 'Close')} title={tr('移除机器人连接？', 'Remove this bot connection?')} onClose={() => setDeleting(undefined)}>
+      <p>{tr(`移除 ${deleting?.name || deleting?.id || ''}。已有绑定或历史投递时会拒绝移除。`, `Remove ${deleting?.name || deleting?.id || ''}. Bindings or delivery history prevent removal.`)}</p>
+      <div className="dt-actions"><Button disabled={busy} onClick={() => setDeleting(undefined)}>{tr('取消', 'Cancel')}</Button><Button variant="primary" disabled={busy} onClick={() => { void remove() }}>{tr('确认移除', 'Remove connection')}</Button></div></Modal>
+    <Section title={tr('接入顺序', 'Connection steps')}><ol className="dt-manager-next"><li>{tr('验证并添加一个或多个机器人连接。', 'Verify and add one or more bot connections.')}</li>
+      <li>{tr('把机器人加入研发群，在群聊绑定中选择机器人、群、仓库和成员。', 'Add each bot to its groups, then select the bot, group, repository and members in Group bindings.')}</li>
+      <li>{tr('启动仓库服务，已授权成员在群中 @对应机器人提交需求。', 'Start repository services. Authorized members mention the corresponding bot to request work.')}</li></ol></Section>
   </>
 }
 

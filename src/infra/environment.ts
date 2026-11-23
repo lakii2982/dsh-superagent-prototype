@@ -95,8 +95,21 @@ export async function writeEnvironment(deployment: Pick<Deployment, 'stateDir' |
     'for entry in $PATH; do [ "$entry" = "$self" ] || rest="${rest:+$rest:}$entry"; done',
     'set +f', 'unset IFS', 'PATH=$rest', 'export PATH',
   ].join('\n')
-  const run = (program: string): string => `${withoutShims}\nexec ${shellQuote(program)} "$@"`
+  const run = (program: string, prefix: readonly string[] = []): string =>
+    `${withoutShims}\nexec ${[program, ...prefix].map(shellQuote).join(' ')} "$@"`
   const fail = (message: string): string => `echo ${shellQuote(message)} >&2\nexit 1`
+  const standaloneFeishu = !feishu ? fail('lark-cli is unavailable: this installation has no Feishu bot.')
+    : !feishu.profile ? run(feishu.cli) : [
+      // Keep the selected profile before argv so a caller's `--` cannot turn it into a positional argument.
+      'for argument in "$@"; do',
+      '  case "$argument" in',
+      '    --profile|--profile=*)',
+      fail('The configured Feishu profile cannot be overridden.'),
+      '      ;;',
+      '  esac',
+      'done',
+      run(feishu.cli, [`--profile=${feishu.profile}`]),
+    ].join('\n')
   if (deployment.managed?.enterprisePilot) {
     await shim('gh', fail('Use orchestrator_read for GitHub reads and orchestrator_delivery for draft pull requests.'))
     await shim('lark-cli', fail('Use orchestrator_read for Feishu reads; channel replies are sent by the host.'))
@@ -122,7 +135,9 @@ export async function writeEnvironment(deployment: Pick<Deployment, 'stateDir' |
     ].join('\n'))
   } else {
     await shim('gh', run(github.cli))
-    await shim('lark-cli', feishu ? run(feishu.cli) : fail('lark-cli is unavailable: this installation has no Feishu bot.'))
+    await shim('lark-cli', deployment.managed
+      ? fail('Use orchestrator_read for Feishu reads; the manager selects the bound bot and the host sends channel replies.')
+      : standaloneFeishu)
   }
   for (const name of new Set(blockedCommands.filter(name => !WORKER_COMMANDS.includes(name)))) {
     await shim(name, fail(deployment.managed?.enterprisePilot ? `${name} is blocked in this installation.`

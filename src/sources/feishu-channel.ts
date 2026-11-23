@@ -21,7 +21,7 @@ export async function sendFeishu(host: Pick<SourceContext, 'commands'>, message:
   if (!messageId) throw new Error('Missing Feishu reply target')
   const text = checkedImText(message.text)
   const reply = ['im', '+messages-reply', '--message-id', messageId, '--markdown', text, '--reply-in-thread', '--idempotency-key', message.id]
-  try { await host.commands.lark(reply) }
+  try { await host.commands.withFeishuBot(message.channel.address.botId).lark(reply) }
   catch (error) {
     if (gone(error)) return 'gone'
     throw error
@@ -30,6 +30,6 @@ export async function sendFeishu(host: Pick<SourceContext, 'commands'>, message:
 }
 /** Fallback chat link on the bot's brand; the message's own deep link on its Trigger is preferred when available. */
 export const feishuLink = (address: Record<string, string>, links: ChannelLinks): ChannelLink => ({
-  url: feishuChatLink(links.feishu?.brand ?? 'feishu', address.chatId ?? ''), label: { zh: '飞书消息', en: 'Feishu message' },
-  ...address.messageId ? { triggerId: feishuTriggerId(address.messageId) } : {},
+  url: feishuChatLink(address.brand === 'lark' ? 'lark' : address.brand === 'feishu' ? 'feishu' : links.feishu?.brand ?? 'feishu', address.chatId ?? ''), label: { zh: '飞书消息', en: 'Feishu message' },
+  ...address.messageId ? { triggerId: feishuTriggerId(address.messageId, address.legacyBot === 'true' ? undefined : address.botId) } : {},
 })

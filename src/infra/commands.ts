@@ -61,10 +61,30 @@ export class Commands {
    * @param resolved - returns the resolved deployment setup, or throws while setup is still pending.
    * @param environment - variables overriding `process.env` for every command (such as isolated git settings).
    */
-  constructor(private readonly resolved: () => Deployment, private readonly environment: Record<string, string | undefined>, private readonly signal: AbortSignal) {}
+  constructor(private readonly resolved: () => Deployment, private readonly environment: Record<string, string | undefined>, private readonly signal: AbortSignal,
+    private readonly feishuBotId?: string) {}
   get deployment(): Deployment { return this.resolved() }
   get repository(): string { return this.deployment.repository }
-  withSignal(signal?: AbortSignal): Commands { return signal ? new Commands(this.resolved, this.environment, AbortSignal.any([this.signal, signal])) : this }
+  /** Manager-owned transports override this to verify the fixed CLI identity before starting an event consumer. */
+  async verifyFeishuIdentity(): Promise<void> {}
+  withSignal(signal?: AbortSignal): Commands { return signal ? new Commands(this.resolved, this.environment, AbortSignal.any([this.signal, signal]), this.feishuBotId) : this }
+  /** Pin a managed operation to the originating bot; the manager independently checks repository ownership. */
+  withFeishuBot(botId?: string): Commands {
+    if (!botId || botId === this.feishuBotId) return this
+    if (!this.deployment.managed) throw new Error('A managed Feishu bot requires the repository bridge')
+    return new Commands(this.resolved, this.environment, this.signal, botId)
+  }
+  /** Read only identities the manager authorizes for this repository, without exposing their executable paths. */
+  async feishuBots(): Promise<{ id: string; botId: string; appId: string; name: string; brand: 'feishu' | 'lark'; legacy?: boolean }[]> {
+    const managed = this.deployment.managed
+    if (!managed) return []
+    const response = await fetch(`${managed.url}/orchestrator/internal/${managed.repositoryId}/feishu-bots`, {
+      headers: { authorization: `Bearer ${managed.token}` }, redirect: 'error', signal: AbortSignal.any([this.signal, AbortSignal.timeout(TIMEOUT_MS)]),
+    })
+    if (!response.ok) throw new CliError('Managed Feishu identities are unavailable')
+    return z.object({ bots: z.array(z.object({ id: z.string().min(1), botId: z.string().min(1), appId: z.string().min(1),
+      name: z.string(), brand: z.enum(['feishu', 'lark']), legacy: z.boolean().optional() })) }).parse(await response.json()).bots
+  }
   async run(program: string, args: string[], cwd?: string): Promise<string> {
     try {
       const { stdout } = await exec(program, args, { cwd, signal: this.signal, timeout: TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024,
@@ -104,14 +124,15 @@ export class Commands {
     if (this.deployment.managed) {
       const { url, token, repositoryId } = this.deployment.managed
       const response = await fetch(`${url}/orchestrator/internal/${repositoryId}/lark`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ args, ...(cwd ? { cwd } : {}) }), signal: AbortSignal.any([this.signal, AbortSignal.timeout(TIMEOUT_MS)]) })
+        body: JSON.stringify({ args, ...(cwd ? { cwd } : {}), ...(this.feishuBotId ? { botId: this.feishuBotId } : {}) }),
+        redirect: 'error', signal: AbortSignal.any([this.signal, AbortSignal.timeout(TIMEOUT_MS)]) })
       const result = await response.json() as { data?: T; error?: string; code?: number }
       if (!response.ok) throw new CliError(result.error ?? 'Feishu bridge unavailable', result.code)
       return result.data as T
     }
     const bot = this.deployment.feishu
     if (!bot) throw new Error('The Feishu Source has no working bot CLI')
-    const output = await this.run(bot.cli, [...args, '--as', 'bot', '--format', 'json'], cwd)
+    const output = await this.run(bot.cli, [...args, '--as', 'bot', '--format', 'json', ...(bot.profile ? [`--profile=${bot.profile}`] : [])], cwd)
       .catch((error: unknown) => { throw membership(error) })
     const result = JSON.parse(output) as { ok: boolean; data: T; error?: { code?: number; message?: string } }
     const code = result.error?.code

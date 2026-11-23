@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { Config, executable, machineOf, resolveDeployment, resolveFeishuBot, type Machine, type Probe } from '../src/deployment.ts'
+import { Config, executable, machineOf, resolveDeployment, resolveFeishuBot, SETUP_FIELDS, type Machine, type Probe } from '../src/deployment.ts'
+import { publishManagerOrigin } from '../src/manager/protocol.ts'
 import { gitEnv } from './fixtures/git.ts'
 
 const exec = promisify(execFile)
@@ -34,7 +35,7 @@ beforeEach(async () => {
   await exec('git', ['init', '-q', join(dir, 'widgets')], { env: gitEnv() })
   await exec('git', ['-C', join(dir, 'widgets'), 'remote', 'add', 'origin', 'git@github.com:acme/widgets.git'], { env: gitEnv() })
 })
-afterEach(() => { rmSync(dir, { recursive: true, force: true }) })
+afterEach(() => { vi.restoreAllMocks(); rmSync(dir, { recursive: true, force: true }) })
 
 // Setup spawns CLI subprocesses that can take several seconds when tests run in parallel.
 vi.setConfig({ testTimeout: 30_000 })
@@ -49,6 +50,17 @@ describe('configuration schema', () => {
       .toEqual({ stateDir: join(dir, 'state'), promptMaxChars: 100000, admissionContextMaxPages: 10, admissionContextTimeoutMs: 15000 })
     expect(() => Config(minimal({ stateDir: 'relative/dir' }))).toThrow()
     expect(() => Config(minimal({ stateDir: '~/dir' }))).toThrow()
+  })
+  it('follows the current manager port across desktop restarts from a running repository', () => {
+    const stateDir = join(dir, 'repositories', 'widget')
+    const url = 'http://127.0.0.1:3001'
+    const worker = machineOf(Config({ stateDir, managed: { repositoryId: 'widget', url, token: 'fixture' } }))
+    expect(worker.managed?.url).toBe(url)
+    publishManagerOrigin(dir, 'http://127.0.0.1:3002')
+    expect(worker.managed?.url).toBe('http://127.0.0.1:3002')
+    publishManagerOrigin(dir, 'http://127.0.0.1:3003')
+    expect(worker.managed?.url).toBe('http://127.0.0.1:3003')
+    expect(() => publishManagerOrigin(dir, 'https://example.com')).toThrow('loopback')
   })
   it('names keys the configuration does not define, and where the values of older keys live now', () => {
     const raw = minimal({ repository: 'acme/widgets', repositoryPath: '/srv/widgets', blockedCommands: [], author: { name: 'Alice' }, extra: 1 })
@@ -97,5 +109,71 @@ describe('setup', () => {
     await refuses('feishuNoBot')
     program(join(dir, 'bin', 'lark-cli'), 'echo "not configured" >&2; exit 1')
     await refuses('feishuCliFailed', { output: expect.stringContaining('not configured') })
+  })
+  it('resolves managed bot identities through the repository bridge without running a configured local CLI', async () => {
+    const managed = { repositoryId: 'repository-a', url: 'http://127.0.0.1:3082', token: 'private-repository-token' }
+    const bot = { id: 'registry-a', botId: 'ou_botA', appId: 'cli_botA', name: 'Team A', brand: 'feishu', legacy: true }
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({ bots: [{ ...bot, cli: '/private/bot-cli' }] }))
+    const localProbe = vi.fn<Probe>()
+    const resolved = await resolveFeishuBot(machine({ managed }), { cli: '/must-not-run' }, localProbe, '/empty-path')
+    expect(fetcher).toHaveBeenCalledWith('http://127.0.0.1:3082/orchestrator/internal/repository-a/feishu-bots', expect.objectContaining({
+      headers: { authorization: 'Bearer private-repository-token' }, redirect: 'error', signal: expect.any(AbortSignal),
+    }))
+    expect(localProbe).not.toHaveBeenCalled()
+    expect(resolved).toEqual({ cli: 'dsh-manager-bridge', registryId: bot.id, botId: bot.botId, appId: bot.appId,
+      name: bot.name, brand: bot.brand, legacy: true, managedBots: [bot] })
+    expect(resolved?.managedBots?.[0]).not.toHaveProperty('cli')
+    expect(JSON.stringify(resolved)).not.toContain(managed.token)
+  })
+  it('pins every standalone identity probe to its explicit CLI profile and retains the selected profile', async () => {
+    const selectedProfile = 'team-a'
+    const scopedProbe = vi.fn<Probe>(async argv => {
+      expect(argv.at(-1)).toBe(`--profile=${selectedProfile}`)
+      expect(argv.filter(arg => arg.startsWith('--profile'))).toHaveLength(1)
+      const command = argv.slice(4, -1).join(' ')
+      if (command === 'auth status') return JSON.stringify({ appId: 'cli_teamA', brand: 'feishu', identities: { bot: { status: 'ready' } } })
+      if (command === 'config strict-mode') return 'strict-mode: bot (source: profile)'
+      if (command === 'api GET /open-apis/bot/v3/info --as bot --format ndjson') return JSON.stringify({ bot: { open_id: 'ou_teamA', app_name: 'Team A' } })
+      throw new Error(`Unexpected probe: ${command}`)
+    })
+    const resolved = await resolveFeishuBot(machine(), { cli: 'lark-cli', profile: ' team-a ' }, scopedProbe, path)
+    expect(resolved).toEqual({ cli: join(dir, 'bin', 'lark-cli'), appId: 'cli_teamA', brand: 'feishu', botId: 'ou_teamA', name: 'Team A', profile: selectedProfile })
+    expect(scopedProbe).toHaveBeenCalledTimes(3)
+    expect(SETUP_FIELDS.feishu).toContain('profile')
+  })
+  it('keeps every associated bot identity and labels multiple managed bots without claiming one shared bot', async () => {
+    const bots = [
+      { id: 'new', botId: 'ou_new', appId: 'cli_new', name: 'New', brand: 'lark', legacy: false },
+      { id: 'existing', botId: 'ou_existing', appId: 'cli_existing', name: 'Existing', brand: 'feishu', legacy: true },
+    ]
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({ bots }))
+    const managed = { repositoryId: 'repository-a', url: 'http://127.0.0.1:3082', token: 'fixture' }
+    const localProbe = vi.fn<Probe>()
+    const resolved = await resolveFeishuBot(machine({ managed }), {}, localProbe)
+    expect(resolved).toMatchObject({ registryId: 'existing', name: '管理器按绑定路由（2 个机器人）', managedBots: bots })
+    expect(localProbe).not.toHaveBeenCalled()
+    fetcher.mockResolvedValueOnce(Response.json({ bots: [] }))
+    expect(await resolveFeishuBot(machine({ managed }), { cli: 'lark-cli' }, localProbe, path)).toBeUndefined()
+    expect(localProbe).not.toHaveBeenCalled()
+  })
+  it('fails closed when managed identities cannot be authenticated or validated, without a local CLI fallback', async () => {
+    const managed = { repositoryId: 'repository-a', url: 'http://127.0.0.1:3082', token: 'fixture' }
+    const fetcher = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('', { status: 403 }))
+    const localProbe = vi.fn<Probe>()
+    const resolve = () => resolveFeishuBot(machine({ managed }), { cli: 'lark-cli' }, localProbe, path)
+    await expect(resolve()).rejects.toEqual(setupError('feishu', 'feishuCliFailed', { output: expect.stringContaining('HTTP 403') }))
+    fetcher.mockResolvedValueOnce(Response.json({ bots: [{ id: 'bot', botId: 'invalid', appId: 'cli_valid' }] }))
+    await expect(resolve()).rejects.toEqual(setupError('feishu', 'feishuCliFailed'))
+    const identity = { id: 'duplicate', botId: 'ou_bot', appId: 'cli_bot' }
+    fetcher.mockResolvedValueOnce(Response.json({ bots: [identity, identity] }))
+    await expect(resolve()).rejects.toEqual(setupError('feishu', 'feishuCliFailed', { output: expect.stringContaining('Duplicate managed bot identities') }))
+    expect(localProbe).not.toHaveBeenCalled()
+  })
+  it('never sends a managed repository credential to an untrusted manager origin', async () => {
+    const fetcher = vi.spyOn(globalThis, 'fetch'), localProbe = vi.fn<Probe>()
+    const managed = { repositoryId: 'repository-a', url: 'https://example.com', token: 'fixture-private-token' }
+    await expect(resolveFeishuBot(machine({ managed }), {}, localProbe)).rejects.toEqual(setupError('feishu', 'feishuCliFailed'))
+    expect(fetcher).not.toHaveBeenCalled()
+    expect(localProbe).not.toHaveBeenCalled()
   })
 })

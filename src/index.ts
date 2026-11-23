@@ -77,7 +77,7 @@ export async function apply(ctx: Context, config: DeploymentConfig): Promise<voi
       manager = new Manager(ctx, managerMachine, {
         maxRunningRepositories: desktopRequested ? LIMITS.maxRunningRepositories.max : config.maxRunningRepositories,
         enterprisePilot: desktopRequested || config.enterprisePilot,
-        requireProtectedBranches: desktopRequested || config.requireProtectedBranches,
+        requireProtectedBranches: config.requireProtectedBranches,
         operatorTokenFile: config.operatorTokenFile,
         desktopMode: desktopStatus,
       })

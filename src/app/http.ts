@@ -280,7 +280,7 @@ export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
         try {
           const path = url.pathname.slice('/orchestrator/instance/'.length)
           if (path === 'health' && req.method === 'GET') { json(res, 200, { repositoryId: bridge.repositoryId, pid: process.pid, configured: runtime.configured(),
-            state: runtime.health.runtime?.state, agent: runtime.agentStatus, enterprisePilot: bridge.enterprisePilot === true }); return }
+            state: runtime.health.runtime?.state, paused: runtime.store.settings().paused, agent: runtime.agentStatus, enterprisePilot: bridge.enterprisePilot === true }); return }
           await runtime.ready
           if (path === 'receive' && req.method === 'POST') {
             if (!runtime.configured()) throw new RouteError(400, 'Repository setup is incomplete')

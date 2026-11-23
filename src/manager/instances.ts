@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto'
 import type { AgentKind, AgentProbe } from '../executor/agents.ts'
 import { Store } from '../app/store.ts'
 import { SettingsSchema } from '../policy.ts'
+import { MANAGED_FEISHU_CLI } from '../deployment.ts'
 import { packageRoot } from '../infra/paths.ts'
 import type { Repository } from './store.ts'
 
@@ -31,7 +32,7 @@ export async function instanceRequest(repository: Repository, path: string, body
   if (!response.ok) throw new Error(result.error ?? `Repository instance returned ${response.status}`)
   return result
 }
-export interface InstanceHealth { pid: number; configured: boolean; state?: string; agent?: AgentProbe[]; enterprisePilot?: boolean }
+export interface InstanceHealth { pid: number; configured: boolean; paused?: boolean; state?: string; agent?: AgentProbe[]; enterprisePilot?: boolean }
 /** The shape a probe entry from an instance may have; anything else it reports is ignored rather than trusted. */
 const agentProbeOf = (value: unknown): AgentProbe | undefined => {
   if (typeof value !== 'object' || value === null) return undefined
@@ -49,7 +50,7 @@ export async function instanceHealth(repository: Repository): Promise<InstanceHe
   const health = await instanceRequest(repository, 'health') as InstanceHealth & { repositoryId: string }
   if (health.repositoryId !== repository.id || !Number.isInteger(health.pid) || health.pid < 1) throw new Error('Unexpected repository instance')
   const agent = Array.isArray(health.agent) ? health.agent.map(agentProbeOf).filter((probe): probe is AgentProbe => !!probe) : undefined
-  return { pid: health.pid, configured: health.configured, ...health.state !== undefined ? { state: health.state } : {},
+  return { pid: health.pid, configured: health.configured, ...(typeof health.paused === 'boolean' ? { paused: health.paused } : {}), ...health.state !== undefined ? { state: health.state } : {},
     ...agent?.length ? { agent } : {}, ...(health.enterprisePilot === true ? { enterprisePilot: true } : {}) }
 }
 
@@ -151,7 +152,7 @@ export async function provision(repository: Repository, directory: string, manag
       executor: { workspaceMode: enterprisePilot ? 'worktree' : 'current', repositoryPath: enterprisePilot ? '' : repository.directory, maxWorkers: 1 },
       ...(enterprisePilot ? { eval: { mode: 'off' } } : {}),
       sources: { github: { enabled: true, config: { repository: repository.remote, cli: repository.githubCli } },
-        feishu: { enabled: true, config: { cli: botCli, chats: chats.map(chatId => ({ chatId, listen: 'mentions' })), directMessages: false, otherChats: 'none' } } },
+        feishu: { enabled: true, config: { cli: botCli ? MANAGED_FEISHU_CLI : '', chats: chats.map(chatId => ({ chatId, listen: 'mentions' })), directMessages: false, otherChats: 'none' } } },
       policy: { sources: { github: { allowed: repository.allowedGithub.map(id => ({ id })) }, feishu: { allowed: repository.allowedFeishu.map(id => ({ id })) } } },
     }))
   } finally { store.close() }

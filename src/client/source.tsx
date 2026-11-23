@@ -2,17 +2,17 @@
 import { useEffect, useState } from 'react'
 import type { FieldSpec } from '../sources/kind.ts'
 import { usePoll, type DroppedReply, type SourceStatusRow, type SourceView } from './api.ts'
-import { DisclosureRow, Dot, Icon, InfoTip, Switch, Tag } from './controls.tsx'
+import { Button, DisclosureRow, Dot, Icon, InfoTip, Switch, Tag } from './controls.tsx'
 import { SaveBar } from './draft.tsx'
 import { sourceMark } from './marks.ts'
 import { usePanel, usePanelData } from './provider.tsx'
-import { setupPage, settingsRoute, type Route } from './route.ts'
+import { repositoryEditorRoute, setupPage, settingsRoute, type Route } from './route.ts'
 import { ConfigHistory, Fields, SourceField, useBlockDraft, useSettings } from './settings-kit.tsx'
 import { actorName, healthText, localized, readableMarkers, reasonLabel, valueLabel, when } from './text.ts'
 import { CheckSetupButton, Hint, LabelValue, LoadState, SetupMessage, StatusHead, When } from './widgets.tsx'
 
 function SourceCard({ source }: { source: SourceView }) {
-  const { t, call } = usePanel()
+  const { t, call, navigate, managedRepositoryId, enterprisePilot } = usePanel()
   const { running } = usePanelData()
   const { reload } = useSettings()
   const [advancedOpen, setAdvancedOpen] = useState(false)
@@ -30,7 +30,11 @@ function SourceCard({ source }: { source: SourceView }) {
     labels={source.labels}
     refreshLabels={refreshLabels} fact={spec.type === 'fact' || !changed(spec.key) ? source.facts[spec.key] : undefined}
     onChange={next => draft.edit({ ...value, config: { ...value.config, [spec.key]: next } })} />
-  const advanced = source.fields.filter(spec => spec.advanced)
+  const managedFeishu = !!managedRepositoryId && source.id === 'feishu'
+  const managedGithub = !!enterprisePilot && source.id === 'github'
+  const fields = source.fields.filter(spec => !(managedFeishu && ['cli', 'chats', 'otherChats', 'directMessages'].includes(spec.key))
+    && !(managedGithub && ['repository', 'cli'].includes(spec.key)))
+  const advanced = fields.filter(spec => spec.advanced)
   return <form id={`dt-source-${source.id}`} className="dt-card" onSubmit={event => { void draft.submit(event) }}>
     <Fields disabled={draft.busy}>
       <div className="dt-card-head">
@@ -47,7 +51,13 @@ function SourceCard({ source }: { source: SourceView }) {
         <p className="dt-error" role="status"><SetupMessage problem={problem} lead /></p><CheckSetupButton />
       </div>}
       {!source.installed && <Hint>{t('sourceNotInstalledHint')}</Hint>}
-      {source.installed && source.fields.filter(spec => !spec.advanced).map(field)}
+       {managedRepositoryId && (managedFeishu || managedGithub) && <div className="dt-actions">
+        <Button size="sm" variant="outline" onClick={() => navigate(managedFeishu
+          ? { page: 'manager', query: { area: 'bindings', bindingRepositoryId: managedRepositoryId } } : repositoryEditorRoute(managedRepositoryId))}>
+          {managedFeishu ? t('manager.bindings') : t('manager.manageRepositories')}</Button>
+        {managedGithub && <span>{String(value.config.repository ?? '')}</span>}
+      </div>}
+      {source.installed && fields.filter(spec => !spec.advanced).map(field)}
       {source.installed && advanced.length > 0 && <DisclosureRow icon={<Icon name="settings" />} title={t('advanced')} open={advancedOpen}
         onToggle={() => setAdvancedOpen(!advancedOpen)}>
         <div className="dt-disclosure-body">{advanced.map(field)}</div>

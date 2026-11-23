@@ -1,5 +1,5 @@
 /** Plugin configuration and startup verification for repository access and agent CLI identities. */
-import { managerUrl } from './manager/protocol.ts'
+import { currentManagerOrigin, managerUrl } from './manager/protocol.ts'
 import { LIMITS } from './limits.ts'
 import { accessSync, constants, statSync } from 'node:fs'
 import { delimiter, isAbsolute, join } from 'node:path'
@@ -61,15 +61,15 @@ export function machineOf(config: DeploymentConfig): Machine {
   const unknown = Object.keys(config).filter(key => !(key in (Config.dict ?? {})))
   if (unknown.length) throw new Error(`dsh-superagent configuration has keys it does not use: ${unknown.map(key => MOVED[key] ? `${key} (now ${MOVED[key]})` : key).join(', ')}; docs/006-deployment.md lists the keys`)
   const { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs, managed } = config
-  if (managed) managed.url = managerUrl(managed.url)
-  return { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs, ...(managed ? { managed } : {}) }
+  const registeredOrigin = managed ? managerUrl(managed.url) : undefined
+  return { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs, ...(managed ? { managed: { ...managed, get url() { return currentManagerOrigin(stateDir, managed.repositoryId, registeredOrigin!) } } } : {}) }
 }
 
 export const GithubAccountsSchema = z.object({
   repository: z.string().trim().regex(/^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)?$/, 'owner/name').default(''),
   cli: z.string().trim().default(''),
 })
-export const FeishuBotSchema = z.object({ cli: z.string().trim().default('') })
+export const FeishuBotSchema = z.object({ cli: z.string().trim().default(''), profile: z.string().trim().min(1).max(200).optional() })
 /** Source configuration keys that affect deployment setup and trigger a restart when changed. */
 export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { github: Object.keys(GithubAccountsSchema.shape), feishu: Object.keys(FeishuBotSchema.shape) }
 
@@ -78,7 +78,23 @@ export interface Deployment extends Machine {
   github: { cli: string; login: string; noreply: string }
   feishu?: FeishuBot
 }
-export interface FeishuBot { cli: string; appId: string; brand: 'feishu' | 'lark'; botId: string; name: string }
+/** Credential-free bot identity exposed by the manager only to its associated repository. */
+export const ManagedFeishuBotSchema = z.object({
+  id: z.string().min(1).max(200), botId: z.string().regex(/^ou_[A-Za-z0-9]+$/),
+  appId: z.string().regex(/^cli_[A-Za-z0-9]+$/), name: z.string().default(''),
+  brand: z.enum(['feishu', 'lark']).default('feishu'), legacy: z.boolean().default(false),
+})
+export type ManagedFeishuBot = z.infer<typeof ManagedFeishuBotSchema>
+export const ManagedFeishuBotsSchema = z.object({ bots: z.array(ManagedFeishuBotSchema).max(100)
+  .refine(bots => new Set(bots.map(bot => bot.id)).size === bots.length, 'Duplicate managed bot identities') })
+export const MANAGED_FEISHU_CLI = 'dsh-manager-bridge'
+export interface FeishuBot {
+  cli: string; appId: string; brand: 'feishu' | 'lark'; botId: string; name: string
+  profile?: string
+  registryId?: string; legacy?: boolean
+  /** Startup snapshot for display compatibility only; operations must select a live, scoped manager identity. */
+  managedBots?: ManagedFeishuBot[]
+}
 
 /** Resolve a command name or absolute path to an executable file, ignoring the worker shim directory. */
 export function executable(name: string, path: string, exclude?: string): string {
@@ -131,16 +147,32 @@ export async function resolveDeployment(machine: Machine, github: unknown, probe
 const AuthStatus = z.object({ appId: z.string().regex(/^cli_[A-Za-z0-9]+$/), brand: z.enum(['feishu', 'lark']).default('feishu'), identities: z.object({ bot: z.object({ status: z.string() }) }) })
 const BotInfo = z.object({ bot: z.object({ open_id: z.string().regex(/^ou_[A-Za-z0-9]+$/), app_name: z.string().default('') }) })
 /**
- * Verify that the configured Feishu CLI is authenticated as a bot and restricted to strict mode `bot`.
- * Workers invoke this CLI as `lark-cli`, so a CLI that also permits a user identity would let workers act as that user.
+ * Managed repositories obtain only credential-free identities from their authenticated manager bridge.
+ * Standalone deployments verify that their CLI is authenticated and restricted to strict mode `bot`.
  */
 export async function resolveFeishuBot(machine: Machine, feishu: unknown, probe: Probe, path = process.env.PATH ?? ''): Promise<FeishuBot | undefined> {
-  const { cli: name } = FeishuBotSchema.parse(feishu ?? {})
-  if (!name) return undefined
   const fail = (error: unknown): never => { throw error instanceof SetupError ? error : new SetupError('feishuCliFailed', { output: reason(error) }) }
+  if (machine.managed) {
+    try {
+      const bridge = machine.managed, origin = managerUrl(bridge.url)
+      const response = await fetch(`${origin}/orchestrator/internal/${encodeURIComponent(bridge.repositoryId)}/feishu-bots`, {
+        headers: { authorization: `Bearer ${bridge.token}` }, redirect: 'error', signal: AbortSignal.timeout(15_000),
+      })
+      if (!response.ok) throw new Error(`Feishu manager identity check returned HTTP ${response.status}`)
+      const { bots } = ManagedFeishuBotsSchema.parse(await response.json())
+      const first = bots.find(bot => bot.legacy) ?? bots[0]
+      if (!first) return undefined
+      return { cli: MANAGED_FEISHU_CLI, botId: first.botId, appId: first.appId, brand: first.brand,
+        name: bots.length > 1 ? `管理器按绑定路由（${bots.length} 个机器人）` : first.name,
+        registryId: first.id, legacy: first.legacy, managedBots: bots }
+    } catch (error) { return fail(error) }
+  }
+  const { cli: name, profile } = FeishuBotSchema.parse(feishu ?? {})
+  if (!name) return undefined
   let cli = ''
   try { cli = executable(name, path, workerBin(machine.stateDir)) } catch (error) { fail(error) }
-  const run = (...args: string[]): Promise<string> => probe(['env', 'LARKSUITE_CLI_NO_UPDATE_NOTIFIER=1', 'LARKSUITE_CLI_NO_SKILLS_NOTIFIER=1', cli, ...args]).catch(fail)
+  const run = (...args: string[]): Promise<string> => probe(['env', 'LARKSUITE_CLI_NO_UPDATE_NOTIFIER=1', 'LARKSUITE_CLI_NO_SKILLS_NOTIFIER=1',
+    cli, ...args, ...(profile ? [`--profile=${profile}`] : [])]).catch(fail)
   const text = await run('auth', 'status')
   const status = parsed(AuthStatus, text.slice(text.indexOf('{')))
   if (!status) return fail(new SetupError('feishuNoApp'))
@@ -150,5 +182,5 @@ export async function resolveFeishuBot(machine: Machine, feishu: unknown, probe:
   // `--format json` unwraps only `data`, whereas this endpoint returns the payload under `bot`.
   const info = parsed(BotInfo, (await run('api', 'GET', '/open-apis/bot/v3/info', '--as', 'bot', '--format', 'ndjson')).split('\n')[0] ?? '')
   if (!info) return fail(new SetupError('feishuNoBot'))
-  return { cli, appId: status.appId, brand: status.brand, botId: info.bot.open_id, name: info.bot.app_name }
+  return { cli, appId: status.appId, brand: status.brand, botId: info.bot.open_id, name: info.bot.app_name, ...(profile ? { profile } : {}) }
 }

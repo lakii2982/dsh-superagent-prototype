@@ -81,7 +81,9 @@ export async function checkBranchRules({ remote, githubCli, requiredChecks = [] 
   if (!protections.has('non_fast_forward')) missing.push('force-push prevention')
   if (!protections.has('deletion')) missing.push('branch-deletion prevention')
   if (missing.length) {
-    throw new Error(`${remote} (${branch}): active GitHub Rulesets are missing ${missing.join(', ')}. Classic-only protection cannot satisfy this check.`)
+    throw Object.assign(new Error(`${remote} (${branch}): active GitHub Rulesets are missing ${missing.join(', ')}. Classic-only protection cannot satisfy this check.`), {
+      code: 'branch_rules_missing', branch, missing,
+    })
   }
 
   return { repository: metadata.full_name, branch, approvals, requiredChecks: [...checks].sort() }

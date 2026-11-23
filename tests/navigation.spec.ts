@@ -64,3 +64,13 @@ it('opens the settings that fix each setup problem: the Deployment group, or the
   expect(setupPage('deployment')).toEqual({ page: 'settings', query: { group: 'deployment' } })
   for (const place of ['github', 'feishu'] as const) expect(setupPage(place)).toEqual({ page: 'settings', query: { group: 'source', source: place } })
 })
+
+
+it('remembers the selected bot and repository only for the group-binding route', () => {
+  const route = { page: 'manager', query: { area: 'bindings', bindingBotId: 'bot-b', bindingRepositoryId: 'repo-a' } } as const
+  expect(parseRoute(route)).toEqual(route)
+  remember({ route, stack: [] }, 'bot-binding-navigation')
+  expect(initialLocation('bot-binding-navigation').route).toEqual(route)
+  expect(parseRoute({ ...route, query: { ...route.query, area: 'feishu' } })).toEqual({ page: 'manager', query: { area: 'feishu' } })
+  sessionStorage.removeItem('bot-binding-navigation')
+})
