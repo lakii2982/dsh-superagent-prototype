@@ -290,7 +290,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 
 | Path | Responsibility |
 | --- | --- |
-| `src/index.ts` | The main plugin entry: reads the machine settings, starts the Runtime, and gives it the restart that a save of a Source's account uses |
+| `src/index.ts` | Reads machine settings, starts the Runtime or Manager, and restarts when an account or desktop workspace mode changes |
 | `src/deployment.ts` | The plugin `Config` and `Machine`; `resolveDeployment` and `resolveFeishuBot` read the repository and the accounts from the Source settings, each CLI run as Executor shells run it; `SETUP_FIELDS` lists the Source fields setup reads. The code names no person, account or organization |
 | `src/setup.ts` | Setup problems: `SetupError`, with a code, the place that fixes it and the English text the log, the main Session and the panel share |
 | `src/policy.ts` | The Policy: the settings schemas by block, the Policy version, the gate and Mandate revalidation |
@@ -331,6 +331,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/context.ts` | The built-in prompt text, read from `prompts/`, and the transcript entries Sessions read |
 | `src/app/skill-files.ts` | Packaged text: `promptFile`, which joins a file's one-sentence lines into paragraphs, and the bundled skills |
 | `src/app/sessions.ts` | Sessions |
+| `src/app/pilot-scope.ts` | Work and handoff instructions for the managed enterprise pilot |
 | `src/app/delivery.ts` | `AgentDelivery`: delivers a message to a DeepSeek Harness agent once per request id, also across a restored Session |
 | `src/app/retry-health.ts` | `RetryHealth`: which Sessions wait on a model budget retry, for the `models` health entry |
 | `src/app/role-models.ts` | Resolves the Eval and Executor models, and seeds a new Session with its role's model |
@@ -407,7 +408,9 @@ Some generic modules still refer directly to GitHub or Feishu:
 `src/sources/github.ts` and `src/sources/feishu.ts` are also the entries of the two Source plugins, built by `tsdown.config.ts` and exported in `package.json` as `./github-watch` and `./feishu-watch`. The bundle's `cordis.patch.yml` inserts the three plugins, with Feishu disabled.
 
 | `src/client/manager.tsx` | Manager mode in the unified panel: the control pages, the manager groups above the selected repository's own areas, and the mode switch |
+| `src/client/manager-view.ts` | Credential-free repository and manager view contracts shared by the workspace and native plugin settings |
 | `src/manager/protocol.ts` | Multi-repository management, deterministic Feishu routing and isolated execution |
+| `src/manager/operator-auth.ts` | Validates the protected operator credential file and authenticates manager requests |
 | `src/manager/store.ts` | Multi-repository management, deterministic Feishu routing and isolated execution |
 | `src/manager/instances.ts` | Multi-repository management, deterministic Feishu routing and isolated execution |
 | `src/manager/readiness.ts` | `readiness`: the five readiness dimensions of one Repository, instance, checkout, agent, Feishu and queued deliveries, each with its state, its detail and where an operator repairs it |
@@ -466,10 +469,15 @@ Some generic modules still refer directly to GitHub or Feishu:
 
 | `tests/repository.spec.ts` | Checkout identity and shared-workspace slot protection |
 | `tests/worktree.spec.ts` | Two Tickets of one repository preparing their worktrees side by side, overlapping write scopes queued, an interrupted preparation resumed, a scene someone else changed refused, cleanup, and the person's checkout left untouched |
-| `tests/manager-store.spec.ts` | Multi-repository routing, durable replay, binding changes and local protocol guards |
+| `tests/manager-store.spec.ts` | Multi-repository and bot-scoped routing, durable replay, legacy migration, authorization holds, binding changes and local protocol guards |
+| `tests/manager-multibot.spec.ts` | Multiple bot connections, bot/group/repository bindings, scoped member grants, replies, identity changes, lifecycle isolation and recovery through the management handler |
 
 | `tests/manager-instances.spec.ts` | Isolated DSH storage, CLI environment, restart preservation and legacy session migration guard |
-| `tests/manager-runtime.spec.ts` | Real loopback bridge authentication, delivery recovery and reply scope using a fake bot |
+| `tests/manager-bootstrap.spec.ts` | Cordis manager activation, configuration and route registration without a socket listener |
+| `tests/manager-capacity.spec.ts` | Repository slot accounting, multi-team routing at 120 synthetic senders, and dispatch past offline backlogs |
+| `tests/operator-auth.spec.ts` | Owner-only credentials and manager operator authentication |
+| `tests/enterprise-measure.spec.ts` | Per-product release-cycle evidence and comparison of equal Ready cohorts |
+| `tests/manager-runtime.spec.ts` | Real loopback bridge authentication, delivery recovery and reply scope using a fake bot; concurrent routing of 120 synthetic identities across 5 teams and 12 fake repository executors, cross-repository authorization rejection, duplicate ingress and drained queues (control-plane regression, not model throughput or production load) |
 
 | `tests/bot-facade.spec.ts` | Bot-only command forwarding without modifying personal authentication |
 
@@ -632,7 +640,7 @@ Most built-in instructions live in `prompts/*.md`, with one sentence per line jo
 
 ## Configuration reload
 
-Every plugin configuration key except `stateDir` is volatile. The panel's Deployment settings and DeepSeek Harness's Plugin Manager edit them through DeepSeek Harness's configuration form; the host writes `cordis.patch.yml` and updates the values in place, and dsh-superagent reads each limit when it uses it, so a change applies without a restart.
+The configuration form edits the volatile machine limits and desktop workspace selection. The host writes `cordis.patch.yml` and updates the values in place. Machine limits are read when needed. When `desktopMultiRepository` changes, the loader notifies the active fiber and Superagent restarts with the saved selection. Local standalone and manager workspaces use separate state directories. The standalone GitHub and Feishu sources require the `orchestrator` service, so they pause while the desktop manager owns the panel. Explicit manager and managed-worker deployments retain their configured mode and authentication.
 
 A settings save that changes a Source field setup reads, such as an account's CLI, and any save while setup waits, restarts dsh-superagent. DeepSeek Harness's settings service does not serve the entry during that restart, so after its own restart dsh-superagent asks it to read the entry again, and an open form becomes editable again.
 

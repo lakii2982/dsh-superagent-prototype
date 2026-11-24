@@ -13,8 +13,9 @@ import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { openKnownSession, SessionNavigationError } from '../navigation.ts'
 import { ModePanel } from './manager.tsx'
 import { App } from './app.tsx'
-import { PluginConfig, usePageForm } from './deployment.tsx'
+import { DesktopModeSwitch, PluginConfig, usePageForm } from './deployment.tsx'
 import { en, zh } from './locales.ts'
+import { openManagerArea } from './route.ts'
 import type { T } from './text.ts'
 
 type ClientContext = Context & { sessions: ISessions }
@@ -43,10 +44,11 @@ function Mounted({ ctx, t }: { ctx: ClientContext; t: T }) {
     }
   }, [ctx, t])
   const form = usePageForm(ctx.get('configForms')?.get<Record<string, unknown>>(ENTRY))
-  return <ModePanel t={t}><App t={t} openSession={openSession} deploymentForm={form} /></ModePanel>
+  return <ModePanel t={t} modeAction={view => <DesktopModeSwitch t={t} form={form} mode="manager"
+    running={view.capacity?.runningRepositories} />}><App t={t} openSession={openSession} deploymentForm={form} /></ModePanel>
 }
 
-export const inject = ['slots', 'locale', 'sessions', 'uiWorkspace']
+export const inject = ['slots', 'locale', 'sessions', 'uiWorkspace', 'layout']
 /** Registers the panel, sidebar icon, and Plugin Manager config view; `configForms` is optional (without it, machine settings are read-only). */
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-superagent: dictionaries')
@@ -55,5 +57,6 @@ export function apply(ctx: ClientContext): void {
     (props: { t: T }) => <Mounted ctx={ctx} t={props.t} />))
   ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({ name: 'sidebar.panellist', id: PANEL_ID, order: 10, label: () => t('panel'), locale: NS }, HammerIcon))
   ctx.slots.inject('plugins.row.config', () => ctx.slots.register({ name: 'plugins.row.config', key: `${ENTRY}#${ENTRY}`, locale: NS },
-    (props: PluginConfigViewProps & { t: T }) => <PluginConfig t={props.t} view={props.view} form={props.form} />))
+    (props: PluginConfigViewProps & { t: T }) => <PluginConfig t={props.t} view={props.view} form={props.form}
+      onOpenManager={area => { openManagerArea(area); ctx.layout.selectPanel(PANEL_ID) }} />))
 }

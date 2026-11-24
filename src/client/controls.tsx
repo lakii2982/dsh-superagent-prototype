@@ -9,6 +9,8 @@ import { createPortal } from 'react-dom'
 const cx = (...names: (string | false | undefined)[]) => names.filter(Boolean).join(' ')
 
 const ICON_PATHS = {
+  layers: 'M12 3L3 8l9 5 9-5-9-5zM3 12l9 5 9-5M3 16l9 5 9-5',
+  menu: 'M4 6h16M4 12h16M4 18h16',
   'chevron-left': 'M15 5l-7 7 7 7',
   'chevron-right': 'M9 5l7 7-7 7',
   'chevron-down': 'M5 9l7 7 7-7',

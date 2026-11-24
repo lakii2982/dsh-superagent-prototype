@@ -1,7 +1,7 @@
 /**
  * Optimistic settings draft state with sessionStorage persistence and three-way rebase against concurrent saves.
  */
-import { useEffect, useLayoutEffect, useReducer, useRef, type FormEvent } from 'react'
+import { createContext, useContext, useEffect, useId, useLayoutEffect, useReducer, useRef, type FormEvent } from 'react'
 import { ApiError } from './api.ts'
 import { usePanel } from './provider.tsx'
 import { errorText, type T } from './text.ts'
@@ -172,6 +172,9 @@ export function useDraft<V, M = undefined>({ key, saved, revision, save, reload 
     edit: (value: V, meta?: M) => dispatch({ type: 'edit', value, meta, saved, revision }), discard: () => dispatch({ type: 'discard' }) }
 }
 
+/** Optional settings-category observer; saves and draft behavior remain owned by each form. */
+export const DraftStatusContext = createContext<((id: string, pending: boolean) => void) | undefined>(undefined)
+
 /** Sticky save/discard bar for a settings block; transfers focus back to its parent block when hidden so keyboard navigation does not reset. */
 export function SaveBar({ state, dirty, busy, words, status, onDiscard, onSave }: {
   state: DraftState<unknown, unknown>; dirty: boolean; busy: boolean; words?: DraftWords; status?: string | undefined
@@ -180,6 +183,12 @@ export function SaveBar({ state, dirty, busy, words, status, onDiscard, onSave }
   const { t } = usePanel()
   const line = saveBarText(t, state, words)
   const shown = dirty || busy || !!line.error
+  const report = useContext(DraftStatusContext)
+  const id = useId()
+  useEffect(() => {
+    report?.(id, shown)
+    return () => { report?.(id, false) }
+  }, [report, id, shown])
   const bar = useRef<HTMLDivElement>(null)
   const block = useRef<HTMLElement | null>(null)
   const focused = useRef(false)

@@ -15,6 +15,7 @@ export interface LinkHost {
   readonly commands: Commands
   readonly sources: SourceRegistry
   readonly lifetime: AbortSignal
+  readonly mayQuoteTrigger?: (trigger: Trigger) => boolean
 }
 
 /** Resolves and caches a trigger's external message URL, falling back to a readable resource path when lookup fails. */
@@ -39,10 +40,11 @@ export async function sourceLink(host: LinkHost, trigger: Trigger, signal?: Abor
   return { source_url: url }
 }
 
-export function repliedTo({ store, sources }: { store: Pick<Store, 'triggers'>; sources: Pick<SourceRegistry, 'repliesTo'> },
+export function repliedTo({ store, sources, mayQuoteTrigger }: Pick<LinkHost, 'store' | 'mayQuoteTrigger'> & { sources: Pick<SourceRegistry, 'repliesTo'> },
   trigger: Trigger): Trigger | undefined {
   const parent = sources.repliesTo(trigger)
-  return parent === undefined ? undefined : store.triggers.get(parent)
+  const message = parent === undefined ? undefined : store.triggers.get(parent)
+  return message && (!mayQuoteTrigger || mayQuoteTrigger(message)) ? message : undefined
 }
 /** Finds tickets subscribed to threads referenced in `trigger.text` (such as `#12` or URLs) that are not already in `known`. */
 function referencedTickets(host: LinkHost, trigger: Trigger, known: readonly Ticket[]): Ticket[] {

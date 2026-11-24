@@ -76,7 +76,7 @@ async function own(file: string, text: string, mode = 0o644): Promise<void> {
  * Atomically writes worker CLI shims and the isolated git configuration file into the state directory, refusing to overwrite foreign files.
  * Each shim strips the shim directory from PATH before exec so wrapper scripts resolving `gh` or `lark-cli` by name reach the real binary.
  */
-export async function writeEnvironment(deployment: Pick<Deployment, 'stateDir' | 'repository' | 'github' | 'feishu'>, blockedCommands: readonly string[]): Promise<void> {
+export async function writeEnvironment(deployment: Pick<Deployment, 'stateDir' | 'repository' | 'github' | 'feishu' | 'managed'>, blockedCommands: readonly string[]): Promise<void> {
   const { stateDir, repository, github, feishu } = deployment
   const dir = workerBin(stateDir)
   await mkdir(dir, { recursive: true })
@@ -95,12 +95,53 @@ export async function writeEnvironment(deployment: Pick<Deployment, 'stateDir' |
     'for entry in $PATH; do [ "$entry" = "$self" ] || rest="${rest:+$rest:}$entry"; done',
     'set +f', 'unset IFS', 'PATH=$rest', 'export PATH',
   ].join('\n')
-  const run = (program: string): string => `${withoutShims}\nexec ${shellQuote(program)} "$@"`
+  const run = (program: string, prefix: readonly string[] = []): string =>
+    `${withoutShims}\nexec ${[program, ...prefix].map(shellQuote).join(' ')} "$@"`
   const fail = (message: string): string => `echo ${shellQuote(message)} >&2\nexit 1`
-  await shim('gh', run(github.cli))
-  await shim('lark-cli', feishu ? run(feishu.cli) : fail('lark-cli is unavailable: this installation has no Feishu bot.'))
+  const standaloneFeishu = !feishu ? fail('lark-cli is unavailable: this installation has no Feishu bot.')
+    : !feishu.profile ? run(feishu.cli) : [
+      // Keep the selected profile before argv so a caller's `--` cannot turn it into a positional argument.
+      'for argument in "$@"; do',
+      '  case "$argument" in',
+      '    --profile|--profile=*)',
+      fail('The configured Feishu profile cannot be overridden.'),
+      '      ;;',
+      '  esac',
+      'done',
+      run(feishu.cli, [`--profile=${feishu.profile}`]),
+    ].join('\n')
+  if (deployment.managed?.enterprisePilot) {
+    await shim('gh', fail('Use orchestrator_read for GitHub reads and orchestrator_delivery for draft pull requests.'))
+    await shim('lark-cli', fail('Use orchestrator_read for Feishu reads; channel replies are sent by the host.'))
+    // The default worker PATH asks the host to publish; host Commands uses its separate PATH without this shim.
+    await shim('git', [
+      'is_publish() {',
+      '  while [ "$#" -gt 0 ]; do',
+      '    case "$1" in',
+      '      -C|-c|--git-dir|--work-tree|--namespace|--config-env) shift ;;',
+      '      -*) ;;',
+      '      push|send-pack) return 0 ;;',
+      '      *) return 1 ;;',
+      '    esac',
+      '    shift',
+      '  done',
+      '  return 1',
+      '}',
+      'if is_publish "$@"; then',
+      fail('Use orchestrator_delivery to publish this ticket branch.'),
+      'fi',
+      withoutShims,
+      'exec git "$@"',
+    ].join('\n'))
+  } else {
+    await shim('gh', run(github.cli))
+    await shim('lark-cli', deployment.managed
+      ? fail('Use orchestrator_read for Feishu reads; the manager selects the bound bot and the host sends channel replies.')
+      : standaloneFeishu)
+  }
   for (const name of new Set(blockedCommands.filter(name => !WORKER_COMMANDS.includes(name)))) {
-    await shim(name, fail(`${name} is blocked in this installation; use gh, which acts as ${github.login}.`))
+    await shim(name, fail(deployment.managed?.enterprisePilot ? `${name} is blocked in this installation.`
+      : `${name} is blocked in this installation; use gh, which acts as ${github.login}.`))
   }
   for (const name of before) if (!kept.has(name)) await unlink(join(dir, name))
   await own(workerGitConfig(stateDir), [

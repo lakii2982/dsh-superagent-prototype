@@ -1,3 +1,4 @@
+import { repositoryEditorRoute } from './route.ts'
 /** Eval status view (Decision log) and Eval settings group (Policy rules, per-Source admission, and assessor settings). */
 import { useState } from 'react'
 import { ADMISSION_DEFAULTS, ADMISSION_OPTIONS, type Admission, type AdmissionCell } from '../admission.ts'
@@ -71,14 +72,17 @@ type Part = Record<string, unknown>
 function SourcePart({ source, part, saved, dirty, onChange, reload }: {
   source: SourceView; part: Part; saved: Part; dirty: boolean; onChange: (next: Part) => void; reload: () => Promise<void>
 }) {
-  const { t, call, notify } = usePanel()
+  const { t, call, notify, managedRepositoryId, navigate } = usePanel()
   const policy = source.policy!
-  const sync = policy.sync
+  const managedAccess = managedRepositoryId && (source.id === 'github' || source.id === 'feishu')
+  const sync = managedAccess ? undefined : policy.sync
   const run = useAction(() => call('POST policy-sync/:id', { id: source.id }), { reload })
   // Syncing saves the Policy block, so require unsaved edits to be saved or discarded first.
   const syncNow = () => { if (dirty) notify(t('syncNeedsSave')); else void run.run() }
   return <div className="dt-part">
-    {policy.fields.map(field => <SourceField key={field.key} field={field} value={part[field.key]} saved={saved[field.key]} fact={undefined}
+    {managedAccess && <Button size="sm" variant="outline" onClick={() => navigate(repositoryEditorRoute(managedRepositoryId!))}>
+      {localized(t, { zh: '管理仓库接单人', en: 'Manage repository requesters' })}</Button>}
+    {policy.fields.filter(field => !managedAccess || !['allowed', 'syncChat'].includes(field.key)).map(field => <SourceField key={field.key} field={field} value={part[field.key]} saved={saved[field.key]} fact={undefined}
       labels={source.labels}
       onChange={next => onChange({ ...part, [field.key]: next })} />)}
     {sync && <div className="dt-row-buttons">
@@ -191,7 +195,7 @@ function PolicyBlock() {
 }
 
 function EvalBlock() {
-  const { t } = usePanel()
+  const { t, enterprisePilot } = usePanel()
   const block = useSettings().settings.blocks.eval
   const saved = { ...block.value, timeoutSeconds: String(block.value.timeoutSeconds) }
   const draft = useBlockDraft('eval', saved, block.revision, value => ({ ...value, timeoutSeconds: numberOf(value.timeoutSeconds) }))
@@ -201,7 +205,7 @@ function EvalBlock() {
     <Fields disabled={draft.busy}>
       <h2 className="dt-block-title">{t('evalSettings')}<InfoTip text={t('evalIntro')} /></h2>
       <Section title={t('acceptMode')} hint={t(`modeOption.${value.mode}`)}>
-        <SegmentedControl className="dt-segmented" label={t('acceptMode')} value={value.mode} onChange={mode => edit({ mode })}
+        <SegmentedControl disabled={enterprisePilot} className="dt-segmented" label={t('acceptMode')} value={value.mode} onChange={mode => edit({ mode })}
           options={(['off', 'observe', 'auto'] as const).map(mode => ({ value: mode, label: valueLabel(t, 'mode', mode),
             title: t(`modeOption.${mode}`) }))} />
       </Section>

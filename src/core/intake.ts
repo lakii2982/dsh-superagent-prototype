@@ -23,8 +23,10 @@ export class Intake extends EnginePart {
     if (this.repo.triggers.get(trigger.id)) return 'duplicate'
     const at = this.now()
     const filter = this.options.scope.scope(trigger)
-    if (!filter.listened) {
-      this.repo.triggers.save(trigger); this.repo.triggers.saveDisposition(trigger.id, { filtered: { code: filter.reason }, fanout: [], at })
+    const policy = this.policy()
+    const refusal = filter.listened ? policy.intakeRejection?.(trigger) : filter.reason
+    if (refusal !== undefined) {
+      this.repo.triggers.save(trigger); this.repo.triggers.saveDisposition(trigger.id, { filtered: { code: refusal }, fanout: [], at })
       return 'filtered'
     }
     this.repo.triggers.save(trigger)
@@ -42,6 +44,7 @@ export class Intake extends EnginePart {
         const followed = !!thread.context?.includes(ticketId)
         const resumes = trigger.human && ticket?.ended?.by !== 'human' && !followed
         if (!ticket || (!liveTicket(ticket) && !resumes)) continue
+        if (policy.intakeRejection && !policy.revalidate(ticket.mandate)) continue
         reached.set(ticketId, { ticket, context: followed && (reached.get(ticketId)?.context ?? true) })
       }
       this.repo.threads.save(thread)

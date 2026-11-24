@@ -41,11 +41,17 @@ done < "$list"`)
     + `case "$1" in has-session) exit 1;; new-*) touch '${root}/launched'; cat '${root}/pane';; esac`)
   program('dsh', 'exit 0')
 })
-afterEach(() => {
-  server?.close(); server = undefined
-  for (const child of sleepers) child.kill()
-  sleepers = []
-  rmSync(root, { recursive: true, force: true })
+afterEach(async () => {
+  const listener = server; server = undefined
+  try {
+    if (listener?.listening) await new Promise<void>(resolve => {
+      listener.closeAllConnections(); listener.close(() => resolve())
+    })
+  } finally {
+    for (const child of sleepers) child.kill()
+    sleepers = []
+    if (root) rmSync(root, { recursive: true, force: true })
+  }
 })
 function run(...args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise(resolve => execFile('python3', [join(root, 'scripts', 'dsh-superagent'), ...args],
@@ -60,7 +66,15 @@ async function answering(state: unknown = READY, always = false): Promise<string
     if (!always && !existsSync(join(root, 'launched'))) { response.writeHead(503).end(); return }
     response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(state))
   })
-  await new Promise<void>(resolve => server!.listen(0, '127.0.0.1', resolve))
+  const listener = server
+  await new Promise<void>((resolve, reject) => {
+    const failed = (error: Error) => reject(error)
+    listener.once('error', failed)
+    listener.listen(0, '127.0.0.1', () => {
+      listener.removeListener('error', failed)
+      resolve()
+    })
+  })
   return `http://127.0.0.1:${(server!.address() as AddressInfo).port}`
 }
 const status = async (profile: string, url = 'http://127.0.0.1:9') =>

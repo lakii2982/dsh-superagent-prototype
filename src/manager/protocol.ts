@@ -1,5 +1,7 @@
 /** Trusted local bridge protocol, distinct from browser management requests. */
-import { timingSafeEqual } from 'node:crypto'
+import { randomUUID, timingSafeEqual } from 'node:crypto'
+import { readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { basename, dirname, join } from 'node:path'
 import { z } from 'zod'
 
 export function authorized(header: string | undefined, token: string): boolean {
@@ -20,6 +22,24 @@ export function managerUrl(url: string): string {
     throw new Error('The manager bridge must use a loopback HTTP origin')
   }
   return parsed.origin
+}
+
+// Desktop may assign another loopback port on restart. Surviving workers read the manager's current origin.
+const originFile = 'manager-origin'
+export function publishManagerOrigin(directory: string, origin: string): void {
+  const target = join(directory, originFile), temporary = `${target}.${randomUUID()}.tmp`
+  try {
+    writeFileSync(temporary, managerUrl(origin), { mode: 0o600, flag: 'wx' })
+    renameSync(temporary, target)
+  } finally { rmSync(temporary, { force: true }) }
+}
+export function currentManagerOrigin(stateDir: string, repositoryId: string, fallback: string): string {
+  const parent = dirname(stateDir)
+  if (basename(stateDir) === repositoryId && basename(parent) === 'repositories') {
+    try { return managerUrl(readFileSync(join(dirname(parent), originFile), 'utf8')) }
+    catch (failure) { if ((failure as NodeJS.ErrnoException).code !== 'ENOENT') throw failure }
+  }
+  return managerUrl(fallback)
 }
 
 /** Rejects arbitrary CLI flags before a repository can use the shared bot transport. */

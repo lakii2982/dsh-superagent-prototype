@@ -8,7 +8,7 @@ import { feishuRef, feishuTime, HistoricalMessageSchema, HistoryPageSchema, hist
 import type { ContextMessage, ThreadContext } from './kind.ts'
 
 /** Retained source message reference anchoring context reads; `at` is the timestamp around which `chatAround` queries. */
-export interface FeishuRef { triggerId: string; chatId: string; messageId: string; at?: string }
+export interface FeishuRef { triggerId: string; chatId: string; messageId: string; at?: string; botId?: string; legacyBot?: boolean; originalThreadId?: string; rootId?: string }
 const messageId = z.string().regex(/^om_[a-zA-Z0-9_-]+$/)
 const sourceSchema = z.object({
   message_id: messageId, chat_id: z.string(), root_id: messageId.optional(), parent_id: messageId.optional(),
@@ -28,6 +28,7 @@ const threadSchema = z.object({ messages: z.array(z.unknown()), has_more: z.bool
 
 /** Reads the CLI-provided AppLink for the source message alone, without retaining expanded thread content. */
 export async function readFeishuLink(commands: Commands, ref: FeishuRef): Promise<string> {
+  commands = commands.withFeishuBot(ref.botId)
   const id = messageId.parse(ref.messageId)
   const result = z.object({ messages: z.array(z.object({ message_id: messageId, chat_id: z.string(), message_app_link: z.url().optional(), deleted: z.boolean().optional() })) })
     .parse(await commands.lark(['im', '+messages-mget', '--message-ids', id, '--no-reactions']))
@@ -68,6 +69,7 @@ export interface FeishuOne<M> { status: string; message: M | null }
 /** Fetches one message or a bounded topic page of a Trigger's source message with explicit pagination continuation. */
 export async function readFeishu(commands: Commands, ref: FeishuRef, resource: string, pageSize: number,
   order: 'asc' | 'desc' = 'asc'): Promise<FeishuPage<FeishuMessage> | FeishuOne<FeishuMessage>> {
+  commands = commands.withFeishuBot(ref.botId)
   const request = feishuResource(resource)
   if (request.triggerId !== ref.triggerId) throw new Error('A Feishu source trigger is required')
   if (request.section === 'around') throw new Error('The chat around a message is read with feishuRead')
@@ -114,6 +116,7 @@ function historyView(message: HistoricalMessage): ContextMessage {
 /** Reads chat messages surrounding `ref.at` (five before and five after on initial read, then pages of ten older messages). */
 async function chatAround(commands: Commands, ref: FeishuRef, cursor: string | undefined, before = 5,
   after = 5): Promise<FeishuPage<ContextMessage>> {
+  commands = commands.withFeishuBot(ref.botId)
   const time = Date.parse(ref.at ?? '')
   if (!Number.isFinite(time)) throw new Error('The source Feishu message has no time to read the chat around')
   const list = async (parameters: Record<string, unknown>) => {
@@ -135,6 +138,7 @@ async function chatAround(commands: Commands, ref: FeishuRef, cursor: string | u
 }
 export async function feishuRead(commands: Commands, ref: FeishuRef, resource: string,
   pageSize: number): Promise<FeishuPage<ContextMessage> | FeishuOne<ContextMessage>> {
+  commands = commands.withFeishuBot(ref.botId)
   const request = feishuResource(resource)
   if (request.section === 'around') {
     if (request.triggerId !== ref.triggerId) throw new Error('A Feishu source trigger is required')

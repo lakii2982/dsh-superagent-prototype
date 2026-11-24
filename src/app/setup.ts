@@ -82,6 +82,9 @@ export class Setup {
   }
   private async resolve(settings: Settings): Promise<Deployment> {
     const { context, machine, lifetime } = this.host
+    if (machine.managed?.enterprisePilot && workspaceMode(settings) !== 'worktree') {
+      throw new SetupError('environmentFailed', { output: 'Enterprise pilot repositories require managed Git worktrees.' })
+    }
     const probe = this.probe()
     const deployment = await resolveDeployment(machine, settings.sources.github?.config, probe)
     const feishu = await resolveFeishuBot(machine, settings.sources.feishu?.config, probe).catch((error: unknown) => {

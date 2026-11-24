@@ -46,6 +46,50 @@ describe('worker shims', () => {
     expect([(await exec(join(bin, 'gh'), ['api', 'user'])).stdout, (await exec(join(bin, 'lark-cli'), ['im'])).stdout]).toEqual(['gh api user\n', 'lark im\n'])
     expect(readdirSync(bin)).not.toContain('git')
   })
+  it('keeps normal Git workspace commands and routes pilot publishing and channel operations to the host', async () => {
+    const deployed = testDeployment({ stateDir: dir, managed: { repositoryId: 'pilot', url: 'http://127.0.0.1:3082',
+      token: 'fixture', enterprisePilot: true } })
+    await writeEnvironment(deployed, [])
+    const env = { PATH: `${workerBin(dir)}:${process.env.PATH}` }
+    await expect(exec('gh', ['pr', 'ready'], { env })).rejects.toMatchObject({ stderr: expect.stringContaining('orchestrator_delivery') })
+    await expect(exec('lark-cli', ['im'], { env })).rejects.toMatchObject({ stderr: expect.stringContaining('orchestrator_read') })
+    await exec('git', ['init', '-q', 'checkout'], { cwd: dir, env })
+    await expect(exec('git', ['-C', 'checkout', 'status', '--short'], { cwd: dir, env })).resolves.toMatchObject({ stdout: '' })
+    await expect(exec('git', ['-C', 'checkout', '-c', 'user.name=fixture', 'push'], { cwd: dir, env }))
+      .rejects.toMatchObject({ stderr: expect.stringContaining('orchestrator_delivery') })
+  })
+  it('keeps managed non-pilot workers from invoking a single bot CLI while preserving their GitHub command', async () => {
+    const log = join(dir, 'bot-invocations'), lark = program(join(dir, 'local-bot'), `echo invoked >> '${log}'`)
+    const gh = program(join(dir, 'local-gh'), 'echo github "$@"')
+    const base = testDeployment()
+    const deployed = testDeployment({ stateDir: dir, github: { ...base.github, cli: gh }, feishu: { ...base.feishu!, cli: lark },
+      managed: { repositoryId: 'managed', url: 'http://127.0.0.1:3082', token: 'private-repository-token' } })
+    await writeEnvironment(deployed, [])
+    const bin = workerBin(dir)
+    await expect(exec(join(bin, 'lark-cli'), ['im', '+messages-reply', '--message-id', 'om_target']))
+      .rejects.toMatchObject({ code: 1, stderr: expect.stringContaining('orchestrator_read') })
+    expect(() => readFileSync(log)).toThrow()
+    expect((await exec(join(bin, 'gh'), ['api', 'user'])).stdout).toBe('github api user\n')
+    expect(readFileSync(join(bin, 'lark-cli'), 'utf8')).not.toContain('private-repository-token')
+    expect(readFileSync(join(bin, 'lark-cli'), 'utf8')).not.toContain(lark)
+  })
+  it('pins standalone bot calls to their configured profile and rejects caller profile overrides', async () => {
+    const log = join(dir, 'bot-arguments')
+    const lark = program(join(dir, 'profile-bot'), `printf '%s\\n' "$@" > '${log}'`)
+    const profile = "team a's bot", base = testDeployment()
+    await writeEnvironment(testDeployment({ stateDir: dir, feishu: { ...base.feishu!, cli: lark, profile } }), [])
+    const shim = join(workerBin(dir), 'lark-cli')
+    await exec(shim, ['im', '+chat-list'])
+    expect(readFileSync(log, 'utf8').trim().split('\n')).toEqual([`--profile=${profile}`, 'im', '+chat-list'])
+    // An argument delimiter remains after the pinned root flag instead of hiding it from the CLI parser.
+    await exec(shim, ['im', '+chat-list', '--'])
+    expect(readFileSync(log, 'utf8').trim().split('\n')).toEqual([`--profile=${profile}`, 'im', '+chat-list', '--'])
+    rmSync(log)
+    for (const args of [['--profile=another', 'im'], ['im', '--profile', 'another']]) {
+      await expect(exec(shim, args)).rejects.toMatchObject({ code: 1, stderr: expect.stringContaining('profile cannot be overridden') })
+      expect(() => readFileSync(log)).toThrow()
+    }
+  })
   it('replace only what dsh-superagent wrote and refuse anything else in its places', async () => {
     await writeEnvironment(testDeployment({ stateDir: dir }), ['old-cli'])
     await writeEnvironment(testDeployment({ stateDir: dir }), [])

@@ -19,9 +19,18 @@ export type RepoRoute = ({ page: 'overview' | 'source' | 'repository'; id?: unde
   | ({ page: 'execution'; id?: undefined; query?: { filter?: TicketFilter } } & RepoScope)
   | ({ page: 'execution'; id: string; query?: undefined } & RepoScope)
   | ({ page: 'settings'; id?: undefined; query: { group: SettingsGroup; source?: string; version?: string } } & RepoScope)
-export type Route = RepoRoute | { page: 'manager'; id?: undefined; query: { area: ManagerArea } }
+export type Route = RepoRoute | { page: 'manager'; id?: undefined; query: { area: ManagerArea; editRepositoryId?: string; bindingRepositoryId?: string; bindingBotId?: string } }
+export const repositoryEditorRoute = (id: string): Route => ({ page: 'manager', query: { area: 'repositories', editRepositoryId: id } })
 export const HOME: Route = { page: 'overview' }
 export const MANAGER_HOME: Route = { page: 'manager', query: { area: 'repositories' } }
+export const MANAGER_ROUTE_KEY = 'dsh-superagent/manager/route'
+export const MANAGER_NAV_EVENT = 'dsh-superagent:manager-navigate'
+/** A Plugin Manager shortcut works both when the panel is mounted and when the host mounts it next. */
+export function openManagerArea(area: ManagerArea): void {
+  const route: Route = { page: 'manager', query: { area } }
+  remember({ route, stack: [] }, MANAGER_ROUTE_KEY)
+  window.dispatchEvent(new CustomEvent<Route>(MANAGER_NAV_EVENT, { detail: route }))
+}
 export const settingsRoute = (group: SettingsGroup, query: { source?: string; version?: string } = {}): Route =>
   ({ page: 'settings', query: { group, ...query } })
 export const setupPage = (place: SetupPlace): Route =>
@@ -55,7 +64,10 @@ export function parseRoute(value: unknown): Route | undefined {
     case 'execution': return scoped(record ? { page, id: record } : { page, query: compact({ filter: pick(TICKET_FILTERS, query?.filter) }) })
     case 'settings': return scoped({ page, query: { group: pick(SETTINGS_GROUPS, query?.group) ?? 'source',
       ...compact({ source: text('source'), version: text('version') }) } })
-    case 'manager': return { page, query: { area: pick(MANAGER_AREAS, query?.area) ?? 'repositories' } }
+    case 'manager': {
+      const area = pick(MANAGER_AREAS, query?.area) ?? 'repositories'
+      return { page, query: { area, ...compact({ editRepositoryId: area === 'repositories' ? text('editRepositoryId') : undefined, bindingRepositoryId: area === 'bindings' ? text('bindingRepositoryId') : undefined, bindingBotId: area === 'bindings' ? text('bindingBotId') : undefined }) } }
+    }
     default: return undefined
   }
 }

@@ -45,6 +45,8 @@ export interface WorktreePlan {
   name: string
   /** Branch the ticket branches from; absent means the remote's default branch. */
   baseBranch?: string
+  /** Enterprise work must establish the remote default instead of falling back to a local guess. */
+  requireRemoteDefault?: boolean
 }
 
 /** The directory-safe form of a repository identity, used for the mirror's and the worktrees' directories. */
@@ -136,8 +138,16 @@ async function resolveBase(subprocess: SubprocessRuntime, signal: AbortSignal, p
   })
   let branch = plan.baseBranch?.trim()
   if (!branch) {
-    const head = (await git('symbolic-ref', '--short', 'refs/remotes/origin/HEAD').catch(() => '')).trim()
-    branch = head.replace(/^origin\//, '') || undefined
+    // Bare clones usually lack a local origin/HEAD even after the fetch above. Ask the origin itself.
+    const advertised = await git('ls-remote', '--symref', 'origin', 'HEAD').catch(() => '')
+    branch = /^ref: refs\/heads\/(.+)\tHEAD$/m.exec(advertised)?.[1]
+    if (!branch && plan.requireRemoteDefault) {
+      throw new WorktreeConflict(`Could not establish the default branch advertised by ${plan.remote}; the worktree was not created`)
+    }
+    if (!branch) {
+      const head = (await git('symbolic-ref', '--short', 'refs/remotes/origin/HEAD').catch(() => '')).trim()
+      branch = head.replace(/^origin\//, '') || undefined
+    }
   }
   for (const name of branch ? [branch] : ['main', 'master']) {
     const baseRef = `refs/remotes/origin/${name}`

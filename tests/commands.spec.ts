@@ -16,6 +16,26 @@ const deployment = testDeployment({ github: { ...testDeployment().github, cli: '
 const REPOSITORY = deployment.repository
 const reply = { id: 'stable-operation', channel: githubChannel(8), text: 'Done', kind: 'reply' as const }
 describe('account-isolated operations', () => {
+  it('keeps concurrent replies pinned to their original bots through signal-scoped bridge requests', async () => {
+    const managed = testDeployment({ managed: { repositoryId: 'repo', url: 'http://127.0.0.1:3082', token: 'repository-private-token' } })
+    const commands = new Commands(() => managed, {}, new AbortController().signal)
+    const requests: Record<string, unknown>[] = []
+    const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => {
+      requests.push(JSON.parse(String(options?.body)) as Record<string, unknown>)
+      expect(new Headers(options?.headers).get('authorization')).toBe('Bearer repository-private-token')
+      expect(options?.redirect).toBe('error')
+      return new Response(JSON.stringify({ data: {} }), { headers: { 'content-type': 'application/json' } })
+    })
+    try {
+      await Promise.all(['bot-a', 'bot-b'].map(botId => send(commands.withSignal(new AbortController().signal),
+        { ...reply, channel: { ...feishuChannel('oc_shared', 'om_shared'), address: { chatId: 'oc_shared', messageId: 'om_shared', botId } } })))
+      expect(requests.map(request => request.botId).sort()).toEqual(['bot-a', 'bot-b'])
+      await commands.withFeishuBot('bot-a').withSignal(new AbortController().signal).lark(['im', '+chat-list'])
+      expect(requests.at(-1)?.botId).toBe('bot-a')
+      await commands.lark(['im', '+chat-list'])
+      expect(requests.at(-1)).not.toHaveProperty('botId')
+    } finally { fetch.mockRestore() }
+  })
   it('uses the agent account\'s GitHub CLI and preserves literal shell metacharacters in argv', async () => {
     const commands = new Commands(() => deployment, {}, new AbortController().signal); const run = vi.spyOn(commands,'run').mockResolvedValue('{}')
     await commands.gh(['api','some-path','-f','body=`whoami` $(touch x)'])
@@ -57,6 +77,13 @@ describe('account-isolated operations', () => {
     const commands = new Commands(() => deployment, {}, new AbortController().signal); const run = vi.spyOn(commands,'run').mockResolvedValue('{"ok":true,"data":{}}')
     await send(commands, { ...reply, channel: feishuChannel('oc_1', 'om_1') })
     expect(run.mock.calls[0]![1]).toEqual(expect.arrayContaining(['--as','bot','--idempotency-key','stable-operation','--message-id','om_1']))
+  })
+  it('pins standalone Feishu requests to the configured CLI profile without switching global accounts', async () => {
+    const configured = testDeployment({ feishu: { ...testDeployment().feishu!, profile: 'team-a' } })
+    const commands = new Commands(() => configured, {}, new AbortController().signal)
+    const run = vi.spyOn(commands, 'run').mockResolvedValue('{"ok":true,"data":{}}')
+    await commands.lark(['im', '+chat-list'])
+    expect(run.mock.calls[0]?.[1]).toEqual(['im', '+chat-list', '--as', 'bot', '--format', 'json', '--profile=team-a'])
   })
 })
 

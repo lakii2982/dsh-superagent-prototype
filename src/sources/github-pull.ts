@@ -11,6 +11,7 @@ const PullSchema = z.looseObject({
   body: z.string().nullish(), created_at: z.string().optional(),
   merged: z.boolean().optional(), merged_at: z.string().nullish(), closed_at: z.string().nullish(), auto_merge: z.unknown().optional(),
   head: z.looseObject({ sha: z.string(), ref: z.string(), repo: z.looseObject({ full_name: z.string() }).nullish() }),
+  base: z.looseObject({ ref: z.string() }).optional(),
 })
 export type Pull = z.infer<typeof PullSchema> & { number: number }
 export const readPull = async (ctx: SourceContext, number: number, signal?: AbortSignal): Promise<Pull> =>
@@ -37,7 +38,12 @@ export function claimPull(ctx: SourceContext, ticketId: string, pr: Pull): strin
   if (!ticket || !liveTicket(ticket)) return 'Ticket ended because its PR was closed'
   const source = ctx.triggers.get(ticket.origin.triggerId)
   const started = source?.source === SOURCE && source.meta.isPr === true && source.meta.number === pr.number
-  const opened = agentPull(pr, ctx.deployment) && ticketBranch(ticket, pr.head.ref)
+  const scene = ticket.execution?.worktree
+  const expectedBase = scene?.baseRef.replace(/^refs\/remotes\/origin\/|^origin\//, '')
+  const branchMatches = ctx.deployment.managed?.enterprisePilot
+    ? scene?.branch === pr.head.ref && pr.base?.ref === expectedBase
+    : ticketBranch(ticket, pr.head.ref)
+  const opened = agentPull(pr, ctx.deployment) && branchMatches
   if (!started && !opened) {
     const { login } = ctx.deployment.github
     return `PR does not belong to this ticket: use the source PR or a PR by ${login} from a branch whose last path segment is DSH_SUPERAGENT_NAME; omit pr_number when no PR exists`

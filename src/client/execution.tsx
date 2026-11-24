@@ -73,7 +73,7 @@ function EnvironmentVariables({ groups, sources,
   </DisclosureRow>
 }
 export function ExecutionSettings() {
-  const { t } = usePanel()
+  const { t, enterprisePilot } = usePanel()
   const { blocks, environment, sources } = useSettings().settings
   // Keep raw user text (such as separators between blocked commands) in the draft and parse only on save.
   const executor = blocks.executor.value
@@ -105,7 +105,7 @@ export function ExecutionSettings() {
         <div className="dt-form dt-block">
           <h2 className="dt-block-title">{t('term.environment')}<InfoTip text={t('environmentIntro')} /></h2>
           <Field label={t('workspaceMode')} hint={t('workspaceModeHint')}>
-            <SegmentedControl label={t('workspaceMode')} options={[{ value: '', label: t('workspaceAuto') },
+            <SegmentedControl disabled={enterprisePilot} label={t('workspaceMode')} options={[{ value: '', label: t('workspaceAuto') },
               { value: 'worktree', label: t('workspaceWorktree') }, { value: 'isolated', label: t('workspaceIsolated') },
               { value: 'current', label: t('workspaceCurrent') }]}
               value={value.workspaceMode} onChange={workspaceMode => edit({ workspaceMode })} />

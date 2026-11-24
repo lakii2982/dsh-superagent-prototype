@@ -1,0 +1,18 @@
+[Unit]
+Description=DSH enterprise manager
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/dsh-enterprise
+ExecStart=%h/dsh-enterprise/dsh-enterprise foreground
+ExecStop=%h/dsh-enterprise/dsh-enterprise stop
+UMask=0077
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=330
+KillMode=control-group
+
+[Install]
+WantedBy=default.target
