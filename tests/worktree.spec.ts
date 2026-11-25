@@ -7,7 +7,7 @@ import { promisify } from 'node:util'
 import { afterEach, beforeEach, expect, it } from 'vitest'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import { ScopeQueue, normalizeScopePath, overlaps } from '../src/core/scope.ts'
-import { WORKTREE_BRANCH_PREFIX, WorktreeConflict, inspectWorktree, mirrorPath, prepareWorktree, removeWorktree, repositoryId,
+import { WORKTREE_BRANCH_PREFIX, WorktreeConflict, canonicalRemote, inspectWorktree, mirrorPath, prepareWorktree, removeWorktree, repositoryId,
   verifyRemoteBeforeRemoval, worktreeBranch, worktreePath, worktreeRemote } from '../src/infra/worktree.ts'
 import { gitEnv } from './fixtures/git.ts'
 
@@ -72,6 +72,33 @@ it('prepares independent worktrees for two tickets of one repository, side by si
   expect(worktreeBranch('fix-a-abc123456789')).toBe(a.branch)
   expect(worktreeRemote('acme/widgets')).toBe('git@github.com:acme/widgets.git')
   expect(worktreeRemote(remote)).toBe(remote)
+  // A worker's `insteadOf` rewrites ssh origins to https, so a mirror cloned over ssh still matches the planned remote.
+  expect(canonicalRemote('https://github.com/acme/widgets.git')).toBe('github.com/acme/widgets')
+  expect(canonicalRemote(worktreeRemote('acme/widgets'))).toBe('github.com/acme/widgets')
+  expect(canonicalRemote('git@github.com:acme/widgets.git')).toBe(canonicalRemote('https://github.com/acme/widgets'))
+})
+
+it('follows the advertised default after the origin moves it away from main', async () => {
+  await prepareWorktree(subprocess, signal, plan('old-default-abc123456789'))
+  await git(['checkout', '-b', 'release/default'], checkout)
+  await writeFile(join(checkout, 'README.md'), 'release base\n')
+  await commitAll(checkout, 'separate default branch')
+  await git(['push', 'origin', 'release/default'], checkout)
+  await git(['symbolic-ref', 'HEAD', 'refs/heads/release/default'], remote)
+  const scene = await prepareWorktree(subprocess, signal, { ...plan('new-default-def456789012'), requireRemoteDefault: true })
+  expect(scene.baseRef).toBe('refs/remotes/origin/release/default')
+  expect(await readFile(join(scene.path, 'README.md'), 'utf8')).toBe('release base\n')
+  const explicit = await prepareWorktree(subprocess, signal, { ...plan('explicit-main-abc456789012'), baseBranch: 'main' })
+  expect(explicit.baseRef).toBe('refs/remotes/origin/main')
+})
+
+it('requires an advertised symbolic default in enterprise mode and retains legacy fallback', async () => {
+  const commit = (await git(['rev-parse', 'refs/heads/main'], remote)).stdout.trim()
+  await git(['update-ref', '--no-deref', 'HEAD', commit], remote)
+  await expect(prepareWorktree(subprocess, signal, { ...plan('required-default-abc123456789'), requireRemoteDefault: true }))
+    .rejects.toThrow('Could not establish the default branch advertised by')
+  const scene = await prepareWorktree(subprocess, signal, plan('legacy-default-def456789012'))
+  expect(scene.baseRef).toBe('refs/remotes/origin/main')
 })
 
 it('queues overlapping write scopes of one repository while different files run in their own worktrees', async () => {

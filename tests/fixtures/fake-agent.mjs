@@ -2,18 +2,23 @@
  * A stand-in for the local `claude` and `codex` CLIs in the delegation tests: it prints the same JSON shapes as the real
  * CLIs, logs the argv and directory it received, and can stay alive so a test can stop it. It never touches the network.
  */
-import { appendFileSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, statSync, writeFileSync } from 'node:fs'
 
 const [agent, ...args] = process.argv.slice(2)
 const env = (name) => process.env[name] ?? null
 const log = process.env.FAKE_AGENT_LOG
+const mode = process.env.FAKE_AGENT_MODE ?? 'ok'
+if (mode === 'stubborn') {
+  // Announce readiness only after the signal handlers are installed.
+  process.on('SIGTERM', () => {})
+  process.on('SIGINT', () => {})
+}
 if (log) appendFileSync(log, `${JSON.stringify({ agent, args, cwd: process.cwd(), proxy: process.env.HTTPS_PROXY ?? null,
   // The runner's boundary, observed from inside the child: its home, and the host credentials it must not inherit.
   home: env('HOME'), tmp: env('TMPDIR'), homeMode: process.env.HOME ? statSync(process.env.HOME).mode & 0o777 : null,
   ghToken: env('GH_TOKEN'), dshHome: env('DSH_HOME'), feishu: env('FEISHU_APP_ID'), sshSock: env('SSH_AUTH_SOCK'),
   awsKey: env('AWS_ACCESS_KEY_ID') })}\n`)
 if (process.env.FAKE_AGENT_WRITE_FILE) writeFileSync(process.env.FAKE_AGENT_WRITE_FILE, 'changed by the fake agent\n')
-const mode = process.env.FAKE_AGENT_MODE ?? 'ok'
 const session = process.env.FAKE_AGENT_SESSION ?? `${agent}-session-1`
 if (mode === 'login') {
   const message = 'Not logged in. Run the login command first.'
@@ -22,11 +27,12 @@ if (mode === 'login') {
   process.exit(1)
 } else if (mode === 'stubborn') {
   // A process that ignores the stop request: the runner must report the stop as unconfirmed, not fake a stop.
-  process.on('SIGTERM', () => {})
-  process.on('SIGINT', () => {})
   setInterval(() => {}, 1000)
-  // It does leave on its own later, so the runner can settle it as stopped once it is really gone.
-  setTimeout(() => process.exit(0), Number(process.env.FAKE_AGENT_EXIT_MS ?? 700))
+  // Tests release this process after checking the unconfirmed stop, independent of machine speed.
+  if (process.env.FAKE_AGENT_EXIT_FILE) setInterval(() => {
+    if (existsSync(process.env.FAKE_AGENT_EXIT_FILE)) process.exit(0)
+  }, 10)
+  else setTimeout(() => process.exit(0), Number(process.env.FAKE_AGENT_EXIT_MS ?? 700))
 } else if (mode === 'sleep') {
   // Keep the process alive until the runner terminates it.
   setInterval(() => {}, 1000)

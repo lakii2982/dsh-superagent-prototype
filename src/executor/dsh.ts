@@ -82,7 +82,7 @@ export interface ExecutorHost {
   readonly effects: Pick<Effects, 'enqueue' | 'handle'>
   /** The `worker` health entry, which reports whether background worker event handling failed. */
   readonly health: HealthEntry
-  readonly machine: Pick<Machine, 'stateDir'>
+  readonly machine: Pick<Machine, 'stateDir' | 'managed'>
   readonly lifetime: AbortSignal
   /** Session manager for worker sessions and for relaying worker reports to the main Session. */
   readonly sessions: Pick<Sessions, 'ensure' | 'prompt' | 'promptedId' | 'relay' | 'holds'>
@@ -366,7 +366,8 @@ export class DshExecutor implements Executor {
   private worktreePlan(ticket: Ticket): WorktreePlan {
     const execution = ticket.execution!
     return { repository: String(execution.repository ?? ''), remote: worktreeRemote(String(execution.repository ?? '')),
-      root: dirname(dirname(dirname(execution.directory))), name: execution.name }
+      root: dirname(dirname(dirname(execution.directory))), name: execution.name,
+      requireRemoteDefault: this.host.machine.managed?.enterprisePilot === true }
   }
   /**
    * Claim the ticket's write scope, then prepare or verify its managed worktree and record the verified scene on the ticket and

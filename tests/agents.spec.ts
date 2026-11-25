@@ -1,6 +1,6 @@
 /** Delegation to the local agent CLIs: command building, durable runs, delivery gating, stop ordering, and the worker tool. */
 import { execFile, spawn } from 'node:child_process'
-import { mkdtemp, realpath, rm, unlink } from 'node:fs/promises'
+import { mkdtemp, realpath, rm, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -13,6 +13,7 @@ import { runningAssignment, type Ticket } from '../src/core/index.ts'
 import { DshExecutor, type ExecutorHost } from '../src/executor/dsh.ts'
 import { AgentRuns, agentCommand, agentEnvironment, agentErrorKind, parseClaude, parseCodex, parseSystemProxy, probeAgents,
   type AgentDelegation, type AgentProbe, type AgentRun, type AgentRunsHost } from '../src/executor/agents.ts'
+import * as agentsModule from '../src/executor/agents.ts'
 import { KV } from '../src/kv.ts'
 import { executorTools, type ExecutorToolsHost } from '../src/app/tools/executor.ts'
 import type { Settings } from '../src/policy.ts'
@@ -20,6 +21,8 @@ import { gitEnv } from './fixtures/git.ts'
 
 const FIXTURE = fileURLToPath(new URL('./fixtures/fake-agent.mjs', import.meta.url))
 const BINARIES = { claude: [process.execPath, FIXTURE, 'claude'], codex: [process.execPath, FIXTURE, 'codex'] }
+/** The fixture process is available independently of the host's real CLIs and sandbox installation. */
+const fixtureProbe = (): AgentProbe[] => [{ kind: 'claude', available: true }, { kind: 'codex', available: true }]
 const runFile = promisify(execFile)
 const directories: string[] = []
 const lifetimes: AbortController[] = []
@@ -110,7 +113,7 @@ const makeWorld = async (options: { running?: (ticketId: string, assignmentId: s
     deliver: async (ticketId, assignmentId, requestId, text) => { delivered.push({ ticketId, assignmentId, requestId, text }) },
   }
   const runs = new AgentRuns(host, { binaries: BINARIES, ...options.stopMs === undefined ? {} : { stopMs: options.stopMs },
-    ...options.probe ? { probe: options.probe } : {} })
+    probe: options.probe ?? fixtureProbe })
   const invocations = () => {
     try {
       return readFileSync(join(dir, 'invocations.ndjson'), 'utf8').trim().split('\n').filter(Boolean)
@@ -133,6 +136,7 @@ const settled = async (runs: AgentRuns, ticketId: string, runId: string, timeout
 }
 
 afterEach(async () => {
+  vi.restoreAllMocks()
   for (const lifetime of lifetimes.splice(0)) lifetime.abort()
   for (const name of Object.keys(process.env)) if (name.startsWith('FAKE_AGENT_')) delete process.env[name]
   for (const dir of directories.splice(0)) await rm(dir, { recursive: true, force: true })
@@ -322,16 +326,22 @@ describe('agent runs', () => {
 
   it('keeps a process that ignores the stop running, and settles it as stopped only when it is really gone', async () => {
     process.env.FAKE_AGENT_MODE = 'stubborn'
-    process.env.FAKE_AGENT_EXIT_MS = '800'
     const world = await makeWorld({ stopMs: 100 })
+    const release = join(world.dir, 'allow-exit')
+    process.env.FAKE_AGENT_EXIT_FILE = release
     const ticket = world.tickets[0]!
     const run = world.runs.start(ticket, { agent: 'claude', prompt: 'hold on', permission: 'read' })
-    await vi.waitFor(() => expect(world.invocations()).toHaveLength(1))
-    const { run: still, confirmed } = await world.runs.stop(ticket.id, run.id, 'stop now')
-    // The process survived the bound: the run is still running, so its write slot is not released.
-    expect(confirmed).toBe(false)
-    expect(still).toMatchObject({ status: 'running', stopUnconfirmed: true })
-    expect(still.stopRequestedAt).toBeTruthy()
+    try {
+      await vi.waitFor(() => expect(world.invocations()).toHaveLength(1))
+      const { run: still, confirmed } = await world.runs.stop(ticket.id, run.id, 'stop now')
+      // The process survived the bound: the run is still running, so its write slot is not released.
+      expect(confirmed).toBe(false)
+      expect(still).toMatchObject({ status: 'running', stopUnconfirmed: true })
+      expect(still.stopRequestedAt).toBeTruthy()
+    } finally {
+      await writeFile(release, '')
+      await settled(world.runs, ticket.id, run.id)
+    }
     const done = await settled(world.runs, ticket.id, run.id, 5000)
     expect(done).toMatchObject({ status: 'stopped' })
     expect(done.stopUnconfirmed).toBeUndefined()
@@ -340,16 +350,22 @@ describe('agent runs', () => {
 
   it('reports stopAll as unconfirmed instead of recording a stop the process did not make', async () => {
     process.env.FAKE_AGENT_MODE = 'stubborn'
-    process.env.FAKE_AGENT_EXIT_MS = '800'
     const world = await makeWorld({ stopMs: 100 })
+    const release = join(world.dir, 'allow-exit')
+    process.env.FAKE_AGENT_EXIT_FILE = release
     const ticket = world.tickets[0]!
     const run = world.runs.start(ticket, { agent: 'claude', prompt: 'hold on', permission: 'read' })
-    await vi.waitFor(() => expect(world.invocations()).toHaveLength(1))
-    const result = await world.runs.stopAll(ticket.id, 'ticket ended')
-    expect(result.confirmed).toBe(false)
-    expect(result.runs).toHaveLength(1)
-    expect(result.runs[0]).toMatchObject({ id: run.id, status: 'running', stopUnconfirmed: true })
-    expect(world.runs.status(ticket.id, run.id)).toMatchObject({ status: 'running' })
+    try {
+      await vi.waitFor(() => expect(world.invocations()).toHaveLength(1))
+      const result = await world.runs.stopAll(ticket.id, 'ticket ended')
+      expect(result.confirmed).toBe(false)
+      expect(result.runs).toHaveLength(1)
+      expect(result.runs[0]).toMatchObject({ id: run.id, status: 'running', stopUnconfirmed: true })
+      expect(world.runs.status(ticket.id, run.id)).toMatchObject({ status: 'running' })
+    } finally {
+      await writeFile(release, '')
+      await settled(world.runs, ticket.id, run.id)
+    }
   })
 
   it('refuses an agent the host cannot run, for reading as well as writing', async () => {
@@ -446,7 +462,7 @@ describe('agent runs', () => {
     const first = world.runs.start(ticket, { agent: 'claude', prompt: 'first', permission: 'read' })
     const done = await settled(world.runs, ticket.id, first.id)
     expect(done.result?.text).toBe('durable')
-    const fresh = new AgentRuns(world.host, { binaries: BINARIES })
+    const fresh = new AgentRuns(world.host, { binaries: BINARIES, probe: fixtureProbe })
     expect(fresh.status(ticket.id, first.id)).toMatchObject({ status: 'done', result: { text: 'durable' } })
 
     const base: AgentRun = { id: 'old-0', ticketId: ticket.id, assignmentId: 'a1', agent: 'claude', permission: 'read', prompt: 'old',
@@ -471,7 +487,7 @@ describe('agent runs', () => {
       prompt: 'old', status: 'running', externalId: 'claude-session-9', directory: world.dir, startedAt: '2026-05-01T00:00:00.000Z' }
     world.values.set(KV.executor.agentRun(ticket.id, stored.id), stored)
     world.values.set(KV.executor.agentRuns(ticket.id), [stored.id])
-    const fresh = new AgentRuns(world.host, { binaries: BINARIES })
+    const fresh = new AgentRuns(world.host, { binaries: BINARIES, probe: fixtureProbe })
     expect(fresh.status(ticket.id, stored.id)).toMatchObject({ status: 'interrupted', externalId: 'claude-session-9' })
   })
 
@@ -494,8 +510,15 @@ describe('agent runs', () => {
 describe('agent runs in the Executor', () => {
   it("stops the ticket's agent processes before releasing its write slot", async () => {
     process.env.FAKE_AGENT_MODE = 'sleep'
+    // Exercise the real runner lifecycle with a controlled process, never the host's installed agent CLI.
+    const ActualAgentRuns = AgentRuns
+    const runner = vi.spyOn(agentsModule, 'AgentRuns').mockImplementation(function (host: AgentRunsHost) {
+      return new ActualAgentRuns(host, { binaries: BINARIES, probe: fixtureProbe })
+    } as unknown as typeof AgentRuns)
     const dir = await mkdtemp(join(tmpdir(), 'dsh-agents-executor-'))
     directories.push(dir)
+    const invocationLog = join(dir, 'invocations.ndjson')
+    process.env.FAKE_AGENT_LOG = invocationLog
     const ticket = ticketOf('t9', 'a9', dir)
     const settings = { executor: { workspaceMode: 'isolated', maxWorkers: 5 } } as unknown as Settings
     const order: string[] = []
@@ -522,7 +545,7 @@ describe('agent runs in the Executor', () => {
     const agents = executor.agents
     if (!agents) throw new Error('The executor exposes no agents')
     const run = agents.start(ticket, { agent: 'claude', prompt: 'write it', permission: 'read' })
-    await delay(150)
+    await vi.waitFor(() => expect(readFileSync(invocationLog, 'utf8')).toContain('"agent":"claude"'))
     executor.stop(ticket, runningAssignment(ticket)!, 'ticket ended')
     await vi.waitFor(() => expect(order).toContain(KV.executor.scope(ticket.id)), { timeout: 5000 })
     expect(order.indexOf('agent-exit')).toBeGreaterThanOrEqual(0)
@@ -530,12 +553,13 @@ describe('agent runs in the Executor', () => {
     expect(values.has(KV.executor.agentRun(ticket.id, run.id))).toBe(true)
     expect(agents.status(ticket.id, run.id)).toMatchObject({ status: 'stopped' })
     executor.dispose()
+    runner.mockRestore()
   }, 15_000)
 })
 
 describe('orchestrator_agent', () => {
   /** A stub delegation that records what the tool asked for, so the tool's own choices are testable without a process. */
-  const stubAgents = (calls: string[], probes?: AgentProbe[]): AgentDelegation => {
+  const stubAgents = (calls: string[], probes: AgentProbe[] = fixtureProbe()): AgentDelegation => {
     const base: AgentRun = { id: 'run-1', ticketId: 't1', assignmentId: 'a1', agent: 'codex', permission: 'read', prompt: 'x',
       status: 'running', directory: '/work', startedAt: '2026-05-01T00:00:00.000Z' }
     return {
@@ -544,7 +568,7 @@ describe('orchestrator_agent', () => {
       status: () => base,
       stop: async () => ({ run: { ...base, status: 'stopped' }, confirmed: true }),
       stopAll: async () => ({ confirmed: true, runs: [] }),
-      ...probes ? { probe: () => probes } : {},
+      probe: () => probes,
     }
   }
   const toolOf = (agents: AgentDelegation, agent: string | undefined) => {
