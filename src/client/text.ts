@@ -31,7 +31,13 @@ function label(t: T, reason: Reason): string {
   if (/^\w*Error\b/.test(written)) { const first = written.split('\n')[0]!; return first.length > 140 ? `${first.slice(0, 140)}…` : first }
   return written
 }
-export const setupText = (t: T, problem: Pick<SetupProblem, 'code' | 'values'>): string => t(`setup.${problem.code}`, problem.values)
+export function setupText(t: T, problem: Pick<SetupProblem, 'code' | 'values'>): string {
+  if (problem.code !== 'branchRulesMissing' || t('lang') === 'en') return t(`setup.${problem.code}`, problem.values)
+  const missing = (problem.values.missing ?? '').replaceAll('required approving review', '至少一人批准 PR')
+    .replaceAll('required CI status check', '必需 CI 检查').replaceAll('force-push prevention', '禁止强制推送')
+    .replaceAll('branch-deletion prevention', '禁止删除分支').replaceAll(', ', '、')
+  return t('setup.branchRulesMissing', { ...problem.values, missing })
+}
 export const healthText = (t: T, health: Pick<Health, 'detail' | 'code' | 'values'>): string =>
   health.code ? t(`healthCode.${health.code}` as const, health.values) : health.detail
 /** Replaces Feishu and GitHub content placeholders (images, cards, media, forwards, unresolved mentions) with localized labels. */

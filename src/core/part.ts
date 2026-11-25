@@ -26,6 +26,11 @@ export abstract class EnginePart {
   constructor(protected readonly options: EngineOptions) { this.repo = options.repo }
   protected now(): string { return this.options.now?.() ?? new Date().toISOString() }
   protected policy(): Policy { return this.options.policy() }
+  /** An intake refusal is durable, including when an operator tries to replay its stored text. */
+  protected triggerRejection(trigger: Trigger, policy: Policy): string | undefined {
+    if (!policy.intakeRejection) return undefined
+    return this.repo.triggers.disposition(trigger.id)?.filtered?.code ?? policy.intakeRejection(trigger)
+  }
   /** The tickets whose worker decides a person's follow-up: see `followupOwners`. */
   protected owners(trigger: Trigger): string[] { return followupOwners(trigger, this.repo) }
   /** Refuse a main-Session routing of a follow-up a ticket's worker still decides. */

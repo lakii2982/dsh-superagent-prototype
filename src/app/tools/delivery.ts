@@ -12,6 +12,8 @@ import type { Store } from '../store.ts'
 import { tool, type Tool } from './tool.ts'
 
 export interface DeliveryToolsHost {
+  readonly enterprisePilot?: boolean
+  pilotMandateAllowed?(ticket: Ticket): boolean
   /** Ticket records and the executor KV family: the delivery plan and the scope overrun that blocks delivery. */
   readonly store: Pick<Store, 'get' | 'set' | 'tickets' | 'settings'>
   /** Git and the agent's GitHub CLI, run through the deployment's injected identity and isolated git configuration. */
@@ -56,17 +58,45 @@ const defaultBranch = (ticket: Ticket): string | undefined =>
 const workspaceOf = (host: DeliveryToolsHost, ticket: Ticket): string | undefined =>
   ticket.execution?.directory || host.store.settings().executor.repositoryPath || undefined
 const shaLike = (value: string): boolean => /^[0-9a-f]{40,64}$/.test(value)
+const deliveryRemote = (host: DeliveryToolsHost): string =>
+  host.enterprisePilot ? `https://github.com/${host.github.deployment.repository}.git` : 'origin'
+
+function pilotWriteRefusal(host: DeliveryToolsHost, ticketId: string, action: 'push' | 'open'): Answer | undefined {
+  if (!host.enterprisePilot) return
+  const current = host.store.tickets.get(ticketId)
+  if (!current || !liveTicket(current) || host.store.settings().paused || !host.pilotMandateAllowed?.(current)) {
+    return FAILED(action, 'pilot_authorization_required', 'Enterprise pilot publication requires an active ticket, current requester authorization, and an unpaused repository.')
+  }
+}
+
+// Repository-specific policy and review remain required. Catch common build/deployment/migration paths at this host boundary.
+const PILOT_PATHS = /(?:^|\/)(?:\.github|\.gitlab|ci|deploy|deployment|infra|infrastructure|helm|k8s|kubernetes|terraform|migrations?)(?:\/|$)|(?:^|\/)(?:\.gitlab-ci\.ya?ml|Jenkinsfile|azure-pipelines\.ya?ml|cloudbuild\.ya?ml|[^/]*\.tf(?:vars)?)(?:\/|$)/i
+
+async function reviewPilotTree(host: DeliveryToolsHost, action: 'push' | 'open', cwd: string, base: string, head: string,
+  signal: AbortSignal): Promise<Answer | undefined> {
+  let paths: string[]
+  try {
+    paths = (await host.commands.withSignal(signal).git(['diff', '--no-renames', '--name-only', '-z', base, head, '--'], cwd))
+      .split('\0').filter(path => PILOT_PATHS.test(path))
+  } catch (error) {
+    return FAILED(action, 'pilot_diff_unavailable', failure(error).detail)
+  }
+  if (paths.length) {
+    return FAILED(action, 'pilot_protected_paths', 'The enterprise pilot cannot publish changes to delivery, infrastructure, or migration paths.',
+      { paths: paths.slice(0, 50) })
+  }
+}
 
 /** Reads the remote head of `branch`, or undefined when the branch does not exist yet. */
 async function remoteHead(host: DeliveryToolsHost, cwd: string, branch: string, signal: AbortSignal): Promise<string | undefined> {
-  const output = await host.commands.withSignal(signal).git(['ls-remote', 'origin', `refs/heads/${branch}`], cwd)
+  const output = await host.commands.withSignal(signal).git(['ls-remote', deliveryRemote(host), `refs/heads/${branch}`], cwd)
   const line = output.split('\n').map(item => item.trim()).find(Boolean)
   return line?.split(/\s+/)[0] || undefined
 }
 /** The last commits on the remote branch, read after a fetch so a moved head can be shown as evidence. */
 async function recentCommits(host: DeliveryToolsHost, cwd: string, branch: string, signal: AbortSignal): Promise<string[]> {
   const commands = host.commands.withSignal(signal)
-  const fetched = await commands.git(['fetch', '--quiet', 'origin', `refs/heads/${branch}`], cwd).then(() => true).catch(() => false)
+  const fetched = await commands.git(['fetch', '--quiet', deliveryRemote(host), `refs/heads/${branch}`], cwd).then(() => true).catch(() => false)
   if (!fetched) return []
   const output = await commands.git(['log', '--format=%h %s', '-5', 'FETCH_HEAD'], cwd).catch(() => '')
   return output.split('\n').map(item => item.trim()).filter(Boolean)
@@ -78,9 +108,9 @@ async function localHead(host: DeliveryToolsHost, cwd: string, branch: string, s
   return sha.trim() || undefined
 }
 /** Whether `ancestor` is already contained in the local branch, so a plain push is a fast-forward. */
-async function contains(host: DeliveryToolsHost, cwd: string, ancestor: string, branch: string, signal: AbortSignal): Promise<boolean> {
+async function contains(host: DeliveryToolsHost, cwd: string, ancestor: string, head: string, signal: AbortSignal): Promise<boolean> {
   try {
-    await host.commands.withSignal(signal).git(['merge-base', '--is-ancestor', ancestor, `refs/heads/${branch}`], cwd)
+    await host.commands.withSignal(signal).git(['merge-base', '--is-ancestor', ancestor, head], cwd)
     return true
   } catch { return false }
 }
@@ -114,6 +144,12 @@ export function deliveryTools(host: DeliveryToolsHost, ticket: Ticket): Tool[] {
         const cwd = workspaceOf(host, current)
         if (!cwd) return FAILED(args.action, 'no_workspace', 'This ticket has no workspace directory to run git in.', { plan: plan ?? null })
         if (!branch) return FAILED(args.action, 'no_branch', 'Pass branch (or record a plan) before delivering.', { plan: plan ?? null })
+        const worktree = current.execution?.worktree
+        if (host.enterprisePilot && (!worktree || worktree.branch !== branch || !shaLike(worktree.baseSha)
+          || (args.base !== undefined && baseName(worktree.baseRef) !== args.base))) {
+          return FAILED(args.action, 'pilot_worktree_required', 'Use the enterprise pilot ticket branch and recorded worktree base.',
+            { branch, plan: plan ?? null })
+        }
         if (!ticketBranch(current, branch)) {
           return FAILED(args.action, 'branch_not_ticket', `Choose a branch whose last path segment is ${current.execution?.name ?? 'the ticket short name'}; the host will not push or open a pull request from another branch.`,
             { branch, plan: plan ?? null })
@@ -124,8 +160,10 @@ export function deliveryTools(host: DeliveryToolsHost, ticket: Ticket): Tool[] {
           return FAILED(args.action, 'overrun_pending_approval', 'This ticket changed paths outside its declared scope; a person must approve them before anything reaches GitHub.',
             { ...overrun, plan: plan ?? null })
         }
-        if (args.action === 'push') return push(host, ticketId, current, args, branch, cwd, plan, signal)
-        return open(host, ticketId, current, args, branch, cwd, plan, signal)
+        const refusal = pilotWriteRefusal(host, ticketId, args.action)
+        if (refusal) return refusal
+        if (args.action === 'push') return await push(host, ticketId, current, args, branch, cwd, plan, signal)
+        return await open(host, ticketId, current, args, branch, cwd, plan, signal)
       } catch (error) {
         const facts = failure(error)
         return FAILED(args.action, facts.reason, `The delivery action stopped before finishing: ${facts.detail}`, facts)
@@ -174,6 +212,14 @@ async function push(host: DeliveryToolsHost, ticketId: string, ticket: Ticket, a
     { branch, expected, ...failure(error) }) }
   const local = await localHead(host, cwd, branch, signal)
   if (!local) return FAILED('push', 'no_local_branch', `Local branch ${branch} does not exist; nothing was pushed.`, { branch, expected })
+  const refspec = host.enterprisePilot ? `${local}:refs/heads/${branch}` : branch
+  const head = host.enterprisePilot ? local : `refs/heads/${branch}`
+  if (host.enterprisePilot) {
+    const pilotBase = ticket.execution!.worktree!.baseSha
+    if (!remote && expected !== pilotBase) return FAILED('push', 'pilot_base_mismatch', 'Use the exact recorded worktree base for the first push.', { branch, expected })
+    const rejected = await reviewPilotTree(host, 'push', cwd, pilotBase, local, signal)
+    if (rejected) return rejected
+  }
   // A retry of a push that already landed returns the same applied result instead of refusing its own commit as "moved".
   if (remote === local) {
     const at = new Date().toISOString()
@@ -185,13 +231,15 @@ async function push(host: DeliveryToolsHost, ticketId: string, ticket: Ticket, a
   // Require it to be an ancestor of the local branch, so creating the branch is a plain fast-forward rather than a
   // replacement of unknown history, and never force a branch that is not there.
   if (!remote) {
-    if (!(await contains(host, cwd, expected, branch, signal))) {
+    if (!(await contains(host, cwd, expected, head, signal))) {
       return FAILED('push', 'base_mismatch',
         `The remote branch ${branch} does not exist, and ${expected} is not an ancestor of the local branch; refusing to create it from an unexpected base.`,
         { branch, expected, remote_head: null })
     }
+    const refusal = pilotWriteRefusal(host, ticketId, 'push')
+    if (refusal) return refusal
     try {
-      await host.commands.withSignal(signal).git(['push', 'origin', branch], cwd)
+      await host.commands.withSignal(signal).git(['push', deliveryRemote(host), refspec], cwd)
     } catch (error) {
       return FAILED('push', 'push_rejected', `The remote refused the new branch; nothing changed: ${failure(error).detail}`,
         { branch, expected, remote_head: null, ...failure(error) })
@@ -215,11 +263,16 @@ async function push(host: DeliveryToolsHost, ticketId: string, ticket: Ticket, a
         : 'Recreate the branch from the intended base, then plan again with the head you expect.', plan: planned })
   }
   // Fetch quietly so a rewritten local history can be compared; a failure is reported by the push itself.
-  await host.commands.withSignal(signal).git(['fetch', '--quiet', 'origin', `refs/heads/${branch}`], cwd).catch(() => undefined)
-  const forced = !!remote && !(await contains(host, cwd, remote, branch, signal))
+  await host.commands.withSignal(signal).git(['fetch', '--quiet', deliveryRemote(host), `refs/heads/${branch}`], cwd).catch(() => undefined)
+  const forced = !!remote && !(await contains(host, cwd, remote, head, signal))
+  if (host.enterprisePilot && forced) {
+    return FAILED('push', 'pilot_history_rewrite', 'The enterprise pilot only publishes fast-forward updates to a ticket branch.', { branch, remote_head: remote })
+  }
   const lease = `--force-with-lease=refs/heads/${branch}:${remote}`
+  const refusal = pilotWriteRefusal(host, ticketId, 'push')
+  if (refusal) return refusal
   try {
-    await host.commands.withSignal(signal).git(['push', ...forced ? [lease] : [], 'origin', branch], cwd)
+    await host.commands.withSignal(signal).git(['push', ...forced ? [lease] : [], deliveryRemote(host), refspec], cwd)
   } catch (error) {
     const detail = failure(error).detail
     const rejected = /rejected|non-fast-forward|stale info|failed to push/i.test(detail)
@@ -240,16 +293,23 @@ async function push(host: DeliveryToolsHost, ticketId: string, ticket: Ticket, a
 async function open(host: DeliveryToolsHost, ticketId: string, ticket: Ticket, args: Args, branch: string, cwd: string,
   previous: DeliveryPlan | undefined, signal: AbortSignal): Promise<Answer> {
   const repository = host.github.deployment.repository
-  const base = args.base ?? previous?.base
-    ?? (baseName(ticket.execution?.worktree?.baseRef ?? '') || await defaultBase(host, signal).catch(() => undefined))
+  const base = host.enterprisePilot ? baseName(ticket.execution!.worktree!.baseRef)
+    : args.base ?? previous?.base ?? (baseName(ticket.execution?.worktree?.baseRef ?? '') || await defaultBase(host, signal).catch(() => undefined))
   if (!base) return FAILED('open', 'base_required', 'Pass base (the branch the pull request targets).', { branch, plan: previous ?? null })
+  if (host.enterprisePilot) {
+    const local = await localHead(host, cwd, branch, signal)
+    const remote = await remoteHead(host, cwd, branch, signal).catch(() => undefined)
+    if (!local || local !== remote) return FAILED('open', 'pilot_branch_unpublished', 'Publish the local ticket commit through the host before opening its draft pull request.')
+    const rejected = await reviewPilotTree(host, 'open', cwd, ticket.execution!.worktree!.baseSha, local, signal)
+    if (rejected) return rejected
+  }
   const title = args.title ?? previous?.title ?? ticket.title
   const body = args.body ?? previous?.body ?? ''
   // §5.2: record the plan before creating the pull request, even when the worker skipped action=plan.
   let plan = previous
-  if (!plan) {
+  if (!plan || host.enterprisePilot) {
     const expected = args.expected ?? ticket.execution?.worktree?.baseSha ?? ''
-    plan = { action: 'pr', branch, base, expected, title, body, at: new Date().toISOString() }
+    plan = { ...plan, action: 'pr', branch, base, expected: plan?.expected || expected, title, body, at: plan?.at ?? new Date().toISOString() }
     savePlan(host, ticketId, plan)
   }
   const listed = await listPulls(host, branch, signal).catch(error => {
@@ -257,9 +317,12 @@ async function open(host: DeliveryToolsHost, ticketId: string, ticket: Ticket, a
   })
   const existing = pickPull(listed, args.pr)
   if (existing) return reuse(host, ticketId, plan, branch, existing, signal)
+  const refusal = pilotWriteRefusal(host, ticketId, 'open')
+  if (refusal) return refusal
   try {
     await host.commands.withSignal(signal).run(host.github.deployment.github.cli,
-      ['pr', 'create', '--head', branch, '--base', base, '--title', title, '--body', body, ...repository ? ['--repo', repository] : []], cwd)
+      ['pr', 'create', ...(host.enterprisePilot ? ['--draft'] : []), '--head', branch, '--base', base, '--title', title, '--body', body,
+        ...repository ? ['--repo', repository] : []], cwd)
   } catch (error) {
     // The create may have succeeded even though the CLI failed (for example a network drop after the write): query first.
     const after = await listPulls(host, branch, signal).catch(() => [])
@@ -307,6 +370,10 @@ async function defaultBase(host: DeliveryToolsHost, signal: AbortSignal): Promis
 async function reuse(host: DeliveryToolsHost, ticketId: string, plan: DeliveryPlan, branch: string,
   summary: z.infer<typeof PullSummary>, signal: AbortSignal, created = false): Promise<Answer> {
   const pull = await readPull(host.github, summary.number, signal)
+  if (host.enterprisePilot && (pull.head.ref !== branch || pull.base?.ref !== plan.base)) {
+    return FAILED('open', 'pilot_pr_mismatch', 'An existing pull request does not match the recorded ticket branch and base.',
+      { branch, expected_base: plan.base, pr: { number: pull.number, base: pull.base?.ref, url: pull.html_url }, created })
+  }
   const refused = claimPull(host.github, ticketId, pull)
   if (refused) return FAILED('open', 'claim_refused', refused, { branch, pr: { number: pull.number, state: pull.state, url: pull.html_url }, created })
   const at = new Date().toISOString()
@@ -323,6 +390,11 @@ async function recover(host: DeliveryToolsHost, ticketId: string, ticket: Ticket
   const errors: string[] = []
   const remote = cwd ? await remoteHead(host, cwd, branch, signal).catch(error => { errors.push(failure(error).detail); return undefined }) : undefined
   const pulls = await listPulls(host, branch, signal).catch(error => { errors.push(failure(error).detail); return [] })
+  const expectedBase = baseName(ticket.execution?.worktree?.baseRef ?? '')
+  if (host.enterprisePilot && pulls.some(pull => pull.baseRefName !== expectedBase)) {
+    return FAILED('recover', 'pilot_pr_mismatch', 'Check existing pull requests for this ticket branch and recorded base before proceeding.',
+      { branch, expected_base: expectedBase, pulls })
+  }
   const pr = pickPull(pulls, plan?.result?.pr)
   const next = !remote ? 'push' : pr?.state === 'open' ? 'none' : pr ? 'inspect' : 'open'
   return { ok: true, action: 'recover', branch, plan: plan ?? null, result: plan?.result ?? null,

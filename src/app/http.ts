@@ -14,7 +14,7 @@ import { SettingsConflict, type Settings } from './settings.ts'
 import { SetupError, type SetupProblem } from '../setup.ts'
 import { UserError, covers, normalizeScope, type EngineForPeople, type Ticket } from '../core/index.ts'
 import { KV } from '../kv.ts'
-import type { Deployment, Machine } from '../deployment.ts'
+import type { Deployment, DesktopModeView, Machine } from '../deployment.ts'
 import type { AgentProbe } from '../executor/agents.ts'
 import type { DshExecutor } from '../executor/dsh.ts'
 import type { Health } from '../sources/host.ts'
@@ -32,6 +32,7 @@ import { decisionList, search, threadDetail, threadList } from './views/threads.
 import { executorLoad, ticketDetail, ticketList } from './views/tickets.ts'
 
 export interface HttpHost {
+  desktopMode?(): DesktopModeView
   ingestManaged?(trigger: import('../core/index.ts').Trigger): unknown
   readonly store: Store
   /** Feishu message links resolved since startup, used by search to match AppLink URLs. */
@@ -272,14 +273,14 @@ export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
   const disposers = [
     ctx.webServer.register({ kind: 'prefix', path: '/orchestrator', handler: async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://localhost')
-      if (url.pathname === '/orchestrator/mode') { json(res, 200, { mode: 'standalone' }); return }
+      if (url.pathname === '/orchestrator/mode') { json(res, 200, { mode: 'standalone', ...runtime.desktopMode?.() }); return }
       if (url.pathname.startsWith('/orchestrator/instance/')) {
         const bridge = runtime.machine.managed
         if (!bridge || !authorized(req.headers.authorization, bridge.token)) { json(res, 403, { error: 'Instance authorization required' }); return }
         try {
           const path = url.pathname.slice('/orchestrator/instance/'.length)
           if (path === 'health' && req.method === 'GET') { json(res, 200, { repositoryId: bridge.repositoryId, pid: process.pid, configured: runtime.configured(),
-            state: runtime.health.runtime?.state, agent: runtime.agentStatus }); return }
+            state: runtime.health.runtime?.state, paused: runtime.store.settings().paused, agent: runtime.agentStatus, enterprisePilot: bridge.enterprisePilot === true }); return }
           await runtime.ready
           if (path === 'receive' && req.method === 'POST') {
             if (!runtime.configured()) throw new RouteError(400, 'Repository setup is incomplete')
@@ -293,6 +294,7 @@ export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
         } catch (error) { json(res, ...failure(error)); return }
       }
       if (!url.pathname.startsWith('/orchestrator/api/')) { res.writeHead(404); res.end(); return }
+      if (runtime.machine.managed?.enterprisePilot) { json(res, 403, { error: 'Open this repository through the enterprise manager' }); return }
       if (!sameOrigin(req, ctx.webServer.port)) { json(res, 403, { error: 'Same-origin management request required' }); return }
       try {
         await runtime.ready

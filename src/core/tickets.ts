@@ -4,7 +4,7 @@ import { UserError } from './errors.ts'
 import { latestAssignment, latestReport, liveTicket, readUntil, runningAssignment, settled, threadKey, waitsForPerson } from './model.ts'
 import type { Assignment, ChannelRef, Evaluation, Follow, Mandate, PolicyEffect, ThreadRef, Ticket, TicketEndBy, TicketInput, TicketOutcome,
   Trigger, TriggerDisposition } from './model.ts'
-import type { AssessmentOutcome } from './ports.ts'
+import type { AssessmentOutcome, Policy } from './ports.ts'
 import { EnginePart, type EngineOptions } from './part.ts'
 import type { Replies } from './replies.ts'
 import { canRetry } from './stage.ts'
@@ -106,11 +106,18 @@ export class Tickets extends EnginePart {
   attachable(ticketId: string, triggerId: string): Trigger {
     const trigger = this.repo.triggers.get(triggerId)
     if (!trigger) throw new UserError('unknownTrigger')
+    const policy = this.policy()
+    if (policy.intakeRejection) {
+      const thread = this.thread(trigger.threads[0]!)
+      const gate = policy.gate(trigger, thread, this.ticketsOnThread(thread))
+      const refusal = this.triggerRejection(trigger, policy) ?? (!gate.admissible ? gate.reason : undefined)
+      if (refusal) throw new UserError('notAdmissible', { reason: refusal })
+    }
     // A follow-up that reached a ticket goes elsewhere only once the workers that decide it hand it back.
     this.leftToWorkers(trigger)
     const current = this.require(ticketId)
     if (current.ended?.by === 'human') throw new UserError('ticketStopped')
-    if (!liveTicket(current) && !this.policy().revalidate(current.mandate)) throw new UserError('mandateRevoked')
+    if ((policy.intakeRejection || !liveTicket(current)) && !policy.revalidate(current.mandate)) throw new UserError('mandateRevoked')
     return trigger
   }
   /**
@@ -167,6 +174,8 @@ export class Tickets extends EnginePart {
    */
   retry(ticketId: string): Ticket {
     const ticket = this.require(ticketId)
+    const policy = this.policy()
+    if (policy.intakeRejection && !policy.revalidate(ticket.mandate)) throw new UserError('mandateRevoked')
     const latest = latestAssignment(ticket)
     if (!canRetry(ticket) || !latest) throw new UserError('notRetryable')
     this.endAssignment(ticket, latest, 'retried')
@@ -199,8 +208,10 @@ export class Tickets extends EnginePart {
    */
   policyChanged(from: string, to: string, effects: ReadonlyMap<string, PolicyEffect>): void {
     const at = this.now()
+    const policy = this.policy()
     // Iterate tickets oldest first so deliveries queue in acceptance order.
     for (const ticket of this.repo.tickets.open().sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
+      this.pruneRejectedInputs(ticket, policy)
       const effect = effects.get(ticket.id)
       // Include `at` in the input key so repeated transitions between the same policy versions still record a new input.
       if (effect) this.addInput(ticket, { id: key('input', ticket.id, 'policy', from, to, at), kind: 'policy-changed', from, to, at, effect })
@@ -255,6 +266,7 @@ export class Tickets extends EnginePart {
     const policy = this.policy()
     if (policy.paused) return
     if (!policy.revalidate(ticket.mandate)) { this.refuse(ticket); return }
+    this.pruneRejectedInputs(ticket, policy)
     // Only a human's message resumes an ended ticket; bot/CI triggers wait alongside inputs from before the ticket ended.
     const first = ticket.undelivered.map(id => ticket.inputs.find(input => input.id === id)).find(input => input?.kind === 'trigger' && input.human)
     if (first?.kind !== 'trigger') return
@@ -267,6 +279,17 @@ export class Tickets extends EnginePart {
     this.repo.tickets.save(ticket)
     this.options.executor.start(ticket, assignment)
     this.emit('ticket.resumed', { ticketId, triggerId: first.triggerId })
+  }
+  /** Drop pending follow-ups whose authors lost access before the host could process them. */
+  private pruneRejectedInputs(ticket: Ticket, policy: Policy): void {
+    if (!policy.intakeRejection) return
+    const rejected = this.triggersOf(ticket, ticket.undelivered).filter(trigger => this.triggerRejection(trigger, policy))
+    if (!rejected.length) return
+    const ids = new Set(rejected.map(trigger => trigger.id))
+    const inputs = new Set(ticket.inputs.flatMap(input => input.kind === 'trigger' && ids.has(input.triggerId) ? [input.id] : []))
+    ticket.undelivered = ticket.undelivered.filter(id => !inputs.has(id))
+    this.repo.tickets.save(ticket)
+    this.letGo(ticket.id, rejected, [])
   }
   /** The Triggers of a ticket's trigger Inputs, or of those of them whose Input ids are `ids`. */
   private triggersOf(ticket: Ticket, ids?: readonly string[]): Trigger[] {

@@ -2,6 +2,9 @@ import { describe, expect, it, vi } from 'vitest'
 import { Engine, MemoryRepositories, UserError, followupOwners, key, runningAssignment, ticketOutcome, ticketStage,
   waitsForPerson } from '../src/core/index.ts'
 import type { Assessor, Assignment, Candidate, EngineOptions, Executor, OutboundMessage, Outcome, Policy, Ticket, Trigger } from '../src/core/index.ts'
+import { SettingsSchema, settingsPolicy } from '../src/policy.ts'
+import { ciTrigger, commentTrigger } from '../src/sources/github-trigger.ts'
+import { CHAT, MEMBER, feishu } from './fixtures/host.ts'
 
 const member = { source: 'chat', id: 'alice' }
 const guest = { source: 'chat', id: 'guest' }
@@ -85,6 +88,100 @@ describe('intake', () => {
     h.engine.receive(trigger('1', { threads: [{ source: 'gh', id: 'pr-7' }, { source: 'gh', id: 'run-9' }] }))
     expect(h.repo.threads.get('gh:pr-7')).toMatchObject({ pending: ['1'], correlated: ['gh:run-9'] })
     expect(h.repo.threads.get('gh:run-9')).toMatchObject({ pending: [], correlated: ['gh:pr-7'] })
+  })
+})
+describe('managed pilot authorization', () => {
+  function pilot() {
+    const allowed = (ids: string[]) => ids.map(id => ({ id }))
+    const policy = (ids: string[]) => settingsPolicy(SettingsSchema.parse({ eval: { mode: 'auto' }, policy: { sources: {
+      feishu: { allowed: allowed(ids), admission: { [CHAT]: { unlistedAddressed: 'explicit' } }, bots: [{ id: 'ou_app' }] },
+      github: { allowed: allowed(['alice']), admission: { comments: { unlistedAddressed: 'explicit' } }, bots: [{ id: 'app[bot]' }] },
+    } } }), { scope: input => ({ listened: true, observed: true, row: input.source === 'github' ? 'comments' : CHAT }) }, true)
+    let current = policy([MEMBER, 'ou_bob'])
+    const h = harness({ intakeRejection: trigger => current.intakeRejection!(trigger), gate: (...args) => current.gate(...args),
+      revalidate: mandate => current.revalidate(mandate), admitsInferred: rules => current.admitsInferred(rules) })
+    const open = (request: Trigger) => {
+      expect(h.engine.receive(request)).toBe('stored'); h.pump()
+      const candidate = h.requests.at(-1)!
+      expect(candidate).toMatchObject({ strength: 'explicit', triggers: [{ id: request.id }] })
+      const id = h.decide(candidate, { kind: 'accept', title: 'Fix', scope: 'small', reason: 'requested' }).ticketId!
+      h.settle()
+      return id
+    }
+    return { ...h, open, allowFeishu: (ids: string[]) => { current = policy(ids) } }
+  }
+  const followup = (id: string, sender = MEMBER) => feishu(id, 'Follow-up', { root_id: 'om_1', mentions: [], sender_id: sender })
+  const pr = { number: 7, isPr: true, html_url: 'https://github.com/example/project/pull/7', user: { login: 'agent' } }
+  const github = (id: number, login: string, body: string) => commentTrigger({ id, body, user: { login }, created_at: '2026-09-23T00:00:00Z' }, pr, 'conversation', 'agent')
+
+  it('refuses unlisted Feishu triggers, replay and attachment while authorized follow-ups steer and resume', () => {
+    const h = pilot()
+    const first = feishu('1', '@bot Fix')
+    const id = h.open(first)
+    const stranger = followup('2', 'ou_stranger')
+    const mention = feishu('3', '@bot Start work', { sender_id: 'ou_stranger' })
+    expect(h.engine.receive(stranger)).toBe('filtered')
+    expect(h.engine.receive(mention)).toBe('filtered')
+    expect(h.repo.triggers.disposition(stranger.id)).toMatchObject({ filtered: { code: 'not_a_member' }, fanout: [] })
+    expect(h.engine.reevaluate(mention.id)).toBe(false)
+    expect(() => h.engine.attach(id, stranger.id)).toThrow('not_a_member')
+    expect(() => h.engine.decide(stranger.id, { kind: 'stop', ticketId: id, reason: 'stop' })).toThrow('not_a_member')
+    h.pump()
+    expect(h.requests).toHaveLength(1)
+    expect(h.executor.deliver).not.toHaveBeenCalled()
+    const trusted = followup('4', 'ou_bob')
+    expect(h.engine.receive(trusted)).toBe('stored'); h.settle(); h.read(id)
+    expect(h.repo.triggers.disposition(trusted.id)?.fanout).toEqual([id])
+    expect(h.executor.deliver).toHaveBeenCalledOnce()
+    h.engine.report(id, { state: 'ready', summary: 'Done' })
+    expect(h.repo.tickets.get(id)?.ended?.outcome).toBe('completed')
+    expect(h.engine.receive(followup('5', 'ou_stranger'))).toBe('filtered')
+    expect(h.repo.tickets.get(id)?.ended?.outcome).toBe('completed')
+    expect(h.engine.receive(followup('6', 'ou_bob'))).toBe('stored'); h.settle()
+    expect(h.repo.tickets.get(id)).not.toHaveProperty('ended')
+    expect(h.executor.start).toHaveBeenCalledTimes(2)
+  })
+
+  it('preserves GitHub CI and PR reconciliation without granting work to bots, CI or unlisted reviewers', () => {
+    const h = pilot()
+    const request = github(1, 'alice', '@agent Fix this PR')
+    const ciFirst = ciTrigger(pr, 1, 'CI passed')
+    expect(h.engine.receive(ciFirst)).toBe('stored')
+    const id = h.open(request)
+    h.engine.bindThread(id, { source: 'github', id: '7' }, true)
+    const external = github(2, 'outside', '@agent Change the scope')
+    const bot = github(3, 'app[bot]', '@agent Build a fix')
+    expect(h.engine.receive(external)).toBe('filtered')
+    expect(h.engine.receive(bot)).toBe('filtered')
+    const ci = ciTrigger(pr, 2, 'CI passed again')
+    expect(h.engine.receive(ci)).toBe('stored'); h.settle()
+    expect(h.repo.triggers.disposition(ci.id)?.fanout).toEqual([id])
+    expect(h.engine.reevaluate(ci.id)).toBe(false)
+    expect(() => h.engine.attach(id, ci.id)).toThrow('not_human')
+    h.pump()
+    expect(h.requests).toHaveLength(1)
+    h.engine.threadClosed({ source: 'github', id: '7' }, 'merged', '2026-09-23T00:00:01Z')
+    expect(h.repo.tickets.get(id)?.ended?.outcome).toBe('merged')
+    expect(h.engine.receive(ciTrigger(pr, 3, 'New CI result'))).toBe('stored'); h.pump()
+    expect(h.repo.tickets.get(id)?.ended?.outcome).toBe('merged')
+  })
+
+  it('rechecks both the triggering sender and the original requester when resuming', () => {
+    const h = pilot()
+    const id = h.open(feishu('1', '@bot Fix'))
+    h.engine.report(id, { state: 'ready', summary: 'Done' })
+    h.setPaused(true)
+    const waiting = followup('2', 'ou_bob')
+    expect(h.engine.receive(waiting)).toBe('stored')
+    h.allowFeishu([MEMBER]); h.setPaused(false); h.pump()
+    expect(h.repo.tickets.get(id)?.ended?.outcome).toBe('completed')
+    expect(h.repo.triggers.disposition(waiting.id)?.fanout).toEqual([])
+    h.allowFeishu(['ou_bob'])
+    const request = followup('3', 'ou_bob')
+    expect(h.engine.receive(request)).toBe('stored'); h.pump()
+    expect(h.repo.tickets.get(id)?.ended?.outcome).toBe('completed')
+    expect(h.requests.at(-1)).toMatchObject({ triggers: [{ id: request.id }], strength: 'explicit' })
+    expect(() => h.engine.attach(id, request.id)).toThrow('mandate')
   })
 })
 describe('eval', () => {

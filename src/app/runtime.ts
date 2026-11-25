@@ -18,7 +18,7 @@ import { allowedSender, settingsPolicy, workspaceMode } from '../policy.ts'
 import { SourceRegistry } from '../sources/registry.ts'
 import { Commands } from '../infra/commands.ts'
 import type { AgentProbe } from '../executor/agents.ts'
-import type { Deployment, Machine } from '../deployment.ts'
+import type { Deployment, DesktopModeView, Machine } from '../deployment.ts'
 import { environmentOf, ticketEnvironment, type Variable } from './execution-environment.ts'
 import type { SetupProblem } from '../setup.ts'
 import { DshExecutor, sourceTrigger, triggerMessage, workerSessionId } from '../executor/dsh.ts'
@@ -86,7 +86,7 @@ export class Runtime extends Service implements SourceHost {
   private readonly toolHost: MainToolsHost & ExecutorToolsHost & DeliveryToolsHost
   /** Non-zero while a main-Session tool is executing an Engine command, suppressing self-triggered domain event notices. */
   private quiet = 0
-  constructor(ctx: Context, readonly machine: Machine, restart: () => void) {
+  constructor(ctx: Context, readonly machine: Machine, restart: () => void, private readonly desktopMode?: () => DesktopModeView) {
     super(ctx, 'orchestrator')
     const runtime = this
     // Lock the state directory before opening the database so another process cannot migrate or write concurrently.
@@ -117,28 +117,31 @@ export class Runtime extends Service implements SourceHost {
           .catch(() => { /* sync() records its failure in health. */ })
         return () => {}
       })
-      const links: LinkHost = { store, links: this.sourceLinks, commands, sources, lifetime: this.lifetime }
+      const policy = () => settingsPolicy(store.settings(), sources, machine.managed?.enterprisePilot)
+      const pilotMandateAllowed = (ticket: Ticket) => policy().revalidate(ticket.mandate)
+      const mayQuoteTrigger = machine.managed?.enterprisePilot ? (trigger: Trigger) =>
+        !store.triggers.disposition(trigger.id)?.filtered && !policy().intakeRejection?.(trigger) : undefined
+      const links: LinkHost = { store, links: this.sourceLinks, commands, sources, lifetime: this.lifetime, mayQuoteTrigger }
       const link = (trigger: Trigger, signal?: AbortSignal) => sourceLink(links, trigger, signal)
       const environment = (ticket: Ticket) => this.ticketEnvironment(ticket)
       const resources: ResourceHost = { store, pages: new TextCache(4_000_000), prompts, commands, masterId, context: ctx,
         promptVersion: id => this.sessions.promptVersion(id), mayRead: (id, revision) => this.sessions.mayRead(id, revision),
         feishuPageSize: () => feishuSettings(sources).readPageSize, sourceLink: link }
       const sessions = this.sessions = new Sessions({ context: ctx, store, prompts, effects, health: board.claim('models'), masterId,
-        lifetime: this.lifetime,
+        lifetime: this.lifetime, enterprisePilot: machine.managed?.enterprisePilot, pilotMandateAllowed,
         closing: () => this.closing(), environment, workRefusal: id => this.executor.workRefusal(id),
         tools: (agent, ticket) => ticket ? [...executorTools(this.toolHost, ticket), ...deliveryTools(this.toolHost, ticket)] : mainTools(this.toolHost, agent) })
       const policyChanged: EngineForSettings['policyChanged'] = (from, to, effects) => { this.engine.policyChanged(from, to, effects) }
       this.settings = new Settings({ store, sources, engine: { policyChanged }, health: board, context: ctx, lifetime: this.lifetime, sessions,
-        sourceHost: this, setup, requestPass: () => { this.passes.request() } })
+        sourceHost: this, setup, enterprisePilot: machine.managed?.enterprisePilot, requestPass: () => { this.passes.request() } })
       this.executor = new DshExecutor({ context: ctx, get engine() { return runtime.engine }, store, effects, health: board.claim('worker'), machine,
         lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(), environment, sourceLink: link,
-        repliedTo: trigger => repliedTo({ store, sources }, trigger) })
+        repliedTo: trigger => repliedTo(links, trigger) })
       this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commands, get deployment() { return setup.deployment }, effects,
         settings: () => store.settings(), paused: () => this.paused(), threadContext: trigger => sources.threadContext(trigger),
         deliver: (id, text) => sessions.prompt(masterId, id, text, 'steer'), candidateCard: candidate => candidateCard(links, candidate) })
       const outbox = this.outbox = new Outbox({ store, effects, sources, commands, paused: () => this.paused() })
       const { assessor, executor } = this
-      const policy = () => settingsPolicy(store.settings(), sources)
       const engine = this.engine = new Engine({ repo: store, scope: sources, policy, assessor, executor,
         outbox, prepareTicket: (ticket, outcome) => executor.prepare(ticket, outcome), emit: event => {
           // Notify the main Session only about domain events it did not initiate itself.
@@ -147,7 +150,7 @@ export class Runtime extends Service implements SourceHost {
           // A person's message that reached an open ticket is the ticket's; the main Session hears of it in the same transaction,
           // and of one for an ended ticket once it resumes, unless it routed the message there itself.
           const followed = !this.quiet && (event.type === 'trigger.received' || event.type === 'ticket.resumed' || event.type === 'trigger.followup')
-          const followup = followed ? followupNotice(store, sources, event.data.triggerId) : undefined
+          const followup = followed ? followupNotice(store, sources, event.data.triggerId, mayQuoteTrigger) : undefined
           if (followup) sessions.relay(followup.id, followup.text)
           // Notify the ticket's conversations whenever it ends via a pull request.
           const ended = event.type === 'ticket.ended' ? store.tickets.get(event.data.ticketId) : undefined
@@ -165,6 +168,8 @@ export class Runtime extends Service implements SourceHost {
         get deployment() { return setup.deployment }, configured: () => setup.configured(),
         get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem }, receive: trigger => runtime.receive(trigger) }
       this.toolHost = { context: ctx, engine, store, commands, prompts, sessions, settings: this.settings, assessor, resources,
+        enterprisePilot: machine.managed?.enterprisePilot,
+        pilotMandateAllowed,
         get agents() { return runtime.executor.agents },
         get github() { return runtime.context({ kind: 'github', health: ['github'] }) },
         requestPass: () => { passes.request() }, sendReplies: () => outbox.sent(),
@@ -242,7 +247,7 @@ export class Runtime extends Service implements SourceHost {
   private httpHost(): HttpHost {
     const runtime = this
     const { store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, sourceLinks, setup, passes } = this
-    return { ingestManaged: (trigger: Trigger) => this.ingestManaged(trigger), store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, sourceLinks, get ready() { return runtime.ready },
+    return { desktopMode: this.desktopMode, ingestManaged: (trigger: Trigger) => this.ingestManaged(trigger), store, sources, prompts, sessions, settings, engine, executor, health, machine, masterId, sourceLinks, get ready() { return runtime.ready },
       get agentStatus() { return runtime.agentStatus },
       get deployment() { return setup.deployment },
       get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem },

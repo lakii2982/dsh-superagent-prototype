@@ -97,18 +97,19 @@ const subprocess = { spawn: vi.fn((spec: { argv: readonly string[] }) => {
 }) }
 /** Source account overrides for test setup; `feishu: null` disables the Feishu source. */
 interface Accounts { github?: Record<string, unknown>; feishu?: Record<string, unknown> | null }
-function seed(store: Store, accounts: Accounts = {}): void {
+function seed(store: Store, accounts: Accounts = {}, pilot = false): void {
   const settings = store.settings()
   const { feishu: _feishu, ...others } = settings.sources
   const feishu = accounts.feishu === null ? undefined : { ...settings.sources.feishu?.config, cli: BOT(), ...accounts.feishu }
   // These tests exercise tickets in isolated directories; the managed-worktree default has its own tests.
-  store.saveSettings(SettingsSchema.parse({ ...settings, executor: { ...settings.executor, workspaceMode: 'isolated' },
+  store.saveSettings(SettingsSchema.parse({ ...settings, executor: { ...settings.executor, workspaceMode: pilot ? 'worktree' : 'isolated' },
+    ...(pilot ? { eval: { ...settings.eval, mode: 'off' } } : {}),
     sources: { ...others, github: { enabled: true, config: { repository: 'acme/widgets', cli: AGENT(), ...accounts.github } }, ...feishu ? { feishu: { enabled: true, config: feishu } } : {} } }))
 }
 let restarts: ReturnType<typeof vi.fn<() => void>>
 async function restart(machine: Partial<Machine> = {}, accounts: Accounts = {}): Promise<Runtime> {
   await runtime.stop()
-  const store = new Store(join(directory, 'orchestrator.sqlite')); seed(store, accounts); store.close()
+  const store = new Store(join(directory, 'orchestrator.sqlite')); seed(store, accounts, machine.managed?.enterprisePilot); store.close()
   const ctx = new Context()
   for (const [name, service] of Object.entries(services)) ctx.reflect.provide(name, service)
   runtime = new Runtime(ctx, testMachine({ stateDir: directory, ...machine }), restarts)
@@ -1571,6 +1572,74 @@ it('refuses an ended ticket\'s worker its tools, and restricts the main Session 
   // the worker slots, reach other Sessions or edit documents, whenever they were registered.
   expect(restricts.get(sessionId)).toEqual([{ allow: ['read', 'read_image', 'grep', 'bash', 'job_output', 'job_list', 'job_kill', 'web_search', 'skill',
     'subagent_claude_code', 'subagent_codex', 'subagent_kimi', 'subagent_opencode', 'fleet', 'fleet_status'] }])
+})
+
+function fixtureBranchRules(protectedBranch: boolean) {
+  const rules = protectedBranch ? [
+    { type: 'pull_request', parameters: { required_approving_review_count: 1 } },
+    { type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'unit' }] } },
+    { type: 'non_fast_forward' }, { type: 'deletion' },
+  ] : []
+  writeFileSync(AGENT(), `#!${process.execPath}
+const path = process.argv.at(-1);
+const value = path === 'repos/acme/widgets' ? {full_name:'acme/widgets',default_branch:'main'}
+  : path === 'repos/acme/widgets/rules/branches/main' ? ${JSON.stringify(rules)} : null;
+if (!value) process.exit(2);
+console.log(JSON.stringify(value));
+`)
+}
+
+it('keeps the managed workspace available with execution held until default-branch rules pass', async () => {
+  const managed = { repositoryId: 'pilot', token: 'fixture', url: 'http://127.0.0.1:3099', enterprisePilot: true }
+  fixtureBranchRules(false)
+  const blocked = await restart({ managed })
+  await blocked.ready
+  expect(blocked.configured()).toBe(false)
+  expect(blocked.health.runtime?.state).toBe('paused')
+  expect(blocked.setupProblem).toMatchObject({ code: 'branchRulesMissing', values: { branch: 'main', repository: 'acme/widgets' } })
+  expect(overviewOf(blocked).problems).toContainEqual(expect.objectContaining({ code: 'branchRulesMissing' }))
+  expect(blocked.executor.activeCount()).toBe(0)
+  blocked.setup.check()
+  await vi.waitFor(() => expect(restarts).toHaveBeenCalled())
+  fixtureBranchRules(true)
+  const recovered = await restart({ managed })
+  await recovered.ready
+  expect(recovered.configured()).toBe(true)
+  expect(recovered.health.runtime?.state).toBe('ready')
+})
+
+it('limits pilot workers to host-governed tools and stops new work after the requester loses access', async () => {
+  fixtureBranchRules(true)
+  const next = await restart({ managed: { repositoryId: 'pilot', token: 'fixture', url: 'http://127.0.0.1:3099', enterprisePilot: true } })
+  await next.ready
+  next.sources.register(feishuKind); next.sources.register(githubKind)
+  expect(next.configured()).toBe(true)
+  const id = 'pilot-ticket', sessionId = `worker-${id}`, settings = next.store.settings()
+  next.store.tickets.save({
+    id, title: 'Regression fixture', decisionId: '', createdAt: '', updatedAt: '',
+    mandate: { strength: 'explicit', policyVersion: '', basis: { via: 'listed' }, actor: { source: 'github', id: 'alice' }, scope: '' },
+    channels: [], assignments: [], inputs: [], undelivered: [], origin: { triggerId: '', triggerIds: [] },
+  })
+  await next.sessions.ensure(sessionId, directory, 'Pilot worker fixture', 'worker')
+  expect(restricts.get(sessionId)).toEqual([{ allow: ['read', 'read_image', 'grep', 'bash', 'job_output', 'job_list', 'job_kill', 'skill'] }])
+  expect(tools.get(sessionId)?.has('orchestrator_agent')).toBe(true)
+  expect(sections.get(sessionId)!.text({})).toContain('Enterprise pilot scope')
+  expect(sections.get(next.masterId)!.text({})).toContain('Enterprise pilot scope')
+  await expect(next.settings.save('executor', { ...settings.executor, workspaceMode: 'isolated' }, next.store.blockRevision('executor'), 'panel'))
+    .rejects.toThrow('managed Git worktrees')
+  await expect(next.settings.save('eval', { ...settings.eval, mode: 'auto' }, next.store.blockRevision('eval'), 'panel'))
+    .rejects.toThrow('proactive evaluation off')
+  await expect(next.settings.save('policy', settings.policy, next.store.blockRevision('policy'), 'tool'))
+    .rejects.toThrow('managed by an operator')
+  expect(next.settings.syncable()).toEqual([])
+  const guard = guards.get(sessionId)!
+  expect(guard({ name: 'bash', arguments: { command: 'true' } })).toBeUndefined()
+  next.store.saveSettings({ ...settings, policy: { ...settings.policy, sources: {} } })
+  expect(guard({ name: 'bash', arguments: { command: 'true' } })).toMatch(/no longer has authority/)
+  expect(guard({ name: 'job_kill', arguments: {} })).toBeUndefined()
+  expect(guard({ name: 'orchestrator_report', arguments: {} })).toBeUndefined()
+  expect(guard({ name: 'orchestrator_delivery', arguments: { action: 'status' } })).toBeUndefined()
+  expect(guard({ name: 'orchestrator_delivery', arguments: { action: 'push' } })).toMatch(/no longer has authority/)
 })
 
 it('gives an explicit ticket\'s worker a prompt without the limits of an inferred Mandate', async () => {

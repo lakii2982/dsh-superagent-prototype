@@ -171,9 +171,9 @@ function admissionOf(settings: Settings, source: string, row: string | undefined
 const STRENGTH: Readonly<Record<Admission, number>> = { ignore: 0, inferred: 1, explicit: 2 }
 
 /** Compute how a settings change from `old` to `now` affects the authorization or matched rules of each open ticket. */
-export function policyEffects(tickets: readonly Ticket[], old: Settings, now: Settings, scope: (settings: Settings) => SourceScope):
+export function policyEffects(tickets: readonly Ticket[], old: Settings, now: Settings, scope: (settings: Settings) => SourceScope, enterprisePilot = false):
   Map<string, PolicyEffect> {
-  const before = settingsPolicy(old, scope(old)), after = settingsPolicy(now, scope(now))
+  const before = settingsPolicy(old, scope(old), enterprisePilot), after = settingsPolicy(now, scope(now), enterprisePilot)
   const effects = new Map<string, PolicyEffect>()
   for (const ticket of tickets) {
     const rules = (ticket.mandate.basis.rules ?? []).flatMap((id): NonNullable<PolicyEffect['rules']> => {
@@ -185,7 +185,7 @@ export function policyEffects(tickets: readonly Ticket[], old: Settings, now: Se
     if (before.revalidate(ticket.mandate) && !after.revalidate(ticket.mandate)) {
       // With the previous accept mode and rules, the Mandate holds unless the sender or receiving scope lost authorization.
       const asBefore = { ...now, eval: old.eval, policy: { ...now.policy, rules: old.policy.rules } }
-      if (!settingsPolicy(asBefore, scope(now)).revalidate(ticket.mandate)) {
+      if (!settingsPolicy(asBefore, scope(now), enterprisePilot).revalidate(ticket.mandate)) {
         Object.assign(effect, { requesterAllowed: false, requester: ticket.mandate.actor })
       } else if (ticket.mandate.strength === 'inferred' && old.eval.mode === 'auto' && now.eval.mode !== 'auto') effect.proactive = false
     }
@@ -194,9 +194,18 @@ export function policyEffects(tickets: readonly Ticket[], old: Settings, now: Se
   return effects
 }
 /** Build the active Policy for gating incoming Triggers and revalidating existing Ticket Mandates. */
-export function settingsPolicy(settings: Settings, sources: SourceScope): Policy {
+export function settingsPolicy(settings: Settings, sources: SourceScope, enterprisePilot = false): Policy {
   const version = policyVersion(settings)
   const mode = settings.eval.mode
+  const pilotSender = (trigger: Trigger) => trigger.human && trigger.actor.source === trigger.source ? allowedSender(settings, trigger.actor) : undefined
+  const intakeRejection = (trigger: Trigger): string | undefined => {
+    const scope = listened(sources, trigger.source, trigger.meta)
+    if (!scope.listened) return scope.reason
+    if (trigger.human) return pilotSender(trigger) ? undefined : 'not_a_member'
+    // Only structured CI facts can reach an active Worker without a human identity. GitHub PR closing is reconciled separately.
+    const ci = trigger.source === 'github' && trigger.actor.source === 'github' && !trigger.actor.id && trigger.meta.ci === true
+    return ci ? undefined : 'not_human'
+  }
   /** Gate non-human triggers: only listed bots (as inferred candidates) and senderless system/CI events may pass; other bots are rejected. */
   const machineGate = (trigger: Trigger): GateResult => {
     const bot = trigger.actor.id ? listedBot(settings, trigger.actor) : undefined
@@ -218,7 +227,20 @@ export function settingsPolicy(settings: Settings, sources: SourceScope): Policy
   }
   return {
     version, paused: settings.paused, evalTimeoutMs: settings.eval.timeoutSeconds * 1000,
+    ...(enterprisePilot ? { intakeRejection } : {}),
     gate(trigger: Trigger, thread, tickets) {
+      if (enterprisePilot) {
+        if (!trigger.human) return { admissible: false, reason: 'not_human' }
+        const scope = listened(sources, trigger.source, trigger.meta)
+        if (!scope.listened) return { admissible: false, reason: scope.reason }
+        const sender = pilotSender(trigger)
+        if (!sender) return { admissible: false, reason: 'not_a_member' }
+        const basis = { source: trigger.source, scope: trigger.meta, ...(scope.row === undefined ? {} : { row: scope.row }),
+          sender: senderName(sender) }
+        if (trigger.addressed) return { admissible: true, strength: 'explicit', basis: { ...basis, via: 'addressed', addressed: trigger.addressed } }
+        if (participating(thread, tickets)) return { admissible: true, strength: 'explicit', basis: { ...basis, via: 'followup' } }
+        return { admissible: false, reason: 'no_mention' }
+      }
       if (!trigger.human) return machineGate(trigger)
       const allowed = allowedSender(settings, trigger.actor)
       const scope = listened(sources, trigger.source, trigger.meta)
@@ -239,13 +261,14 @@ export function settingsPolicy(settings: Settings, sources: SourceScope): Policy
       if (admission === 'inferred' && mode !== 'off') return { admissible: true, strength: 'inferred', basis: { ...basis, observation: { mode } } }
       return { admissible: false, reason: !allowed ? 'not_a_member' : receivable && admission === 'ignore' ? 'admission_ignored' : 'no_mention' }
     },
-    admitsInferred: rules => mode === 'auto' && rules.length > 0 && rules.every(id => settings.policy.rules.some(rule => rule.enabled && rule.id === id)),
+    admitsInferred: rules => !enterprisePilot && mode === 'auto' && rules.length > 0 && rules.every(id => settings.policy.rules.some(rule => rule.enabled && rule.id === id)),
     revalidate(mandate: Mandate) {
       // Revalidation rules follow docs/002 (Eval path; Resume revalidates).
       const { basis } = mandate
       const { source } = basis
       const current = source && basis.scope ? listened(sources, source, basis.scope) : undefined
       if (current && !current.listened) return false
+      if (enterprisePilot) return mandate.strength === 'explicit' && !!allowedSender(settings, mandate.actor)
       const rulesOn = (rules: string[] | undefined) => (rules ?? []).every(id => settings.policy.rules.some(rule => rule.enabled && rule.id === id))
       // Explicit follow-ups remain valid; inferred follow-ups require auto mode and enabled matched rules.
       if (basis.via === 'followup') return mandate.strength === 'explicit' || (mode === 'auto' && rulesOn(basis.rules))

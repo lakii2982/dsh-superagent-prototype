@@ -34,7 +34,9 @@ export class Evals extends EnginePart {
    */
   due(thread: Thread, policy: Policy): void {
     const evaluation = thread.evaluating
-    if (!evaluation || (policy.paused && evaluation.pausedAt)) return
+    if (!evaluation) return
+    if (this.rejectedEvaluation(evaluation, policy)) { this.reassess(thread, { code: 'policyChanged' }); return }
+    if (policy.paused && evaluation.pausedAt) return
     const now = this.now()
     if (policy.paused) evaluation.pausedAt = now
     else if (evaluation.pausedAt) {
@@ -71,6 +73,18 @@ export class Evals extends EnginePart {
   start(threadKeyValue: string, policy: Policy): void {
     const thread = this.repo.threads.get(threadKeyValue)!
     const at = this.now()
+    if (policy.intakeRejection) {
+      const rejected = thread.pending.flatMap(triggerId => {
+        const trigger = this.repo.triggers.get(triggerId)
+        const code = trigger && this.triggerRejection(trigger, policy)
+        return code ? [{ code, triggerId }] : []
+      })
+      if (rejected.length) {
+        this.ignore(thread, rejected.map(reason => reason.triggerId), rejected, policy, at)
+        this.repo.threads.save(thread)
+        if (!thread.pending.length) return
+      }
+    }
     // A person's follow-up a ticket still decides is that ticket's: one an older version queued leaves the queue without a Decision.
     const delivered = (id: string) => {
       const trigger = this.repo.triggers.get(id)
@@ -104,6 +118,10 @@ export class Evals extends EnginePart {
       this.repo.threads.save(thread)
       return
     }
+    if (policy.intakeRejection && reasons.length) {
+      // Keep CI and other non-authorizing events out of an explicit candidate's routing batch.
+      this.ignore(thread, reasons.flatMap(reason => reason.triggerId ?? []), reasons, policy, at)
+    }
     const evalId = key('eval', thread.key, policy.version, at, ...thread.pending)
     const deadline = new Date(Date.parse(at) + policy.evalTimeoutMs).toISOString()
     const { strength, trigger: { actor }, basis } = strongest
@@ -111,8 +129,8 @@ export class Evals extends EnginePart {
       policyVersion: policy.version, startedAt: at, deadline }
     thread.pending = []
     this.repo.threads.save(thread)
-    for (const trigger of triggers) {
-      this.repo.triggers.saveDisposition(trigger.id, { ...(this.repo.triggers.disposition(trigger.id) ?? { fanout: [], at }), evalId })
+    for (const id of thread.evaluating.triggerIds) {
+      this.repo.triggers.saveDisposition(id, { ...(this.repo.triggers.disposition(id) ?? { fanout: [], at }), evalId })
     }
     this.emit('eval.started', { evalId, threadKey: thread.key, triggerIds: thread.evaluating.triggerIds, strength: strongest.strength })
     this.options.assessor.request(this.candidateOf(thread))
@@ -120,7 +138,7 @@ export class Evals extends EnginePart {
   /** The candidate of the Eval that holds `triggerId`, or undefined while no Eval holds it. */
   candidate(triggerId: string): Candidate | undefined {
     const thread = this.holding(triggerId)
-    return thread && this.candidateOf(thread)
+    return thread && !this.rejectedEvaluation(thread.evaluating!, this.policy()) ? this.candidateOf(thread) : undefined
   }
   /**
    * Decide a Trigger: the Eval that holds it, or a direct Eval of it alone when none does.
@@ -131,6 +149,9 @@ export class Evals extends EnginePart {
   decide(triggerId: string, outcome: Outcome): Decision {
     const trigger = this.repo.triggers.get(triggerId)
     if (!trigger) throw new UserError('unknownTrigger')
+    const policy = this.policy()
+    const refusal = this.triggerRejection(trigger, policy)
+    if (refusal || (policy.intakeRejection && !trigger.human)) throw new UserError('notAdmissible', { reason: refusal ?? 'not_human' })
     const held = this.holding(triggerId)
     if (outcome.evalId && held?.evaluating?.id !== outcome.evalId) throw new UserError('evalFinished', { eval: outcome.evalId })
     // Prevent a replayed trigger that already created a ticket from spawning a second one.
@@ -149,7 +170,7 @@ export class Evals extends EnginePart {
     const thread = held ?? this.thread(trigger.threads[0]!)
     const evaluation = held?.evaluating ?? this.directEval(thread, trigger, outcome.kind, outcome.kind === 'stop' ? outcome.ticketId : undefined)
     // An inferred candidate is accepted only on enabled rules its assessment matched, while assessments may accept.
-    if (outcome.kind === 'accept' && evaluation.strength !== 'explicit' && !this.policy().admitsInferred(outcome.rules ?? [])) {
+    if (outcome.kind === 'accept' && evaluation.strength !== 'explicit' && !policy.admitsInferred(outcome.rules ?? [])) {
       throw new UserError('notExplicit')
     }
     return this.decideEval(thread, evaluation, outcome)
@@ -167,6 +188,8 @@ export class Evals extends EnginePart {
   private requeue(triggerId: string): boolean {
     const trigger = this.repo.triggers.get(triggerId)
     if (!trigger) throw new UserError('unknownTrigger')
+    const policy = this.policy()
+    if (policy.intakeRejection && (!trigger.human || this.triggerRejection(trigger, policy))) return false
     if (this.holding(triggerId)) return false
     this.queueForEval(trigger)
     const disposition = this.repo.triggers.disposition(triggerId) ?? { fanout: [], at: this.now() }
@@ -240,6 +263,15 @@ export class Evals extends EnginePart {
     const { id: evalId, strength, policyVersion } = evaluation
     return { evalId, thread, triggers, strength, policyVersion, tickets: this.ticketsOnThread(thread) }
   }
+  /** A recovered evaluation from an older policy must not relay revoked or previously rejected text. */
+  private rejectedEvaluation(evaluation: Evaluation, policy: Policy): boolean {
+    if (!policy.intakeRejection) return false
+    if (evaluation.strength !== 'explicit') return true
+    return evaluation.triggerIds.some(id => {
+      const trigger = this.repo.triggers.get(id)
+      return !trigger?.human || !!this.triggerRejection(trigger, policy)
+    })
+  }
   /**
    * Record that the queued Triggers `ids` of a Thread start no Eval, for `reason`, and take them out of its queue. Its id
    * differs from an Eval's, so it never replaces the Decision of an earlier Eval of the same Triggers.
@@ -282,7 +314,8 @@ export class Evals extends EnginePart {
   private decideEval(thread: Thread, evaluation: Evaluation, outcome: AssessmentOutcome): Decision {
     const audit = outcome.audit ? { audit: outcome.audit } : {}
     // Requeue if Policy changed without a live policyChanged call (such as across an upgrade or restart).
-    if (this.policy().version !== evaluation.policyVersion) {
+    const policy = this.policy()
+    if (policy.version !== evaluation.policyVersion || this.rejectedEvaluation(evaluation, policy)) {
       if (thread.evaluating?.id === evaluation.id) return this.reassess(thread, { code: 'policyChanged' })
       return this.finish(thread, evaluation, { kind: 'unavailable', reason: [{ code: 'policyChanged' }], ...audit })
     }

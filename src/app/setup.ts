@@ -8,6 +8,7 @@ import { SETUP_FIELDS, resolveDeployment, resolveFeishuBot, workerProbe, type De
 import { agentVariables, applyEnvironment, verifyEnvironment, withoutDirectory, workerBin, writeEnvironment } from '../infra/environment.ts'
 import { workspaceMode } from '../policy.ts'
 import type { Settings, SettingsBlock } from '../policy.ts'
+import { verifyBranchRules } from '../manager/branch-rules.ts'
 import { SetupError, type SetupProblem } from '../setup.ts'
 import { executionRoot } from './execution-environment.ts'
 
@@ -82,8 +83,22 @@ export class Setup {
   }
   private async resolve(settings: Settings): Promise<Deployment> {
     const { context, machine, lifetime } = this.host
+    if (machine.managed?.enterprisePilot && workspaceMode(settings) !== 'worktree') {
+      throw new SetupError('environmentFailed', { output: 'Enterprise pilot repositories require managed Git worktrees.' })
+    }
     const probe = this.probe()
     const deployment = await resolveDeployment(machine, settings.sources.github?.config, probe)
+    if (machine.managed?.enterprisePilot) {
+      try {
+        await verifyBranchRules({ remote: deployment.repository, githubCli: deployment.github.cli }, lifetime)
+      } catch (failure) {
+        const rules = failure as { code?: string; branch?: string; missing?: string[] }
+        if (rules.code === 'branch_rules_missing' && rules.branch && rules.missing) {
+          throw new SetupError('branchRulesMissing', { repository: deployment.repository, branch: rules.branch, missing: rules.missing.join(', ') })
+        }
+        throw new SetupError('branchRulesUnreadable', { repository: deployment.repository, output: failure instanceof Error ? failure.message : String(failure) })
+      }
+    }
     const feishu = await resolveFeishuBot(machine, settings.sources.feishu?.config, probe).catch((error: unknown) => {
       if (!(error instanceof SetupError)) throw error
       this.feishuProblem = error.problem
