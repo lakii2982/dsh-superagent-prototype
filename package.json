@@ -2,9 +2,9 @@
   "name": "dsh-superagent",
   "author": "DeepSeek Harness Team <team@dsh.dev>",
   "license": "MIT",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
-  "description": "A proactive agent for one GitHub repository, as a DSH (DeepSeek Harness) bundle: it listens to GitHub and optionally Feishu, evaluates requests under a Policy, turns authorized ones into Tickets, and executes each in its own DSH Session.",
+  "description": "A DeepSeek Harness bundle for authorized GitHub and Feishu work, with shared repository management, team access, and group routing.",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -21,11 +21,16 @@
   },
   "files": [
     "lib",
+    "scripts/lark-bot",
     "cordis.patch.yml",
     "locale/*.json",
     "README.md",
+    "SETUP.md",
+    "docs/*.md",
     "prompts",
-    "skills"
+    "skills",
+    "ops/enterprise/README.md",
+    "ops/enterprise/check-branches.mjs"
   ],
   "dsh": {
     "bundle": {

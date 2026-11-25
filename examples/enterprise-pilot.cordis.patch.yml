@@ -1,0 +1,16 @@
+# Use one new DSH Web profile under the dedicated shared service identity.
+# Before starting, replace the port and stateDir with values for the deployment host.
+- id: webserver
+  config:
+    host: 127.0.0.1
+    port: 3082
+- id: dsh-superagent
+  config:
+    mode: manager
+    enterprisePilot: true
+    maxRunningRepositories: 12
+    stateDir: /srv/dsh-superagent/company/manager
+- id: dsh-superagent-github
+  disabled: true
+- id: dsh-superagent-feishu
+  disabled: true

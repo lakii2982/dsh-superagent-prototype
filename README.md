@@ -1,43 +1,26 @@
-# dsh-superagent
+# Superagent · 企业研发工作台
 
-> **Research prototype for reference only, not an official DeepSeek product.** This code grew out of our team's day-to-day development work, with much of the engineering done by coding agents. Treat it as research code, not production-ready software. It may still contain bugs, and its coding style and engineering practices may be inconsistent. Review and adapt it before using it in your own environment.
->
-> We have adapted it for publication, so it is not identical to our internal version or the implementation described in *Exploring Super-agent Design: Towards a More Autonomous Agent System*. Some designs discussed in the article are directions for future development and are not implemented in this prototype.
+一套 DSH 管理团队、产品线、GitHub 仓库和飞书工作入口。成员从获授权的会话发起任务，AI 执行开发并交付草稿 PR，负责人审查、测试与合并。
 
-dsh-superagent is a proactive coding agent for one GitHub repository, packaged as a bundle for [DeepSeek Harness](https://www.deepseek.com/en/harness/). It listens to GitHub and, optionally, Feishu. When someone allowed asks the agent for work, it opens a work item, works on it in its own agent session and directory, and answers in the original conversation, for example with a pull request. A web panel shows what needs a person.
+## 开始使用
 
-It is also a way of working with an agent: **take as little human attention as possible, and give as much value as possible.** An agent that can act for a whole team can also waste a whole team's attention, so it acts only when asked or when a rule the team wrote allows it, and speaks only when someone must act or can use a result. [docs/000-philosophy.md](docs/000-philosophy.md) explains the principle and what it asks of the operator.
+1. 从 DSH 侧边栏打开 **Superagent**；首次处于单仓模式时，点击 **启用多仓管理**。
+2. 在 **仓库管理 → 添加仓库** 填入 GitHub 地址、团队、产品线和授权成员；使用筛选定位不同团队的仓库。
+3. 在 **飞书机器人 → 添加机器人** 按账号选择本机已配置的机器人，或用目标飞书账号扫码创建。验证后点 **继续绑定群聊和仓库**，选择机器人所在群、目标仓库，按群成员姓名勾选发单人并保存。
+4. 桌面版可先打开仓库工作台。默认分支缺少审批、CI、强推或删除保护时，执行器等待配置；在收件箱打开 GitHub Rulesets 修正后点“重新检查”。企业部署或仓库指定了必需 CI 名称时，服务启动前也会核验规则。执行器就绪后可从已授权的 GitHub 或飞书入口提交任务。
 
-## Setup
+一个机器人可以连接多个群，每个“机器人＋群”只绑定一个仓库；多个群或多个机器人可以接入同一仓库。各机器人的成员授权、状态与消息回执分别管理。同一个飞书 CLI 可通过不同 `profile` 连接多个机器人，服务不会切换全局默认账号。
 
-Setup has many steps, so an agent does it with you. Ask your coding agent:
+**插件设置页**提供实时接入概况、飞书账号与机器人统一管理入口。**仓库设置**按来源、评估、执行、提示词、部署分类，修改后分别保存；切换分类保留草稿。
 
-> Read SETUP.md in this repository and set up dsh-superagent with me.
+## 公司部署与验收
 
-It asks one short question at a time, shows the full plan once, and then installs and configures everything. [SETUP.md](SETUP.md) is what it follows.
+多人共用请按[部署说明](ops/enterprise/README.md)安装到专用主机，使用同一个管理器。当前容量上限为同时运行 12 个仓库；120 人实际负载须在目标环境验证。
 
-## Documentation
+自动发布流程执行完整 HTTP 集成测试、跨平台回归和真实 DSH 安装恢复验证，全部通过后提供带校验和的安装包。客户上线时还需以真实业务试单验证授权、模型执行、草稿 PR、CI、人工合并和原渠道回执；迭代周期缩短 50% 按产品线持续度量。详见[自动化验证](docs/016-ci-validation.zh-CN.md)和[验收计划](docs/014-enterprise-development-pilot.zh-CN.md)。
 
-Read the numbered documents in order; each builds only on the ones before it.
+开发检查：`pnpm check`。配置与故障排查见[部署文档](docs/006-deployment.md)，正式交付按[发布验收记录](docs/015-release-acceptance.zh-CN.md)逐项验证。
 
-- [000 Philosophy](docs/000-philosophy.md)
-- [001 Domain model](docs/001-domain.md)
-- [002 Authorization](docs/002-authorization.md)
-- [003 Execution](docs/003-execution.md)
-- [004 Prompts](docs/004-prompts.md)
-- [005 Panel](docs/005-panel.md)
-- [006 Deployment](docs/006-deployment.md): manual setup, configuration, upgrades and troubleshooting
-- [007 Architecture](docs/007-architecture.md)
-- [008 Cookbook](docs/008-cookbook.md): adding a Source
+## 项目来源
 
-## Multi-repository management
-
-See [Multi-repository management and Feishu bindings](docs/multi-repository.md) for the optional unified manager. Single-repository mode remains the default.
-
-## Development
-
-`pnpm check` runs the typecheck, the tests and the build.
-
-## License
-
-[MIT](LICENSE)
+**基于开源参考实现的独立扩展，并非 DeepSeek 官方产品。** 上游定位为研究原型，使用前需评审与适配；本扩展保留授权接单与人工交付审核的使用场景。[上游声明及历史说明](docs/upstream-reference.md) · [MIT 许可证](LICENSE)
