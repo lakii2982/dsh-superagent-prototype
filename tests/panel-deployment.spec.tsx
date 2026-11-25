@@ -3,12 +3,42 @@
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { PluginConfig } from '../src/client/deployment.tsx'
+import type { ManagerView } from '../src/client/manager.tsx'
 import { expect, it, onTestFinished, vi } from 'vitest'
 import { zh } from '../src/client/locales.ts'
 import { usePanel, mount, remount, settle, all, find, rail, click, type, text, field, at, translator } from './fixtures/panel.tsx'
 import { server, problemOf, fakeForm } from './fixtures/panel-server.ts'
 
 usePanel()
+
+it('opens the shared manager from the single-repository desktop panel after the host confirms the switch', async () => {
+  const { form, mutations, publish } = fakeForm()
+  // Desktop rc.5 does not include the newer snapshot.mode field.
+  publish({ mode: undefined })
+  let mode: 'standalone' | 'manager' = 'standalone'
+  server.form = { ...form, mutate: async (...args) => {
+    const changed = await form.mutate(...args)
+    if (changed) mode = 'manager'
+    return changed
+  } }
+  const fetchFromFixture = fetch
+  vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
+    if (url === '/orchestrator/mode') return Promise.resolve(Response.json({ mode, desktopMultiRepository: mode === 'manager' }))
+    if (url === '/orchestrator/manager/state') return Promise.resolve(Response.json({ revision: 1, bot: null, botCli: '',
+      workspaces: [], repositories: [], bindings: [], chats: {}, health: {}, pending: [], enterprisePilot: true,
+      capacity: { maxRunningRepositories: 12, runningRepositories: 0 } }))
+    return fetchFromFixture(url, init)
+  })
+  await mount()
+  expect(find('启用多仓管理')).toHaveProperty('disabled', true)
+  server.setup = { ...server.setup, problem: problemOf('repositoryUnset'), accounts: null }
+  await remount()
+  await click('启用多仓管理')
+  expect(mutations).toEqual([{ revision: 1, ops: [{ op: 'set', path: ['desktopMultiRepository'], value: true }] }])
+  expect(rail(zh['manager.bindings'])).toBeTruthy()
+  expect(text()).toContain('0 / 12')
+})
+
 it('saves this machine\'s settings in the Deployment settings through DSH\'s configuration form, without a restart', async () => {
   const { form: editable, mutations } = fakeForm()
   server.form = editable
@@ -149,4 +179,100 @@ it('ends a restart that never stopped answering after half a minute, and reads t
   expect(reads()).toBe(ended)
   await advance(2_000)
   expect(reads()).toBe(ended + 1)
+})
+
+
+it('shows live enterprise plugin settings, routes to management, with one account-management entry', async () => {
+  const { form, mutations } = fakeForm()
+  const open = vi.fn()
+  const writes: unknown[] = []
+  const manager: ManagerView = { revision: 1, bot: { id: 'ou_bot', name: '研发助手' }, botCli: '/bin/lark-bot',
+    workspaces: [], repositories: [{ id: 'repo-1', name: 'ai-workspace', remote: 'acme/ai-workspace', directory: '',
+      githubCli: 'gh', allowedGithub: ['alice'], allowedFeishu: [], teamName: '研发一组', productLines: ['AI 工作台'],
+      enabled: true, profile: 'repo-1', port: 4500, status: { online: false }, starting: false, url: 'http://127.0.0.1:4500' }],
+    bindings: [], chats: {}, health: {}, pending: [], enterprisePilot: true,
+    capacity: { maxRunningRepositories: 12, runningRepositories: 0 } }
+  vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
+    if (url === '/orchestrator/mode') return Promise.resolve(Response.json({ mode: 'manager', desktopMultiRepository: true }))
+    if (url === '/orchestrator/manager/state') return Promise.resolve(Response.json(manager))
+    throw new Error(`Unexpected request ${url}`)
+  })
+  const container = document.createElement('div'); document.body.append(container)
+  const root = createRoot(container)
+  onTestFinished(() => { act(() => { root.unmount() }); container.remove() })
+  await act(async () => { root.render(<PluginConfig t={translator(zh)} view="page" form={{ state: form.getSnapshot(),
+    mutate: form.mutate }} onOpenManager={open} />) }); await settle()
+  expect(container.querySelector('.dt-plugin-metrics')?.textContent).toBe('1研发团队1产品线1已接入仓库0运行中的仓库')
+  expect(text()).toContain('研发助手')
+  expect(text()).toContain('还没有启用群聊绑定')
+  expect(writes).toHaveLength(0)
+  expect(mutations).toHaveLength(0)
+  await click(container.querySelector('.dt-plugin-link') as HTMLElement)
+  expect(open).toHaveBeenCalledWith('repositories')
+  await click('管理飞书账号与机器人')
+  expect(open).toHaveBeenCalledWith('feishu')
+  expect(text()).not.toContain('机器人 CLI 路径或命令')
+  expect(mutations).toHaveLength(0)
+})
+
+it('does not display empty enterprise metrics when manager access is locked', async () => {
+  const open = vi.fn()
+  vi.stubGlobal('fetch', (url: string) => Promise.resolve(url === '/orchestrator/mode'
+    ? Response.json({ mode: 'manager' })
+    : Response.json({ code: 'operator_auth_required' }, { status: 401 })))
+  const container = document.createElement('div'); document.body.append(container)
+  const root = createRoot(container)
+  onTestFinished(() => { act(() => { root.unmount() }); container.remove() })
+  await act(async () => { root.render(<PluginConfig t={translator(zh)} view="page" form={undefined} onOpenManager={open} />) })
+  await settle()
+  expect(container.querySelector('.dt-plugin-metrics')).toBeNull()
+  expect(container.querySelector('[role="alert"]')?.textContent).toContain('管理权限')
+  await click('打开工作台')
+  expect(open).toHaveBeenCalledWith('repositories')
+})
+
+it('lists all connections in settings and routes both actions to the central workspace', async () => {
+  const { form } = fakeForm(), open = vi.fn(), writes: { path: string; body: unknown }[] = []
+  let state: ManagerView = { revision: 4, bot: null, botCli: '', workspaces: [], repositories: [], bindings: [], chats: {}, health: {}, pending: [], bots: [
+    { id: 'bot-a', botId: 'ou_a', appId: 'cli_a', brand: 'feishu', name: '平台助手', cli: '/bin/lark', profile: 'platform', enabled: true, connected: true, chats: { oc_a: '平台群' }, health: {} },
+    { id: 'bot-b', botId: 'ou_b', appId: 'cli_b', brand: 'feishu', name: '设备助手', cli: '/bin/lark', profile: 'device', enabled: true, connected: true, chats: { oc_b: '设备群' }, health: {} },
+  ] }
+  vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
+    if (url === '/orchestrator/mode') return Promise.resolve(Response.json({ mode: 'manager', desktopMultiRepository: true }))
+    if (url === '/orchestrator/manager/state') return Promise.resolve(Response.json(state))
+    throw new Error(`Unexpected request ${url}`)
+  })
+  const container = document.createElement('div'); document.body.append(container)
+  const root = createRoot(container)
+  onTestFinished(() => { act(() => { root.unmount() }); container.remove() })
+  await act(async () => { root.render(<PluginConfig t={translator(zh)} view="page" form={{ state: form.getSnapshot(), mutate: form.mutate }} onOpenManager={open} />) })
+  await settle()
+  expect(container.querySelectorAll('.dt-plugin-bot-row')).toHaveLength(2)
+  expect(text()).toContain('2 / 2 连接已验证')
+  expect(text()).toContain('平台助手'); expect(text()).toContain('设备助手')
+  await click('管理飞书账号与机器人'); expect(open).toHaveBeenCalledWith('feishu')
+  await click('管理群聊绑定'); expect(open).toHaveBeenCalledWith('bindings')
+})
+
+it('explains restricted history in native settings while retaining the healthy live connection', async () => {
+  const { form } = fakeForm()
+  const diagnostic = 'oc_team: Error: access denied for this bot operation (230027)'
+  const state: ManagerView = { revision: 1, bot: null, botCli: '', workspaces: [], repositories: [], bindings: [], chats: {}, health: {}, pending: [], bots: [
+    { id: 'bot-a', botId: 'ou_a', appId: 'cli_a', brand: 'feishu', name: '研发助手', cli: '/bin/lark', enabled: true, connected: true,
+      chats: { oc_team: '研发群' }, health: { feishu: { state: 'ready', detail: 'Listening' }, history: { state: 'error', detail: diagnostic } } },
+  ] }
+  vi.stubGlobal('fetch', (url: string) => Promise.resolve(url === '/orchestrator/mode' ? Response.json({ mode: 'manager' }) : Response.json(state)))
+  const container = document.createElement('div'); document.body.append(container)
+  const root = createRoot(container)
+  onTestFinished(() => { act(() => { root.unmount() }); container.remove() })
+  await act(async () => { root.render(<PluginConfig t={translator(zh)} view="page" form={{ state: form.getSnapshot(), mutate: form.mutate }} />) })
+  await settle()
+  const bot = container.querySelector('.dt-plugin-bot-row')!
+  expect(bot.textContent).toContain('实时消息已连接；历史补收受限')
+  expect(bot.textContent).toContain('历史消息补收：应用权限不足')
+  expect(bot.textContent).not.toContain('连接异常')
+  expect(bot.querySelector('.dt-tag')?.getAttribute('data-tone')).toBe('warning')
+  const details = bot.querySelector('details')!
+  expect(details.open).toBe(false)
+  expect(details.textContent).toContain(diagnostic)
 })

@@ -28,13 +28,16 @@ export interface ApiMessages {
   user: (failure: UserFailure) => string
 }
 const isUserError = (code: unknown): code is UserErrorCode => typeof code === 'string' && Object.hasOwn(USER_ERRORS, code)
+interface ApiAccess { authorization?: string; onUnauthorized?: () => void }
 
 /** Calls one management endpoint; the `x-orchestrator-request` header marks the request as originating from this page. */
-async function api<T>(messages: ApiMessages, base: string, path: string, method: string, body?: unknown): Promise<T> {
+async function api<T>(messages: ApiMessages, base: string, path: string, method: string, body: unknown, access: ApiAccess): Promise<T> {
   let response: Response
   const json = body === undefined ? {} : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }
   try {
-    response = await fetch(`${base}${path}`, { method, ...json, headers: { 'x-orchestrator-request': '1', ...json.headers } })
+    const authorization = access.authorization
+    response = await fetch(`${base}${path}`, { method, ...json, ...(authorization ? { redirect: 'error' } : {}),
+      headers: { 'x-orchestrator-request': '1', ...json.headers, ...(authorization ? { authorization } : {}) } })
   } catch {
     throw new ApiError(messages.offline, 0, { unreachable: true })
   }
@@ -48,6 +51,7 @@ async function api<T>(messages: ApiMessages, base: string, path: string, method:
     const user = isUserError(failure.code) ? { code: failure.code, values: failure.values ?? {} } : undefined
     // dsh-superagent always responds with a body; an empty 404 comes from the DSH web server when dsh-superagent routes are unmounted during startup or restart.
     const { status } = response
+    if (status === 401 && failure.code === 'operator_auth_required') access.onUnauthorized?.()
     const message = failure.setup ? messages.setup(failure.setup) : user ? messages.user(user)
       : typeof failure.error === 'string' ? failure.error : !text && status === 404 ? messages.notRunning
       : status >= 500 ? messages.serverError(status) : messages.requestFailed(status)
@@ -105,14 +109,17 @@ export const DECISION_KINDS: Readonly<Record<DecisionFilter, string>> = { work: 
 export type Call = <K extends keyof Api>(route: K, ...request: {} extends ApiRequest<K> ? [request?: ApiRequest<K>] : [request: ApiRequest<K>])
   => Promise<ApiResponse<K>>
 /** Build a typed route caller that resolves localized error messages on each request; `base` selects this deployment or a managed repository. */
-export function caller(messages: () => ApiMessages, base = '/orchestrator/api/'): Call {
+export function caller(messages: () => ApiMessages, base = '/orchestrator/api/', access: ApiAccess = {}): Call {
+  if (access.authorization && !/^\/orchestrator\/manager\/repositories\/[^/]+\/api\/$/.test(base)) {
+    throw new Error('Operator credentials can only be used for the same-origin repository proxy')
+  }
   return (route, ...[request]) => {
     const [method, pattern] = route.split(' ') as [string, string]
     const values = (request ?? {}) as Record<string, unknown> & { query?: Record<string, unknown>; body?: unknown }
     const path = pattern.replace(/:(\w+)/g, (_match, name: string) => encodeURIComponent(String(values[name])))
     const query = Object.entries(values.query ?? {}).filter(([, value]) => value !== undefined && value !== '')
       .map(([name, value]) => `${name}=${encodeURIComponent(String(value))}`).join('&')
-    return api(messages(), base, query ? `${path}?${query}` : path, method, values.body)
+    return api(messages(), base, query ? `${path}?${query}` : path, method, values.body, access)
   }
 }
 

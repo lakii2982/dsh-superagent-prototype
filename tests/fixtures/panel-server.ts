@@ -456,7 +456,12 @@ export function usePanelServer(cleanup: () => void, manager?: ManagerView) {
       if (server.down) return new Response(null, { status: 404 })
       const address = new URL(url, 'http://127.0.0.1:3082')
       if (address.pathname === '/orchestrator/mode') return Response.json({ mode: manager ? 'manager' : 'standalone' })
+      if (manager && address.pathname.endsWith('/permission-qr')) return Response.json({ image: 'data:image/png;base64,fixture' })
+      if (manager && address.pathname === '/orchestrator/manager/feishu/accounts') return Response.json({ items: [] })
       if (manager && address.pathname === '/orchestrator/manager/state') return Response.json(manager)
+      if (manager && /^\/orchestrator\/manager\/(?:bots\/[^/]+\/)?chats\/[^/]+\/members$/.test(address.pathname)) {
+        return Response.json({ users: [], has_more: false })
+      }
       // In manager mode the repository panel talks to the manager's authenticated proxy, not to a local engine.
       const proxy = /^\/orchestrator\/manager\/repositories\/([^/]+)\/api\/(.*)$/.exec(address.pathname)
       if (proxy) server.proxied.push({ repository: proxy[1]!, path: decodeURIComponent(proxy[2]!) })

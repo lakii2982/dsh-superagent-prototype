@@ -143,3 +143,27 @@ it('stacks the settings as headed sections, opens each stage\'s section from its
   await click(rail(zh['tab.settings']))
   expect(document.querySelector('.dt-settings')?.getAttribute('data-active')).toBe('execution')
 })
+
+
+it('shows only the selected settings category and keeps hidden unsaved edits visible in its navigation', async () => {
+  await mount()
+  await click(rail(zh['tab.settings']))
+  const category = (name: string) => all('.dt-settings-nav button').find(item => item.textContent === name)!
+  const section = (group: string) => document.querySelector<HTMLElement>(`[data-group="${group}"]`)!
+  expect(section('source').hidden).toBe(false)
+  expect(section('execution').hidden).toBe(true)
+  await click(category(zh['settingsGroup.execution']))
+  expect(section('execution').hidden).toBe(false)
+  expect(section('source').hidden).toBe(true)
+  await type(field<HTMLInputElement>(zh.maxWorkers), '6')
+  expect(category(zh['settingsGroup.execution']).querySelector('[aria-label="未保存"]')).not.toBeNull()
+  await click(category(zh['settingsGroup.source']))
+  expect(section('execution').hidden).toBe(true)
+  expect(document.querySelector('.dt-settings-pending')?.textContent).toContain(zh['settingsGroup.execution'])
+  expect(server.settings.executor.maxWorkers).toBe(3)
+  await click(category(zh['settingsGroup.execution']))
+  expect(field<HTMLInputElement>(zh.maxWorkers).value).toBe('6')
+  await click(zh.discard)
+  expect(category(zh['settingsGroup.execution']).querySelector('[aria-label="未保存"]')).toBeNull()
+  expect(document.querySelector('.dt-settings-pending')).toBeNull()
+})
