@@ -34,7 +34,7 @@ export async function readAdmissionImage(agent: Agent, commands: Commands, ref: 
   signal.throwIfAborted()
   const directory = await mkdtemp(join(stateDir, 'admission-image-'))
   try {
-    const result = z.object({ saved_path: z.string() }).parse(await commands.withSignal(signal).lark([
+    const result = z.object({ saved_path: z.string() }).parse(await commands.withSignal(signal).withFeishuBot(ref.botId).lark([
       'im', '+messages-resources-download', '--message-id', messageId, '--file-key', imageKey, '--type', 'image', '--output', './image',
     ], directory))
     const path = await realpath(result.saved_path)

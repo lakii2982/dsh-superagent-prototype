@@ -12,10 +12,11 @@ import { nativeSubprocess } from './fixtures/subprocess.ts'
 import { feishu } from './fixtures/host.ts'
 
 vi.setConfig({ testTimeout: 20000 })
-type Received = { repositoryId: string; trigger: { id: string; threads: { id: string }[]; meta: { messageId: string; chatId: string } } }
+type Received = { repositoryId: string; trigger: { id: string; actor: { id: string }; threads: { id: string }[]; meta: { messageId: string; chatId: string } } }
 type Fake = {
   server: Server; handler: (req: IncomingMessage, res: ServerResponse) => Promise<void>; port: number; id: string; token: string
   received: Received[]; requests: { messageId: string; result: string }[]; accepted: Set<string>; failing: Set<string>
+  policies: { revision: number; value: { sources: Record<string, { allowed: { id: string }[] }> } }[]
 }
 type Readiness = { state: string; detail?: string; repair?: string; pending?: number; byChat?: Record<string, number> }
 type State = {
@@ -25,18 +26,42 @@ type State = {
 }
 let directory: string, manager: Manager, server: Server, origin: string, repository: Repository, ctx: Context, botCli: string
 const fakes: Fake[] = []
-const listen = (server: Server, port = 0) => new Promise<number>(resolve => { server.listen(port, '127.0.0.1', () => { resolve((server.address() as { port: number }).port) }) })
+const listen = (server: Server, port = 0) => new Promise<number>((resolve, reject) => {
+  const failed = (error: Error) => reject(error)
+  server.once('error', failed)
+  server.listen(port, '127.0.0.1', () => {
+    server.removeListener('error', failed)
+    resolve((server.address() as { port: number }).port)
+  })
+})
 const close = (server: Server) => new Promise<void>(resolve => { server.closeAllConnections(); server.close(() => resolve()) })
 const response = (res: ServerResponse, value: unknown, status = 200) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(value)) }
 const request = (path: string, value?: unknown, method = value === undefined ? 'GET' : 'POST', headers: Record<string, string> = { 'x-orchestrator-request': '1' }) =>
   fetch(`${origin}/orchestrator/${path}`, { method, headers: { ...headers, 'content-type': 'application/json' }, ...(value === undefined ? {} : { body: JSON.stringify(value) }) })
+/**
+ * Run the given request thunks with a bounded number in flight. A single `Promise.all` over every item asks the kernel for
+ * one connection per item at once; macOS caps the listen backlog (`kern.ipc.somaxconn` = 128 by default) and resets the
+ * surplus before the server can accept it. The test keeps its concurrency guarantee without exceeding that OS limit.
+ */
+const inFlight = async <T>(tasks: readonly (() => Promise<T>)[], limit = 24): Promise<T[]> => {
+  const results = new Array<T>(tasks.length)
+  let next = 0
+  const worker = async (): Promise<void> => {
+    while (next < tasks.length) {
+      const index = next++
+      results[index] = await tasks[index]!()
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, worker))
+  return results
+}
 const fakeOf = (repositoryId: string): Fake => fakes.find(item => item.id === repositoryId)!
 const view = async (): Promise<State> => await (await request('manager/state')).json() as State
 const arrived = (fake: Fake): string[] => fake.received.map(item => item.trigger.meta.messageId)
 
 /** A repository instance fixture: authenticated health, settings, tickets and a deduplicating receive. */
 const fakeInstance = async (): Promise<Fake> => {
-  const fake = { received: [], requests: [], accepted: new Set<string>(), failing: new Set<string>(), id: '', token: '' } as unknown as Fake
+  const fake = { received: [], requests: [], policies: [], accepted: new Set<string>(), failing: new Set<string>(), id: '', token: '' } as unknown as Fake
   fake.handler = async (req, res) => {
     if (req.headers.authorization !== `Bearer ${fake.token}`) { response(res, { error: 'auth' }, 403); return }
     const url = req.url ?? ''
@@ -44,6 +69,10 @@ const fakeInstance = async (): Promise<Fake> => {
       agent: [{ kind: 'codex', available: true, detail: 'codex was found' }] }); return }
     if (url.endsWith('/settings')) { response(res, { blocks: { policy: { revision: 1, value: { sources: { github: { allowed: [] }, feishu: { allowed: [] } } } } },
       sources: [{ id: 'feishu', revision: 1, value: { enabled: true, config: { cli: 'bot', chats: [] } } }] }); return }
+    if (url.endsWith('/settings/policy')) {
+      const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk))
+      fake.policies.push(JSON.parse(Buffer.concat(chunks).toString()) as Fake['policies'][number]); response(res, { saved: true }); return
+    }
     if (url.includes('/settings/')) { response(res, { saved: true }); return }
     if (url.includes('/tickets')) { response(res, { items: [] }); return }
     if (url.endsWith('/receive')) {
@@ -62,7 +91,7 @@ const fakeInstance = async (): Promise<Fake> => {
   return fake
 }
 const repositoryFor = (fake: Fake, name: string, remote: string): Repository => {
-  const created: Repository = { ...ManagerStore.identity(), port: fake.port, name, remote, directory: `/repo/${name}`, githubCli: '/bin/false', allowedGithub: [], allowedFeishu: [], enabled: true }
+  const created: Repository = { ...ManagerStore.identity(), port: fake.port, name, remote, directory: `/repo/${name}`, githubCli: '/bin/false', allowedGithub: [], allowedFeishu: ['ou_alice'], enabled: true }
   fake.id = created.id; fake.token = created.token
   return created
 }
@@ -98,9 +127,13 @@ console.log(JSON.stringify({ok:true,data}));
   await manager.start()
 })
 afterEach(async () => {
-  await manager.stop(); await close(server)
-  for (const fake of fakes) if (fake.server.listening) await close(fake.server)
-  fakes.length = 0; rmSync(directory, { recursive: true, force: true })
+  try { await manager?.stop() }
+  finally {
+    try {
+      if (server?.listening) await close(server)
+      for (const fake of fakes) if (fake.server.listening) await close(fake.server)
+    } finally { fakes.length = 0; if (directory) rmSync(directory, { recursive: true, force: true }) }
+  }
 })
 it('hides instance credentials and rejects cross-origin browser and unauthenticated internal calls', async () => {
   const state = await (await request('manager/state')).text()
@@ -109,6 +142,38 @@ it('hides instance credentials and rejects cross-origin browser and unauthentica
   expect((await request(`internal/${repository.id}/receive`, feishu('1', 'request'))).status).toBe(403)
   const wrong = feishu('1', 'wrong group', { chat_id: 'oc_second' })
   expect((await request(`internal/${repository.id}/receive`, wrong, 'POST', { authorization: `Bearer ${repository.token}` })).status).toBe(400)
+})
+it('saves a GitHub handle without the @ people type in the panel', async () => {
+  const put = await request(`manager/repositories/${repository.id}`, { revision: manager.store.revision(), name: repository.name,
+    directory: repository.directory, remote: repository.remote, githubCli: repository.githubCli, allowedGithub: ['@alice'], allowedFeishu: [],
+    enabled: true, productLines: [], requiredChecks: [] }, 'PUT')
+  expect(put.status).toBe(200)
+  expect(manager.store.repositories()[0]?.allowedGithub).toEqual(['alice'])
+})
+it('sends a stored @handle to the instance as the bare GitHub login', async () => {
+  manager.store.save([{ ...repository, allowedGithub: ['@alice'] }], manager.store.bindings(), manager.store.revision())
+  const fake = fakes.at(-1)!
+  await vi.waitFor(() => {
+    expect(fake.policies.at(-1)?.value.sources.github?.allowed).toEqual([{ id: 'alice' }])
+  }, { timeout: 7000 })
+})
+it('atomically binds a group and grants access to its selected verified members', async () => {
+  expect((await request('manager/chats/refresh', {})).status).toBe(200)
+  const revision = manager.store.revision()
+  manager.store.save([{ ...repository, allowedFeishu: ['ou_other'] }], manager.store.bindings(), revision)
+  const before = manager.store.revision()
+  const bindings = [...manager.store.bindings().map(({ effectiveAt, ...binding }) => binding),
+    { chatId: 'oc_second', repositoryId: repository.id, enabled: true }]
+  const grant = { chatId: 'oc_second', repositoryId: repository.id, memberIds: ['ou_missing'] }
+  expect((await request('manager/bindings', { revision: before, bindings, grant }, 'PUT')).status).toBe(400)
+  expect(manager.store.revision()).toBe(before)
+  expect(manager.store.bindings()).toHaveLength(1)
+  expect(manager.store.repositories()[0]?.allowedFeishu).toEqual(['ou_other'])
+  grant.memberIds = ['ou_alice']
+  expect((await request('manager/bindings', { revision: before, bindings, grant }, 'PUT')).status).toBe(200)
+  expect(manager.store.revision()).toBe(before + 1)
+  expect(manager.store.bindings()).toHaveLength(2)
+  expect(manager.store.repositories()[0]?.allowedFeishu).toEqual(['ou_other', 'ou_alice'])
 })
 it('forwards a managed repository panel request with its own credential and keeps that credential in the manager', async () => {
   const seen: { method: string; url: string; auth: string; body: string }[] = []
@@ -172,6 +237,76 @@ it('keeps same-topic order while another topic retries in parallel', async () =>
   fake.failing.clear()
   await vi.waitFor(() => { expect(arrived(fake)).toEqual(['om_3', 'om_1', 'om_2']) }, { timeout: 10000 })
 })
+it('isolates concurrent ingress from 120 identities across 5 teams and 12 repositories over real HTTP', async () => {
+  // Control-plane regression: real sockets and journal, simulated identities and downstream executors.
+  const instances = [fakeOf(repository.id), ...await Promise.all(Array.from({ length: 11 }, () => fakeInstance()))]
+  const repositories = instances.map((fake, index) => ({
+    ...(index === 0 ? repository : repositoryFor(fake, `Product${index + 1}`, `acme/product${index + 1}`)),
+    teamName: `Team ${(index % 5) + 1}`, productLines: [`Product ${index + 1}`],
+    allowedFeishu: Array.from({ length: 10 }, (_, member) => `ou_product${index + 1}member${member + 1}`),
+  }))
+  const bindings = repositories.map((repo, index) => ({
+    chatId: `oc_product${index + 1}`, repositoryId: repo.id, enabled: true, effectiveAt: '2026-01-01T00:00:00Z',
+  }))
+  manager.store.save(repositories, bindings, manager.store.revision())
+  await manager.stop()
+  manager = new Manager(ctx, testMachine({ stateDir: directory }), { maxRunningRepositories: 12 })
+  await manager.start()
+  expect(new Set(manager.store.repositories().map(repo => repo.teamName)).size).toBe(5)
+  const cases = repositories.flatMap((repo, index) => repo.allowedFeishu.map((sender, member) => ({
+    repo, trigger: feishu(`scale${index * 10 + member + 1}`, `Product ${index + 1} request ${member + 1}`, {
+      chat_id: bindings[index]!.chatId, sender_id: sender,
+    }),
+  })))
+  expect(new Set(cases.map(item => item.trigger.actor.id)).size).toBe(120)
+
+  // A valid credential for a neighboring repository grants no access to this repository's bridge.
+  // A repository's own credential also cannot inject a message for another repository's bound group.
+  await Promise.all(repositories.map(async (repo, index) => {
+    const neighbor = repositories[(index + 1) % repositories.length]!
+    const trigger = feishu(`denied${index + 1}`, 'must never reach an executor', { chat_id: bindings[index]!.chatId })
+    const unauthorized = await request(`internal/${repo.id}/receive`, trigger, 'POST', { authorization: `Bearer ${neighbor.token}` })
+    expect(unauthorized.status).toBe(403)
+    expect(await unauthorized.json()).toEqual({ error: 'Repository authorization required' })
+    const wrongRoute = await request(`internal/${neighbor.id}/receive`, trigger, 'POST', { authorization: `Bearer ${neighbor.token}` })
+    expect(wrongRoute.status).toBe(400)
+    expect(await wrongRoute.json()).toEqual({ error: 'Message belongs to another repository' })
+  }))
+  expect((await view()).queues.total).toBe(0)
+  expect(instances.flatMap(fake => fake.requests)).toEqual([])
+
+  // Race two copies of every event: one durable insert and one duplicate acknowledgement per identity.
+  await inFlight(cases.map(({ repo, trigger }) => async () => {
+    const results = await Promise.all([0, 1].map(async () => {
+      const result = await request(`internal/${repo.id}/receive`, trigger, 'POST', { authorization: `Bearer ${repo.token}` })
+      expect(result.status).toBe(200)
+      return await result.json() as { result: string }
+    }))
+    expect(results.map(result => result.result).sort()).toEqual(['duplicate', 'stored'])
+  }))
+
+  await vi.waitFor(async () => {
+    const state = await view()
+    expect(state.repositories).toHaveLength(12)
+    expect(state.queues).toEqual({ total: 0, byRepository: Object.fromEntries(repositories.map(repo => [repo.id, 0])), byChat: {}, byBinding: [] })
+    expect(state.pending).toEqual([])
+    expect(state.repositories.every(repo => repo.status.online && repo.pending.total === 0)).toBe(true)
+    for (const [index, fake] of instances.entries()) {
+      const repo = repositories[index]!
+      const expected = cases.filter(item => item.repo.id === repo.id)
+      const deliveries = fake.received.map(item => ({ repositoryId: item.repositoryId, triggerId: item.trigger.id,
+        messageId: item.trigger.meta.messageId, chatId: item.trigger.meta.chatId, actorId: item.trigger.actor.id }))
+      expect(deliveries).toHaveLength(10)
+      expect(deliveries).toEqual(expect.arrayContaining(expected.map(({ trigger }) => ({ repositoryId: repo.id,
+        triggerId: trigger.id, messageId: trigger.meta.messageId, chatId: trigger.meta.chatId, actorId: trigger.actor.id }))))
+      // Assert HTTP delivery attempts too: downstream deduplication must not hide double dispatch.
+      expect(fake.requests).toHaveLength(10)
+      expect(fake.requests.every(item => item.result === 'stored')).toBe(true)
+    }
+  }, { timeout: 15000, interval: 100 })
+  expect(manager.store.pending()).toEqual([])
+  expect(manager.store.outstanding()).toEqual([])
+}, 30000)
 it('keeps two groups on two repositories on their own routes without cross delivery', async () => {
   const first = fakeOf(repository.id), second = await fakeInstance()
   const other = repositoryFor(second, 'Other', 'acme/other')

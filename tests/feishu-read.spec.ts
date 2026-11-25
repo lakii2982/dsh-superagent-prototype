@@ -8,6 +8,23 @@ const event: FeishuRef = { triggerId: 'source', chatId: 'oc_chat', messageId: 'o
 const source = { message_id: 'om_source', chat_id: 'oc_chat', parent_id: 'om_parent', root_id: 'om_root', thread_id: 'omt_thread' }
 const message = { message_id: 'om_root', chat_id: 'oc_chat', msg_type: 'merge_forward', content: '<forwarded_messages>Earlier discussion ![Image](img_one)</forwarded_messages>', sender: { id: 'ou_user', name: 'User', sender_type: 'user' }, create_time: '2026-09-11 12:00' }
 afterEach(() => vi.restoreAllMocks())
+it('uses the accepted bot for message, context, and link reads without sharing the selection between calls', async () => {
+  const deployment = testDeployment({ managed: { repositoryId: 'repo', url: 'http://127.0.0.1:3082', token: 'repository-private-token' } })
+  const scoped = new Commands(() => deployment, {}, new AbortController().signal)
+  const seen: { botId: string; args: string[] }[] = []
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => {
+    const request = JSON.parse(String(options?.body)) as { botId: string; args: string[] }
+    seen.push(request)
+    const data = request.args[0] === 'api' ? { items: [source] }
+      : { messages: [{ ...message, message_id: 'om_source', message_app_link: `https://applink/${request.botId}` }] }
+    return new Response(JSON.stringify({ data }), { headers: { 'content-type': 'application/json' } })
+  })
+  await Promise.all(['bot-a', 'bot-b'].map(botId => feishuRead(scoped, { ...event, botId }, 'feishu/source/message', 10)))
+  expect(seen.filter(request => request.botId === 'bot-a')).toHaveLength(2)
+  expect(seen.filter(request => request.botId === 'bot-b')).toHaveLength(2)
+  expect(await readFeishuLink(scoped, { ...event, botId: 'bot-b' })).toBe('https://applink/bot-b')
+  expect(seen.at(-1)?.botId).toBe('bot-b')
+})
 it('resolves legacy source metadata and reads merged forwards without embedding automatic thread expansion', async () => {
   const lark = vi.spyOn(commands, 'lark').mockResolvedValueOnce({ items: [source] }).mockResolvedValueOnce({ messages: [{ ...message, thread_replies: [{ content: 'Automatic expansion omitted' }] }] })
   const result = await readFeishu(commands, event, 'feishu/source/root', 20)

@@ -13,18 +13,22 @@ def main():
     if not real_cli or Path(real_cli).resolve() == Path(__file__).resolve():
         sys.exit('Set DSH_SUPERAGENT_LARK_CLI to the real lark-cli executable')
     args = sys.argv[1:]
+    profiles = [arg for arg in args if arg.startswith('--profile=')]
+    if len(profiles) > 1 or '--profile' in args:
+        sys.exit('Choose one named profile')
+    args = [arg for arg in args if not arg.startswith('--profile=')]
     if args[:2] == ['config', 'strict-mode'] and len(args) == 2:
         print('strict-mode: bot (source: bot-only facade)')
         return
     if args[:2] == ['auth', 'status'] and all(arg in ['--json', '--verify'] for arg in args[2:]):
-        command = [real_cli, 'auth', 'status', '--json'] + (['--verify'] if '--verify' in args else [])
+        command = [real_cli, 'auth', 'status', '--json'] + (['--verify'] if '--verify' in args else []) + profiles
         result = subprocess.run(command, capture_output=True, text=True)
         if result.returncode:
-            sys.stderr.write(result.stderr)
+            sys.stderr.write(result.stderr or result.stdout)
             sys.exit(result.returncode)
         status = json.loads(result.stdout)
-        status['identities'] = {'bot': status.get('identities', {}).get('bot', {})}
-        status['identity'] = 'bot'
+        status = {'appId': status['appId'], 'brand': status.get('brand', 'feishu'), 'identity': 'bot',
+                  'identities': {'bot': status.get('identities', {}).get('bot', {})}}
         print(json.dumps(status))
         return
     if not args or args[0] not in ['im', 'api', 'event'] or (args[0] == 'event' and args[1:2] != ['consume']):
@@ -44,7 +48,7 @@ def main():
         else:
             filtered.append(arg)
             index += 1
-    os.execv(real_cli, [real_cli, *filtered, '--as', 'bot'])
+    os.execv(real_cli, [real_cli, *filtered, '--as', 'bot', *profiles])
 
 
 if __name__ == '__main__':

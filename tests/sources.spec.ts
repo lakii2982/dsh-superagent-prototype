@@ -5,6 +5,7 @@ import { backfillChat, consumerRetry, feishuKind, feishuTriggerId, feishuRef, fe
 import { KV } from '../src/kv.ts'
 import { apply as applyFeishu, pollThreads as pollFeishuThreads } from '../src/sources/feishu.ts'
 import { runFeishu } from '../src/sources/feishu-loops.ts'
+import { scopeManagedFeishuTrigger } from '../src/sources/feishu-trigger.ts'
 import { commentTrigger, githubAddress, githubChannel, issueTrigger, type GithubComment, type GithubIssue } from '../src/sources/github-trigger.ts'
 import { claimPull, observePull, pullEndNotices, pullOf, ticketBranch, type Pull } from '../src/sources/github-pull.ts'
 import { ciCounts, ciFact, ciSummary } from '../src/sources/github-read.ts'
@@ -20,8 +21,16 @@ import { SettingsSchema, settingsPolicy } from '../src/policy.ts'
 import { sourceContextOf, type SourceContextDeps } from '../src/app/source-context.ts'
 import { SetupError, type SetupProblem } from '../src/setup.ts'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import * as subprocess from 'node:child_process'
+import { EventEmitter } from 'node:events'
+import { PassThrough } from 'node:stream'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+
+vi.mock('node:child_process', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:child_process')>()
+  return { ...actual, spawn: vi.fn(actual.spawn) }
+})
 
 const MEMBER = 'ou_alice'
 function host(overrides: Partial<SourceContextDeps> = {}) {
@@ -90,6 +99,63 @@ function github(h: ReturnType<typeof host>, routes: Record<string, unknown>): st
 }
 const bare = (reads: string[]) => reads.map(path => path.split('?')[0])
 describe('feishu source', () => {
+  it('isolates the same message and thread across bots while keeping legacy IDs and parent links stable', () => {
+    const raw = feishuTrigger({ message_id: 'om_reply', root_id: 'om_root', parent_id: 'om_parent', chat_id: 'oc_shared',
+      chat_type: 'group', sender_id: MEMBER, sender_type: 'user', content: 'continue', create_time: '1' }, 'ou_bot', 'cli_bot')!
+    const a = scopeManagedFeishuTrigger(raw, 'bot-a', { legacy: false, brand: 'lark', name: 'Bot A' })
+    const b = scopeManagedFeishuTrigger(raw, 'bot-b', { legacy: false })
+    const legacy = scopeManagedFeishuTrigger(raw, 'bot-legacy', { legacy: true })
+    expect(a.id).not.toBe(b.id)
+    expect(a.threads[0]?.id).not.toBe(b.threads[0]?.id)
+    expect(a.channel?.thread).not.toBe(b.channel?.thread)
+    expect(a.actor).toEqual(raw.actor)
+    expect(scopeManagedFeishuTrigger(a, 'bot-a', { legacy: false, brand: 'lark', name: 'Bot A' })).toEqual(a)
+    expect(() => scopeManagedFeishuTrigger(a, 'bot-b', { legacy: false })).toThrow('another bot')
+    expect(() => scopeManagedFeishuTrigger({ ...raw, meta: { ...raw.meta, managerOriginalThreadId: a.threads[0]!.id } }, 'bot-legacy', { legacy: true }))
+      .toThrow('inconsistent original')
+    expect(() => scopeManagedFeishuTrigger({ ...a, threads: b.threads }, 'bot-a', { legacy: false })).toThrow('inconsistent bot namespace')
+    expect(() => scopeManagedFeishuTrigger({ ...raw, id: a.id }, 'bot-legacy', { legacy: true })).toThrow('inconsistent bot namespace')
+    expect(legacy.id).toBe(raw.id)
+    expect(legacy.threads).toEqual(raw.threads)
+    expect(feishuKind.repliesTo?.(a)).toBe(feishuTriggerId('om_parent', 'bot-a'))
+    expect(feishuKind.repliesTo?.(legacy)).toBe(feishuTriggerId('om_parent'))
+    expect(feishuRef(a)).toMatchObject({ botId: 'bot-a', rootId: 'om_root', originalThreadId: 'oc_shared:om_root' })
+    expect(feishuKind.channel!.link(a.channel!.address, {})).toMatchObject({ triggerId: a.id,
+      url: 'https://applink.larksuite.com/client/chat/open?openChatId=oc_shared' })
+  })
+  it('recovers a managed bot topic with its own identity and raw root, independent of the startup default bot', async () => {
+    const deployment = testDeployment({ managed: { repositoryId: 'repo', url: 'http://127.0.0.1:3082', token: 'repository-private-token' } })
+    const commands = new Commands(() => deployment, {}, new AbortController().signal)
+    const h = host({ deployment, commands })
+    const raw = feishuTrigger({ message_id: 'om_root', chat_id: 'oc_team', chat_type: 'group', sender_id: MEMBER,
+      sender_type: 'user', content: 'work', create_time: String(Date.now() - 5000), mentions: [{ id: 'ou_second' }] }, 'ou_second', 'cli_second')!
+    const scoped = scopeManagedFeishuTrigger(raw, 'second', { legacy: false })
+    h.store.triggers.save(scoped); subscribed(h, scoped.threads[0]!)
+    const threadKey = `feishu:${scoped.threads[0]!.id}`
+    h.store.threads.save({ ...h.store.threads.get(threadKey)!, createdAt: new Date(Date.now() - 5000).toISOString(), lastAt: new Date().toISOString() })
+    const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, options) => {
+      if (String(url).endsWith('/feishu-bots')) return new Response(JSON.stringify({ bots: [
+        { id: 'legacy', botId: 'ou_bot', appId: 'cli_bot', name: 'Old', brand: 'feishu', legacy: true },
+        { id: 'second', botId: 'ou_second', appId: 'cli_second', name: 'Second', brand: 'lark', legacy: false },
+      ] }))
+      const body = JSON.parse(String(options?.body)) as { botId: string; args: string[] }
+      expect(body.botId).toBe('second')
+      const message = { message_id: 'om_reply', chat_id: 'oc_team', thread_id: 'omt_shared', msg_type: 'text', content: 'follow up',
+        sender: { id: MEMBER, sender_type: 'user' }, create_time: String(Date.now()), mentions: [{ id: 'ou_second' }] }
+      const data = body.args[0] === 'api' ? { items: [{ message_id: 'om_root', chat_id: 'oc_team', thread_id: 'omt_shared' }] }
+        : body.args[1] === '+messages-mget' ? { messages: [] }
+          : { thread_id: 'omt_shared', has_more: false, messages: [message,
+            { ...message, message_id: 'om_self', sender: { id: 'ou_second', open_bot_id: 'ou_second', sender_type: 'app' } }] }
+      return new Response(JSON.stringify({ data }))
+    })
+    try {
+      await pollFeishuThreads(h)
+      expect(h.receive).toHaveBeenCalledTimes(1)
+      expect(h.receive.mock.calls[0]?.[0]).toMatchObject({ id: feishuTriggerId('om_reply', 'second'),
+        threads: scoped.threads, addressed: 'mention', channel: { address: { botId: 'second', brand: 'lark' } },
+        meta: { rootId: 'om_root', managerBotId: 'second' } })
+    } finally { fetch.mockRestore(); h.store.close() }
+  })
   it('registers its kind without a bot, and names on its health what setup still needs', async () => {
     const run = async (overrides: Partial<SourceContextDeps>) => {
       // The fixture's registry already holds the kind; this one starts empty so the plugin's registration shows.
@@ -1062,7 +1128,7 @@ describe('feishu event consumer', () => {
   const runs = () => existsSync(join(dir, 'runs')) ? Number(readFileSync(join(dir, 'runs'), 'utf8')) : 0
   const alive = (pid: number) => { try { process.kill(pid, 0); return true } catch { return false } }
   /** The Feishu Source's context, on a fresh Store whose Feishu Source is on, with `cli` as the bot CLI. */
-  function consumerSource(path: string, config: Record<string, unknown> = { chats: [] }) {
+  function consumerSource(path: string, config: Record<string, unknown> = { chats: [] }, profile?: string) {
     const store = new Store(join(dir, 'db.sqlite'))
     store.saveSettings(SettingsSchema.parse({ sources: { feishu: { enabled: true, config } } }))
     const board = new HealthBoard()
@@ -1073,7 +1139,7 @@ describe('feishu event consumer', () => {
     const outbox = { send: () => {}, status: () => undefined, withdraw: () => {} }
     const policy = () => settingsPolicy(store.settings(), sources)
     const engine = new Engine({ repo: store, scope: sources, policy, assessor, executor, outbox })
-    const deployment = testDeployment({ feishu: { ...testDeployment().feishu!, cli: path } })
+    const deployment = testDeployment({ feishu: { ...testDeployment().feishu!, cli: path, ...(profile ? { profile } : {}) } })
     const health = board.all
     const commands = new Commands(() => deployment, {}, controller.signal)
     const deps: SourceContextDeps = { store, engine, outbox: { send: () => {} }, commands, sources, deployment, ready: Promise.resolve(), configured: () => true,
@@ -1086,6 +1152,31 @@ describe('feishu event consumer', () => {
   const event = (id: string, chat: string, type: 'group' | 'p2p') => JSON.stringify({ message_id: id, chat_id: chat, chat_type: type,
     sender_id: 'ou_alice', sender_type: 'user', content: 'fix it', create_time: String(Date.now()),
     ...type === 'group' ? { mentions: [{ id: 'ou_bot', name: 'Bot' }] } : {} })
+  it('verifies the connection before starting its event stream and passes the fixed profile', async () => {
+    const { ctx, health, store } = consumerSource(cli('ready'), { chats: [] }, 'team-a')
+    const verified = vi.spyOn(ctx.commands, 'verifyFeishuIdentity').mockResolvedValue()
+    const spawn = vi.mocked(subprocess.spawn)
+    const previousCalls = spawn.mock.calls.length
+    try {
+      running = runFeishu(ctx, controller.signal)
+      await vi.waitFor(() => expect(health.feishu).toMatchObject({ state: 'ready' }), until)
+      expect(verified).toHaveBeenCalled()
+      const stream = spawn.mock.calls.slice(previousCalls).find(call => call[1]?.[0] === 'event')
+      expect(stream?.[1]).toEqual(['event', 'consume', 'im.message.receive_v1', '--as', 'bot', '--profile=team-a'])
+      expect(verified.mock.invocationCallOrder[0]).toBeLessThan(spawn.mock.invocationCallOrder[previousCalls]!)
+    } finally { controller.abort(); await running; verified.mockRestore(); store.close() }
+  }, 20_000)
+  it('does not start an event stream after its CLI identity changed', async () => {
+    const { ctx, health, store } = consumerSource(cli('ready'))
+    const verified = vi.spyOn(ctx.commands, 'verifyFeishuIdentity').mockRejectedValue(new Error('Bot identity changed'))
+    const spawn = vi.mocked(subprocess.spawn)
+    const previousCalls = spawn.mock.calls.length
+    try {
+      running = runFeishu(ctx, controller.signal)
+      await vi.waitFor(() => expect(health.feishu).toMatchObject({ state: 'error', detail: expect.stringContaining('Bot identity changed') }), until)
+      expect(spawn.mock.calls.slice(previousCalls)).toEqual([])
+    } finally { controller.abort(); await running; verified.mockRestore(); store.close() }
+  }, 20_000)
   it('takes in the event lines it reads, records each chat as direct or not, and reports a malformed line without stopping', async () => {
     writeFileSync(join(dir, 'events'), [event('om_1', 'oc_group', 'group'), event('om_2', 'oc_dm', 'p2p'), 'not json',
       event('om_3', 'oc_group', 'group')].join('\n') + '\n')
@@ -1096,6 +1187,29 @@ describe('feishu event consumer', () => {
     expect(store.get(KV.feishu.chats)).toEqual({ oc_group: false, oc_dm: true })
     expect(health.feishu).toMatchObject({ state: 'error', detail: expect.stringContaining('JSON') })
     controller.abort(); await running; store.close()
+  }, 20_000)
+  it('preserves a malformed-event error when the ready line arrives from stderr afterwards', async () => {
+    const child = Object.assign(new EventEmitter(), {
+      stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(),
+      kill: () => { child.emit('close', 0); return true },
+    })
+    const spawn = vi.spyOn(subprocess, 'spawn').mockReturnValue(child as unknown as ReturnType<typeof subprocess.spawn>)
+    const { ctx, health, store } = consumerSource(cli('ready'))
+    try {
+      running = runFeishu(ctx, controller.signal)
+      await vi.waitFor(() => expect(spawn).toHaveBeenCalled(), until)
+      // Independent stdout/stderr pipes can deliver the ready line after event processing, even when written first.
+      child.stdout.write('not json\n' + event('om_before_ready', 'oc_group', 'group') + '\n')
+      await vi.waitFor(() => expect(store.triggers.get(feishuTriggerId('om_before_ready'))).toBeDefined(), until)
+      expect(health.feishu).toMatchObject({ state: 'error', detail: expect.stringContaining('JSON') })
+      child.stderr.write('[event] ready\n')
+      expect(health.feishu).toMatchObject({ state: 'error', detail: expect.stringContaining('JSON') })
+      child.stdout.write(event('om_after_ready', 'oc_group', 'group') + '\n')
+      await vi.waitFor(() => expect(store.triggers.get(feishuTriggerId('om_after_ready'))).toBeDefined(), until)
+      expect(health.feishu).toMatchObject({ state: 'error', detail: expect.stringContaining('JSON') })
+    } finally {
+      controller.abort(); await running; spawn.mockRestore(); store.close()
+    }
   }, 20_000)
   it('drops the events it reads once the Source is off', async () => {
     writeFileSync(join(dir, 'events'), event('om_9', 'oc_group', 'group') + '\n')

@@ -43,6 +43,25 @@ it('retains the source-message pairing, commits an image reference and removes t
   expect(saveImage).toHaveBeenCalledWith({ data: Buffer.from('data'), mediaType: 'image/png', name: 'img_source.png' })
   expect(await readdir(directory)).toEqual([])
 })
+it('downloads an image through the originating bot bridge and retains the scope after adding its cancellation signal', async () => {
+  lark.mockRestore()
+  const deployment = testDeployment({ managed: { repositoryId: 'repo', url: 'http://127.0.0.1:3082', token: 'repository-private-token' } })
+  const managed = new Commands(() => deployment, {}, signal())
+  const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => {
+    const body = JSON.parse(String(options?.body)) as { botId: string; cwd: string; args: string[] }
+    expect(body.botId).toBe('bot-image')
+    expect(body.args).toContain('om_source')
+    expect(body.cwd).toContain(directory)
+    const saved_path = join(body.cwd, 'image.png')
+    await writeFile(saved_path, 'data')
+    return new Response(JSON.stringify({ data: { saved_path } }), { headers: { 'content-type': 'application/json' } })
+  })
+  try {
+    expect(await readAdmissionImage(agent, managed, { ...source, botId: 'bot-image' }, text, 'img_source', directory, signal()))
+      .toMatchObject({ source_message_id: 'om_source', image: ref })
+    expect(await readdir(directory)).toEqual([])
+  } finally { fetch.mockRestore() }
+})
 it('rejects arbitrary keys and non-visual models before downloading', async () => {
   await expect(readAdmissionImage(agent, commands, source, text, '../img_other', directory, signal())).rejects.toThrow('source message')
   resolveModelInfo.mockResolvedValue({ inputModalities: ['text'] })
