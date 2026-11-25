@@ -182,12 +182,11 @@ it('ends a restart that never stopped answering after half a minute, and reads t
 })
 
 
-it('shows live enterprise plugin settings, routes to management, and verifies only an explicitly saved bot connection', async () => {
+it('shows live enterprise plugin settings, routes to management, with one account-management entry', async () => {
   const { form, mutations } = fakeForm()
   const open = vi.fn()
   const writes: unknown[] = []
-  let rejectBot = false
-  let manager: ManagerView = { revision: 1, bot: { id: 'ou_bot', name: '研发助手' }, botCli: '/bin/lark-bot',
+  const manager: ManagerView = { revision: 1, bot: { id: 'ou_bot', name: '研发助手' }, botCli: '/bin/lark-bot',
     workspaces: [], repositories: [{ id: 'repo-1', name: 'ai-workspace', remote: 'acme/ai-workspace', directory: '',
       githubCli: 'gh', allowedGithub: ['alice'], allowedFeishu: [], teamName: '研发一组', productLines: ['AI 工作台'],
       enabled: true, profile: 'repo-1', port: 4500, status: { online: false }, starting: false, url: 'http://127.0.0.1:4500' }],
@@ -196,12 +195,6 @@ it('shows live enterprise plugin settings, routes to management, and verifies on
   vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
     if (url === '/orchestrator/mode') return Promise.resolve(Response.json({ mode: 'manager', desktopMultiRepository: true }))
     if (url === '/orchestrator/manager/state') return Promise.resolve(Response.json(manager))
-    if (url === '/orchestrator/manager/bot' && init?.method === 'PUT') {
-      if (rejectBot) return Promise.resolve(Response.json({ error: 'Bot identity is unavailable' }, { status: 400 }))
-      const body = JSON.parse(String(init.body)) as { cli: string }
-      writes.push(body); manager = { ...manager, botCli: body.cli, bot: { id: 'ou_bot', name: '已验证机器人' } }
-      return Promise.resolve(Response.json(manager))
-    }
     throw new Error(`Unexpected request ${url}`)
   })
   const container = document.createElement('div'); document.body.append(container)
@@ -216,21 +209,9 @@ it('shows live enterprise plugin settings, routes to management, and verifies on
   expect(mutations).toHaveLength(0)
   await click(container.querySelector('.dt-plugin-link') as HTMLElement)
   expect(open).toHaveBeenCalledWith('repositories')
-  await click('修改连接')
-  expect(field<HTMLInputElement>('机器人 CLI 路径或命令').value).toBe('/bin/lark-bot')
-  await type(field<HTMLInputElement>('机器人 CLI 路径或命令'), '/bin/new-lark-bot')
-  expect(writes).toHaveLength(0)
-  rejectBot = true
-  await click('验证并保存')
-  expect(text()).toContain('Bot identity is unavailable')
-  expect(text()).toContain('研发助手')
-  expect(text()).not.toContain('机器人连接已验证并保存。')
-  expect(field<HTMLInputElement>('机器人 CLI 路径或命令').value).toBe('/bin/new-lark-bot')
-  rejectBot = false
-  await click('验证并保存')
-  expect(writes).toEqual([{ cli: '/bin/new-lark-bot' }])
-  expect(text()).toContain('机器人连接已验证并保存。')
-  expect(text()).toContain('已验证机器人')
+  await click('管理飞书账号与机器人')
+  expect(open).toHaveBeenCalledWith('feishu')
+  expect(text()).not.toContain('机器人 CLI 路径或命令')
   expect(mutations).toHaveLength(0)
 })
 
@@ -250,7 +231,7 @@ it('does not display empty enterprise metrics when manager access is locked', as
   expect(open).toHaveBeenCalledWith('repositories')
 })
 
-it('manages multiple verified connections from native settings without replacing another bot', async () => {
+it('lists all connections in settings and routes both actions to the central workspace', async () => {
   const { form } = fakeForm(), open = vi.fn(), writes: { path: string; body: unknown }[] = []
   let state: ManagerView = { revision: 4, bot: null, botCli: '', workspaces: [], repositories: [], bindings: [], chats: {}, health: {}, pending: [], bots: [
     { id: 'bot-a', botId: 'ou_a', appId: 'cli_a', brand: 'feishu', name: '平台助手', cli: '/bin/lark', profile: 'platform', enabled: true, connected: true, chats: { oc_a: '平台群' }, health: {} },
@@ -259,16 +240,6 @@ it('manages multiple verified connections from native settings without replacing
   vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
     if (url === '/orchestrator/mode') return Promise.resolve(Response.json({ mode: 'manager', desktopMultiRepository: true }))
     if (url === '/orchestrator/manager/state') return Promise.resolve(Response.json(state))
-    if (url === '/orchestrator/manager/bots' && init?.method === 'POST') {
-      const body = JSON.parse(String(init.body)); writes.push({ path: url, body })
-      state = { ...state, revision: 5, bots: [...state.bots!, { ...state.bots![0]!, id: 'bot-c', botId: 'ou_c', appId: 'cli_c', name: '测试助手', cli: body.cli, profile: body.profile, chats: {} }] }
-      return Promise.resolve(Response.json(state))
-    }
-    if (url === '/orchestrator/manager/bots/bot-b' && init?.method === 'PUT') {
-      const body = JSON.parse(String(init.body)); writes.push({ path: url, body })
-      state = { ...state, revision: 6, bots: state.bots!.map(bot => bot.id === 'bot-b' ? { ...bot, cli: body.cli, profile: body.profile } : bot) }
-      return Promise.resolve(Response.json(state))
-    }
     throw new Error(`Unexpected request ${url}`)
   })
   const container = document.createElement('div'); document.body.append(container)
@@ -278,17 +249,8 @@ it('manages multiple verified connections from native settings without replacing
   await settle()
   expect(container.querySelectorAll('.dt-plugin-bot-row')).toHaveLength(2)
   expect(text()).toContain('2 / 2 连接已验证')
-  await click('添加机器人'); await type(field<HTMLInputElement>('机器人 CLI 路径或命令'), '/bin/lark'); await type(field<HTMLInputElement>('CLI 配置档案（Profile）'), 'qa'); await click('验证并保存')
-  expect(writes[0]).toEqual({ path: '/orchestrator/manager/bots', body: { cli: '/bin/lark', profile: 'qa', revision: 4 } })
-  expect(container.querySelectorAll('.dt-plugin-bot-row')).toHaveLength(3)
-  expect(text()).toContain('平台助手'); expect(text()).toContain('设备助手'); expect(text()).toContain('测试助手')
-  const beta = [...container.querySelectorAll('.dt-plugin-bot-row')].find(row => row.textContent?.includes('设备助手'))!
-  await click(beta.querySelector('button')!); await type(field<HTMLInputElement>('CLI 配置档案（Profile）'), 'device-v2'); await click('取消')
-  expect(document.querySelector('[role="dialog"]')?.textContent).toContain('放弃未保存的连接修改')
-  await click('继续编辑'); await click('验证并保存')
-  expect(writes[1]).toEqual({ path: '/orchestrator/manager/bots/bot-b', body: { cli: '/bin/lark', profile: 'device-v2', revision: 5 } })
-  expect(state.bots!.map(bot => [bot.cli, bot.profile])).toEqual([['/bin/lark', 'platform'], ['/bin/lark', 'device-v2'], ['/bin/lark', 'qa']])
-  await click('管理机器人连接'); expect(open).toHaveBeenCalledWith('feishu')
+  expect(text()).toContain('平台助手'); expect(text()).toContain('设备助手')
+  await click('管理飞书账号与机器人'); expect(open).toHaveBeenCalledWith('feishu')
   await click('管理群聊绑定'); expect(open).toHaveBeenCalledWith('bindings')
 })
 

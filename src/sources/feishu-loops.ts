@@ -127,8 +127,12 @@ async function chatNamesLoop(ctx: SourceContext, signal: AbortSignal): Promise<v
   if (!available(ctx)) return
   while (!signal.aborted) {
     if (enabled(ctx)) {
-      try { await refreshChatNames(ctx, signal) }
-      catch { /* Names are a display aid; the stored list stays until a later read succeeds. */ }
+      try {
+        await refreshChatNames(ctx, signal)
+        if (!signal.aborted) ctx.report('chats', { state: 'ready', detail: 'Joined groups updated' })
+      } catch (error) {
+        if (!signal.aborted) ctx.report('chats', { state: 'error', detail: String(error) })
+      }
     }
     await delay(60_000, undefined, { signal }).catch(() => {})
   }

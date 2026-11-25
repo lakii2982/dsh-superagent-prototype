@@ -64,10 +64,15 @@ export const mirrorPath = (root: string, repositoryId: string): string => join(r
 /** The directory of a ticket's worktree under `root`. */
 export const worktreePath = (root: string, repositoryId: string, name: string): string => join(root, 'worktrees', repositoryId, name)
 
-/** Whether two origin spellings name the same remote: compared as paths when both exist, else without a trailing slash or `.git`. */
+/** The GitHub repository a remote names, whatever spelling it uses: a worker's `insteadOf` turns `git@github.com:` into an https URL, so the two must compare equal. */
+export function canonicalRemote(value: string): string {
+  return value.trim().replace(/\/+$/, '').replace(/\.git$/i, '').replace(/:$/, '')
+    .replace(/^(?:[a-z]+:\/\/)?(?:git@)?github\.com[/:]/i, 'github.com/').toLowerCase()
+}
+
+/** Whether two origin spellings name the same remote: compared by canonical identity, else as paths when both exist. */
 async function sameRemote(one: string, other: string): Promise<boolean> {
-  const normalize = (value: string) => value.trim().replace(/\/+$/, '').replace(/\.git$/i, '').replace(/:$/, '')
-  if (normalize(one).toLowerCase() === normalize(other).toLowerCase()) return true
+  if (canonicalRemote(one) === canonicalRemote(other)) return true
   const [a, b] = await Promise.all([realpath(one).catch(() => undefined), realpath(other).catch(() => undefined)])
   return a !== undefined && a === b
 }

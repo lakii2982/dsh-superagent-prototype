@@ -9,7 +9,7 @@ import { scopeManagedFeishuTrigger } from '../sources/feishu-trigger.ts'
 
 export const BotConnectionSchema = z.object({
   id: z.string().min(1).max(200), cli: z.string().min(1), profile: z.string().trim().min(1).max(200).optional(), botId: z.string().min(1), appId: z.string().min(1),
-  brand: z.enum(['feishu', 'lark']), name: z.string(), enabled: z.boolean(), legacy: z.boolean().optional(),
+  brand: z.enum(['feishu', 'lark']), account: z.string().optional(), name: z.string(), enabled: z.boolean(), legacy: z.boolean().optional(),
 })
 export type BotConnection = z.infer<typeof BotConnectionSchema>
 
@@ -28,6 +28,8 @@ export const RepositorySchema = z.object({
   port: z.number().int().min(1024).max(65535), token: z.string().min(32), profile: z.string(),
 })
 export type Repository = z.infer<typeof RepositorySchema>
+/** People type a GitHub handle as "@name" in the panel, while the Source policy only accepts the bare login. */
+export const githubLogin = (id: string): string => id.trim().replace(/^@+/, '')
 export const BindingSchema = z.object({ botId: z.string().min(1).max(200).optional(), chatId: z.string().regex(/^oc_[a-zA-Z0-9]+$/), repositoryId: z.string().uuid(), enabled: z.boolean(), effectiveAt: z.string().datetime() })
 export type Binding = z.infer<typeof BindingSchema>
 export interface JournalItem { id: string; botId?: string; repositoryId: string; chatId: string; thread: string; trigger: Trigger; attempts: number; nextAt: number; error?: string }

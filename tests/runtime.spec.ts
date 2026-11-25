@@ -1574,7 +1574,42 @@ it('refuses an ended ticket\'s worker its tools, and restricts the main Session 
     'subagent_claude_code', 'subagent_codex', 'subagent_kimi', 'subagent_opencode', 'fleet', 'fleet_status'] }])
 })
 
+function fixtureBranchRules(protectedBranch: boolean) {
+  const rules = protectedBranch ? [
+    { type: 'pull_request', parameters: { required_approving_review_count: 1 } },
+    { type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'unit' }] } },
+    { type: 'non_fast_forward' }, { type: 'deletion' },
+  ] : []
+  writeFileSync(AGENT(), `#!${process.execPath}
+const path = process.argv.at(-1);
+const value = path === 'repos/acme/widgets' ? {full_name:'acme/widgets',default_branch:'main'}
+  : path === 'repos/acme/widgets/rules/branches/main' ? ${JSON.stringify(rules)} : null;
+if (!value) process.exit(2);
+console.log(JSON.stringify(value));
+`)
+}
+
+it('keeps the managed workspace available with execution held until default-branch rules pass', async () => {
+  const managed = { repositoryId: 'pilot', token: 'fixture', url: 'http://127.0.0.1:3099', enterprisePilot: true }
+  fixtureBranchRules(false)
+  const blocked = await restart({ managed })
+  await blocked.ready
+  expect(blocked.configured()).toBe(false)
+  expect(blocked.health.runtime?.state).toBe('paused')
+  expect(blocked.setupProblem).toMatchObject({ code: 'branchRulesMissing', values: { branch: 'main', repository: 'acme/widgets' } })
+  expect(overviewOf(blocked).problems).toContainEqual(expect.objectContaining({ code: 'branchRulesMissing' }))
+  expect(blocked.executor.activeCount()).toBe(0)
+  blocked.setup.check()
+  await vi.waitFor(() => expect(restarts).toHaveBeenCalled())
+  fixtureBranchRules(true)
+  const recovered = await restart({ managed })
+  await recovered.ready
+  expect(recovered.configured()).toBe(true)
+  expect(recovered.health.runtime?.state).toBe('ready')
+})
+
 it('limits pilot workers to host-governed tools and stops new work after the requester loses access', async () => {
+  fixtureBranchRules(true)
   const next = await restart({ managed: { repositoryId: 'pilot', token: 'fixture', url: 'http://127.0.0.1:3099', enterprisePilot: true } })
   await next.ready
   next.sources.register(feishuKind); next.sources.register(githubKind)

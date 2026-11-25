@@ -835,6 +835,8 @@ const TEXT = {
   'setup.repositoryUnreadable': ['@{account} 读不到 {repository}。', SETUP_PROBLEMS.repositoryUnreadable[1]],
   'setup.repositoryUnreported': ['智能体的 GitHub CLI 没有返回 {repository}。', SETUP_PROBLEMS.repositoryUnreported[1]],
   'setup.repositoryReadOnly': ['@{account} 没有 {repository} 的推送权限。', SETUP_PROBLEMS.repositoryReadOnly[1]],
+  'setup.branchRulesMissing': ['任务执行已暂停。请在 {repository} 的 GitHub Rulesets 为 {branch} 启用{missing}，然后点“重新检查”。', SETUP_PROBLEMS.branchRulesMissing[1]],
+  'setup.branchRulesUnreadable': ['任务执行已暂停。请确认已登记的 GitHub 账号能读取 {repository} 的分支规则，然后点“重新检查”。', SETUP_PROBLEMS.branchRulesUnreadable[1]],
   'setup.feishuCliFailed': ['机器人的 lark-cli 不可用。', SETUP_PROBLEMS.feishuCliFailed[1]],
   'setup.feishuNoApp': ['机器人的 lark-cli 的 auth status 没有报告应用。', SETUP_PROBLEMS.feishuNoApp[1]],
   'setup.feishuBotNotReady': ['应用 {app} 的机器人身份状态是 {status}；用 lark-cli 配置应用密钥。', SETUP_PROBLEMS.feishuBotNotReady[1]],

@@ -16,6 +16,7 @@ type Received = { repositoryId: string; trigger: { id: string; actor: { id: stri
 type Fake = {
   server: Server; handler: (req: IncomingMessage, res: ServerResponse) => Promise<void>; port: number; id: string; token: string
   received: Received[]; requests: { messageId: string; result: string }[]; accepted: Set<string>; failing: Set<string>
+  policies: { revision: number; value: { sources: Record<string, { allowed: { id: string }[] }> } }[]
 }
 type Readiness = { state: string; detail?: string; repair?: string; pending?: number; byChat?: Record<string, number> }
 type State = {
@@ -37,13 +38,30 @@ const close = (server: Server) => new Promise<void>(resolve => { server.closeAll
 const response = (res: ServerResponse, value: unknown, status = 200) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(value)) }
 const request = (path: string, value?: unknown, method = value === undefined ? 'GET' : 'POST', headers: Record<string, string> = { 'x-orchestrator-request': '1' }) =>
   fetch(`${origin}/orchestrator/${path}`, { method, headers: { ...headers, 'content-type': 'application/json' }, ...(value === undefined ? {} : { body: JSON.stringify(value) }) })
+/**
+ * Run the given request thunks with a bounded number in flight. A single `Promise.all` over every item asks the kernel for
+ * one connection per item at once; macOS caps the listen backlog (`kern.ipc.somaxconn` = 128 by default) and resets the
+ * surplus before the server can accept it. The test keeps its concurrency guarantee without exceeding that OS limit.
+ */
+const inFlight = async <T>(tasks: readonly (() => Promise<T>)[], limit = 24): Promise<T[]> => {
+  const results = new Array<T>(tasks.length)
+  let next = 0
+  const worker = async (): Promise<void> => {
+    while (next < tasks.length) {
+      const index = next++
+      results[index] = await tasks[index]!()
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, worker))
+  return results
+}
 const fakeOf = (repositoryId: string): Fake => fakes.find(item => item.id === repositoryId)!
 const view = async (): Promise<State> => await (await request('manager/state')).json() as State
 const arrived = (fake: Fake): string[] => fake.received.map(item => item.trigger.meta.messageId)
 
 /** A repository instance fixture: authenticated health, settings, tickets and a deduplicating receive. */
 const fakeInstance = async (): Promise<Fake> => {
-  const fake = { received: [], requests: [], accepted: new Set<string>(), failing: new Set<string>(), id: '', token: '' } as unknown as Fake
+  const fake = { received: [], requests: [], policies: [], accepted: new Set<string>(), failing: new Set<string>(), id: '', token: '' } as unknown as Fake
   fake.handler = async (req, res) => {
     if (req.headers.authorization !== `Bearer ${fake.token}`) { response(res, { error: 'auth' }, 403); return }
     const url = req.url ?? ''
@@ -51,6 +69,10 @@ const fakeInstance = async (): Promise<Fake> => {
       agent: [{ kind: 'codex', available: true, detail: 'codex was found' }] }); return }
     if (url.endsWith('/settings')) { response(res, { blocks: { policy: { revision: 1, value: { sources: { github: { allowed: [] }, feishu: { allowed: [] } } } } },
       sources: [{ id: 'feishu', revision: 1, value: { enabled: true, config: { cli: 'bot', chats: [] } } }] }); return }
+    if (url.endsWith('/settings/policy')) {
+      const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk))
+      fake.policies.push(JSON.parse(Buffer.concat(chunks).toString()) as Fake['policies'][number]); response(res, { saved: true }); return
+    }
     if (url.includes('/settings/')) { response(res, { saved: true }); return }
     if (url.includes('/tickets')) { response(res, { items: [] }); return }
     if (url.endsWith('/receive')) {
@@ -120,6 +142,20 @@ it('hides instance credentials and rejects cross-origin browser and unauthentica
   expect((await request(`internal/${repository.id}/receive`, feishu('1', 'request'))).status).toBe(403)
   const wrong = feishu('1', 'wrong group', { chat_id: 'oc_second' })
   expect((await request(`internal/${repository.id}/receive`, wrong, 'POST', { authorization: `Bearer ${repository.token}` })).status).toBe(400)
+})
+it('saves a GitHub handle without the @ people type in the panel', async () => {
+  const put = await request(`manager/repositories/${repository.id}`, { revision: manager.store.revision(), name: repository.name,
+    directory: repository.directory, remote: repository.remote, githubCli: repository.githubCli, allowedGithub: ['@alice'], allowedFeishu: [],
+    enabled: true, productLines: [], requiredChecks: [] }, 'PUT')
+  expect(put.status).toBe(200)
+  expect(manager.store.repositories()[0]?.allowedGithub).toEqual(['alice'])
+})
+it('sends a stored @handle to the instance as the bare GitHub login', async () => {
+  manager.store.save([{ ...repository, allowedGithub: ['@alice'] }], manager.store.bindings(), manager.store.revision())
+  const fake = fakes.at(-1)!
+  await vi.waitFor(() => {
+    expect(fake.policies.at(-1)?.value.sources.github?.allowed).toEqual([{ id: 'alice' }])
+  }, { timeout: 7000 })
 })
 it('atomically binds a group and grants access to its selected verified members', async () => {
   expect((await request('manager/chats/refresh', {})).status).toBe(200)
@@ -240,7 +276,7 @@ it('isolates concurrent ingress from 120 identities across 5 teams and 12 reposi
   expect(instances.flatMap(fake => fake.requests)).toEqual([])
 
   // Race two copies of every event: one durable insert and one duplicate acknowledgement per identity.
-  await Promise.all(cases.map(async ({ repo, trigger }) => {
+  await inFlight(cases.map(({ repo, trigger }) => async () => {
     const results = await Promise.all([0, 1].map(async () => {
       const result = await request(`internal/${repo.id}/receive`, trigger, 'POST', { authorization: `Bearer ${repo.token}` })
       expect(result.status).toBe(200)

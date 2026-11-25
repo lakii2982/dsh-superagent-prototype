@@ -1,11 +1,13 @@
 /** Unified local manager: independent Feishu bots, deterministic group routing, isolated repository processes. */
 import type { Context } from '@deepseek-ai/cordis'
 import type { ChildProcess } from 'node:child_process'
+import { botFacade, discoverProfiles, feishuQr, FeishuRegistration, profiles } from './feishu-accounts.ts'
+import { lacksAppScope, permissionPage } from '../feishu-permission.ts'
 import { createServer } from 'node:net'
 import { randomUUID } from 'node:crypto'
-import { realpath } from 'node:fs/promises'
-import { basename, dirname, join } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { homedir } from 'node:os'
+import { readdir, realpath, stat } from 'node:fs/promises'
+import { basename, dirname, isAbsolute, join } from 'node:path'
 import { mkdirSync } from 'node:fs'
 import { lockSync } from 'proper-lockfile'
 import { z } from 'zod'
@@ -14,7 +16,7 @@ import { Commands } from '../infra/commands.ts'
 import { verifyRepository } from '../infra/repository.ts'
 import { executable, resolveDeployment, resolveFeishuBot, workerProbe, type Deployment, type DesktopModeView, type Machine } from '../deployment.ts'
 import { workerBin } from '../infra/environment.ts'
-import { packagePath } from '../infra/paths.ts'
+import { verifyBranchRules } from './branch-rules.ts'
 import { sameOrigin } from '../app/http.ts'
 import type { SourceContext } from '../sources/host.ts'
 import { runFeishu } from '../sources/feishu-loops.ts'
@@ -24,7 +26,7 @@ import { KV } from '../kv.ts'
 import { LIMITS } from '../limits.ts'
 import { key, type Trigger } from '../core/index.ts'
 import type { Health } from '../sources/host.ts'
-import { ManagerStore, RepositorySchema, BindingSchema, type Repository, type BotConnection, type Binding } from './store.ts'
+import { ManagerStore, RepositorySchema, BindingSchema, githubLogin, type Repository, type BotConnection, type Binding } from './store.ts'
 import { readiness } from './readiness.ts'
 import { authorized, bridgeOptions, FeishuTriggerSchema, publishManagerOrigin } from './protocol.ts'
 import { loadOperatorAuth, OPERATOR_AUTH_REQUIRED } from './operator-auth.ts'
@@ -50,14 +52,25 @@ const freePort = () => new Promise<number>((resolve, reject) => {
 /** Manager-owned commands verify the selected identity immediately before every read or send. */
 class BotCommands extends Commands {
   constructor(private readonly currentDeployment: () => Deployment, private readonly currentSignal: AbortSignal,
-    private readonly verifyIdentity: () => Promise<void>) { super(currentDeployment, {}, currentSignal) }
+    private readonly verifyIdentity: () => Promise<void>, private readonly health: Map<string, Health>) { super(currentDeployment, {}, currentSignal) }
   override withSignal(signal?: AbortSignal): Commands {
-    return signal ? new BotCommands(this.currentDeployment, AbortSignal.any([this.currentSignal, signal]), this.verifyIdentity) : this
+    return signal ? new BotCommands(this.currentDeployment, AbortSignal.any([this.currentSignal, signal]), this.verifyIdentity, this.health) : this
   }
   override async verifyFeishuIdentity(): Promise<void> { await this.verifyIdentity() }
   override async lark<T>(args: string[], cwd?: string): Promise<T> {
     await this.verifyFeishuIdentity()
-    return super.lark<T>(args, cwd)
+    const operation = args[1] === '+messages-reply' ? 'reply' : args[1] === '+messages-resources-download' ? 'attachment'
+      : args[1] === '+messages-mget' || args[2] === '/open-apis/im/v1/messages/mget' ? 'messageRead'
+      : args[1] === '+chat-members-list' ? 'members' : args[1] === '+chat-list' ? 'chats' : undefined
+    try {
+      const result = await super.lark<T>(args, cwd)
+      if (operation) this.health.delete(operation)
+      return result
+    } catch (failure) {
+      const detail = errorText(failure)
+      if (operation && lacksAppScope(detail)) this.health.set(operation, { state: 'error', detail })
+      throw failure
+    }
   }
 }
 interface BotRuntime {
@@ -69,6 +82,7 @@ interface BotRuntime {
 export class Manager {
   readonly store: ManagerStore
   private readonly lifetime = new AbortController()
+  private readonly registration: FeishuRegistration
   private readonly health = new Map<string, Health>()
   private readonly instances = new Map<string, { online: boolean; configured?: boolean; paused?: boolean; error?: string; state?: string
     agent?: InstanceHealth['agent'] }>()
@@ -96,6 +110,7 @@ export class Manager {
     options: { maxRunningRepositories?: number; enterprisePilot?: boolean; requireProtectedBranches?: boolean; operatorTokenFile?: string;
       desktopMode?: () => DesktopModeView } = {}) {
     if (ctx.webServer.host !== '127.0.0.1') throw new Error('The manager requires a loopback web server')
+    this.registration = new FeishuRegistration(machine.stateDir, this.lifetime.signal)
     this.maxRunningRepositories = options.maxRunningRepositories ?? LIMITS.maxRunningRepositories.default
     this.enterprisePilot = options.enterprisePilot ?? false
     this.requireProtectedBranches = options.requireProtectedBranches ?? false
@@ -109,12 +124,7 @@ export class Manager {
   private async checkProtectedBranch(repository: Repository): Promise<void> {
     if (!this.requireProtectedBranches && !repository.requiredChecks?.length) return
     const githubCli = executable(repository.githubCli, process.env.PATH ?? '', workerBin(this.machine.stateDir))
-    // The installer and the supervisor share the same gate, including named CI checks and failure messages.
-    const moduleUrl = pathToFileURL(packagePath('ops', 'enterprise', 'check-branches.mjs')).href
-    const { checkBranchRules } = await import(moduleUrl) as {
-      checkBranchRules(input: Pick<Repository, 'remote' | 'githubCli' | 'requiredChecks'>, options: { signal: AbortSignal }): Promise<unknown>
-    }
-    await checkBranchRules({ remote: repository.remote, githubCli, requiredChecks: repository.requiredChecks }, { signal: this.lifetime.signal })
+    await verifyBranchRules({ remote: repository.remote, githubCli, requiredChecks: repository.requiredChecks }, this.lifetime.signal)
   }
   async start(): Promise<void> {
     publishManagerOrigin(this.machine.stateDir, this.origin)
@@ -260,7 +270,7 @@ export class Manager {
       if (currentFingerprint !== fingerprint) { runtime.fingerprint = undefined; runtime.retryAt = Date.now(); return }
       runtime.bot = bot
       const deployment = { ...this.machine, repository: '', github: { cli: 'gh', login: '', noreply: '' }, feishu: bot }
-      runtime.commands = new BotCommands(() => deployment, this.lifetime.signal, () => this.verifyTransport(botId))
+      runtime.commands = new BotCommands(() => deployment, this.lifetime.signal, () => this.verifyTransport(botId), runtime.health)
       if (!this.store.bindings().some(binding => binding.enabled && this.store.bindingBotId(binding) === botId)) {
         runtime.health.set('feishu', { state: 'paused', detail: 'Bot connected; no group binding is enabled' }); return
       }
@@ -370,8 +380,8 @@ export class Manager {
     const policy = (settings as unknown as { blocks: { policy: { revision: number; value: { sources: Record<string, { allowed: { id: string }[] }> } } } }).blocks.policy
     const botMembers = this.availableBots(repository.id).flatMap(bot => [...(bot.legacy ? repository.allowedFeishu : []), ...(repository.allowedFeishuByBot?.[bot.id] ?? [])])
     const desired = { ...policy.value, sources: { ...policy.value.sources,
-      feishu: { ...policy.value.sources.feishu, allowed: [...new Set(botMembers)].map(id => ({ id })) },
-      github: { ...policy.value.sources.github, allowed: repository.allowedGithub.map(id => ({ id })) } } }
+      feishu: { ...policy.value.sources.feishu, allowed: [...new Set(botMembers.map(id => id.trim()).filter(Boolean))].map(id => ({ id })) },
+      github: { ...policy.value.sources.github, allowed: [...new Set(repository.allowedGithub.map(githubLogin).filter(Boolean))].map(id => ({ id })) } } }
     if (JSON.stringify(desired) !== JSON.stringify(policy.value)) await instanceRequest(repository, 'settings/policy', { revision: policy.revision, value: desired }, 'PUT')
     const cli = this.availableBots(repository.id).length ? 'dsh-manager-bridge' : ''
     if (old.config.cli === cli && JSON.stringify(old.config.chats.map(chat => chat.chatId).sort()) === JSON.stringify(chats.sort())) return
@@ -460,6 +470,44 @@ export class Manager {
         return
       }
       if (route === 'state' && req.method === 'GET') { json(res, 200, this.view()); return }
+      if (route === 'directories' && req.method === 'GET') {
+        const requested = url.searchParams.get('path') ?? homedir()
+        if (!isAbsolute(requested)) throw new Error('Enter an absolute folder path')
+        const path = await realpath(requested)
+        const entries = await readdir(path, { withFileTypes: true })
+        const directories = entries.filter(entry => entry.isDirectory() && !entry.name.startsWith('.'))
+          .map(entry => entry.name).sort((a, b) => a.localeCompare(b))
+        const git = await stat(join(path, '.git')).catch(() => undefined)
+        const parent = dirname(path)
+        json(res, 200, { path, parent: parent === path ? null : parent, directories: directories.slice(0, 500),
+          checkout: git?.isDirectory() || git?.isFile() || false, hasMore: directories.length > 500 }); return
+      }
+      if (route === 'feishu/accounts' && req.method === 'GET') {
+        json(res, 200, { items: await discoverProfiles(this.machine.stateDir, this.lifetime.signal, this.store.bots()) }); return
+      }
+      if (route === 'feishu/registration' && req.method === 'POST') {
+        json(res, 200, this.registration.start()); return
+      }
+      const registration = /^feishu\/registration\/([a-f0-9-]+)$/.exec(route)
+      if (registration && req.method === 'GET') { json(res, 200, this.registration.get(registration[1]!)); return }
+      if (registration && req.method === 'DELETE') { this.registration.cancel(registration[1]!); json(res, 200, {}); return }
+      if (route === 'feishu/connect' && req.method === 'POST') {
+        const data = z.object({ profile: z.string().min(1), appId: z.string().min(1), revision: z.number().int(), connection: z.string().optional() }).parse(await body(req))
+        const row = (await profiles(this.machine.stateDir, this.lifetime.signal)).find(item => item.name === data.profile && item.appId === data.appId)
+        if (!row) throw new Error('所选账号或机器人已变更，请重新发现。')
+        const pendingLegacy = !this.store.legacyBotId() && this.store.get<string>('bot-cli')
+        if (!!pendingLegacy !== (data.connection === 'legacy')) throw new Error('机器人配置已变更，请刷新后重新选择。')
+        const current = this.store.bots().find(item => item.id === data.connection)
+        if (data.connection && !current && !pendingLegacy) throw new Error('原连接已移除，请刷新。')
+        const verified = await this.verifyBot(botFacade(), row.name)
+        if (verified.appId !== row.appId || verified.brand !== row.brand) throw new Error('飞书返回的身份与所选机器人不一致，请重新发现。')
+        await this.assertExclusiveCli(verified, current?.id)
+        const record = { ...current, ...verified, profile: row.name, account: row.user || undefined,
+          id: current?.id ?? randomUUID(), enabled: current?.enabled ?? true, legacy: current?.legacy ?? !!pendingLegacy }
+        this.store.saveBot(record, data.revision)
+        await this.connectBot(record.id)
+        json(res, 200, { id: record.id }); return
+      }
       if (route === 'bots' && req.method === 'POST') {
         if (!this.store.legacyBotId() && this.store.get<string>('bot-cli')) throw new Error('Restore the existing Feishu bot connection before adding another bot')
         const { cli, profile, revision } = z.object({ cli: z.string().trim().min(1), profile: z.string().trim().max(200).optional(), revision: z.number().int() }).parse(await body(req))
@@ -517,7 +565,8 @@ export class Manager {
           throw new Error('This GitHub repository is already registered in the enterprise manager')
         }
         const { revision, ...fields } = data
-        const repository = { ...fields, remote, directory, ...ManagerStore.identity(), port }
+        const repository = { ...fields, allowedGithub: fields.allowedGithub.map(githubLogin).filter(Boolean),
+          allowedFeishu: fields.allowedFeishu.map(id => id.trim()).filter(Boolean), remote, directory, ...ManagerStore.identity(), port }
         this.store.save([...repositories, repository], this.store.bindings(), revision)
         json(res, 200, this.view()); return
       }
@@ -562,6 +611,16 @@ export class Manager {
         await this.connectBots()
         json(res, 200, this.view()); return
       }
+      const permissionQr = /^bots\/([^/]+)\/permission-qr$/.exec(route)
+      if (permissionQr && req.method === 'POST') {
+        const bot = this.store.bots().find(item => item.id === decodeURIComponent(permissionQr[1]!))
+        if (!bot) throw new Error('Bot connection not found')
+        const { scope } = z.object({ scope: z.string().max(100).regex(/^[a-z][a-z0-9_]*:[a-z0-9_.:]+$/).optional() }).parse(await body(req))
+        const url = permissionPage(bot, scope)
+        if (!url) throw new Error('Bot application identity is unavailable')
+        json(res, 200, { image: await feishuQr(this.machine.stateDir, url, this.lifetime.signal) })
+        return
+      }
       const scopedMembers = /^bots\/([^/]+)\/chats\/(oc_[a-zA-Z0-9]+)\/members$/.exec(route)
       const memberGroup = /^chats\/(oc_[a-zA-Z0-9]+)\/members$/.exec(route)
       if ((scopedMembers || memberGroup) && req.method === 'GET') {
@@ -582,16 +641,21 @@ export class Manager {
           teamName: RepositorySchema.shape.teamName.nullable() }).parse(await body(req))
         const previous = this.store.repositories().find(repository => repository.id === editRepository[1])
         if (!previous) throw new Error('Repository not found')
-        if (previous.directory !== data.directory || previous.remote !== data.remote || previous.githubCli !== data.githubCli) throw new Error('Create a new repository registration to change checkout, remote or execution account')
+        if (previous.remote !== data.remote || previous.githubCli !== data.githubCli || (!this.enterprisePilot && previous.directory !== data.directory)) {
+          throw new Error('Create a new repository registration to change checkout, remote or execution account')
+        }
+        const directory = data.directory && data.directory !== previous.directory
+          ? await verifyRepository(data.directory, data.remote, this.ctx.subprocess, this.lifetime.signal) : data.directory
         if (this.enterprisePilot && previous.enabled && !data.enabled &&
           (await this.refreshInstance(previous) || this.starting.has(previous.id) || this.children.has(previous.id))) {
           throw new Error('Stop the enterprise repository before disabling it')
         }
-        this.store.save(this.store.repositories().map(repository => repository.id === previous.id ? { ...repository, name: data.name,
+        this.store.save(this.store.repositories().map(repository => repository.id === previous.id ? { ...repository, name: data.name, directory,
           ...(data.teamName === undefined ? {} : { teamName: data.teamName ?? undefined }),
           ...(data.productLines === undefined ? {} : { productLines: data.productLines }),
           ...(data.requiredChecks === undefined ? {} : { requiredChecks: data.requiredChecks }),
-          allowedGithub: data.allowedGithub, allowedFeishu: data.allowedFeishu,
+          allowedGithub: data.allowedGithub.map(githubLogin).filter(Boolean),
+          allowedFeishu: data.allowedFeishu.map(id => id.trim()).filter(Boolean),
           ...(data.allowedFeishuByBot === undefined ? {} : { allowedFeishuByBot: data.allowedFeishuByBot }), enabled: data.enabled } : repository), this.store.bindings(), data.revision)
         json(res, 200, this.view()); return
       }

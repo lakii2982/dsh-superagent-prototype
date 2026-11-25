@@ -113,7 +113,7 @@ it('opens binding from a repository and saves the selected group members with th
   expect(activeRail()).toBe('群聊绑定')
   expect(field<HTMLSelectElement>('目标仓库').value).toBe('repo-a')
   await type(field<HTMLSelectElement>('飞书群'), 'oc_team')
-  expect(text()).toContain('允许接单的群成员')
+  expect(text()).toContain('允许发单的群成员')
   const alice = document.querySelector<HTMLInputElement>('input[type="checkbox"]:disabled')!
   const eve = document.querySelector<HTMLInputElement>('input[type="checkbox"]:not(:disabled)')!
   expect(alice.checked).toBe(true)
@@ -162,6 +162,39 @@ it('edits repository team and product lines without enabling a disabled registra
   await type(field<HTMLTextAreaElement>('产品线'), '门户 V2\n 质量,报表 \n门户 V2')
   await click('保存仓库设置')
   expect(write).toHaveBeenCalledWith(expect.objectContaining({ teamName: null, productLines: ['门户 V2', '质量,报表'], enabled: false }))
+})
+
+it('browses to a Git checkout and saves its directory on an existing enterprise repository', async () => {
+  const fetch = globalThis.fetch
+  const state = manager()
+  const repo = state.repositories[0]!
+  repo.directory = ''
+  const path = '/projects/研发 仓库'
+  const write = vi.fn()
+  vi.stubGlobal('fetch', (url: string, options?: RequestInit) => {
+    if (url === '/orchestrator/manager/state') return Promise.resolve(Response.json(state))
+    if (url === '/orchestrator/manager/directories') return Promise.resolve(Response.json({
+      path: '/projects', parent: '/', directories: ['研发 仓库'], checkout: false, hasMore: false,
+    }))
+    if (url === `/orchestrator/manager/directories?path=${encodeURIComponent(path)}`) return Promise.resolve(Response.json({
+      path, parent: '/projects', directories: [], checkout: true, hasMore: false,
+    }))
+    if (url === '/orchestrator/manager/repositories/repo-a' && options?.method === 'PUT') {
+      write(JSON.parse(String(options.body))); return Promise.resolve(Response.json(state))
+    }
+    return fetch(url, options)
+  })
+  await mount()
+  await click('仓库设置')
+  const input = field<HTMLInputElement>('本地仓库根目录')
+  await click(input.closest('details')!.querySelector('summary')!)
+  await click('选择文件夹')
+  expect(all('.dt-directory-browser button').find(button => button.textContent === '使用此目录')).toHaveProperty('disabled', true)
+  await click('研发 仓库')
+  await click('使用此目录')
+  expect(input.value).toBe(path)
+  await click('保存仓库设置')
+  expect(write).toHaveBeenCalledWith(expect.objectContaining({ directory: path, remote: repo.remote }))
 })
 
 it('holds the shared manager behind a memory-only operator token and forwards it to repository APIs', async () => {
@@ -281,7 +314,8 @@ it('responds to settings-page manager navigation events without losing the unifi
   expect(text()).toContain('多个机器人，一套研发工作台')
   expect(document.querySelector('[aria-label="机器人 CLI 路径或命令"]')).toBeNull()
   await click('修改连接')
-  expect(field<HTMLInputElement>('机器人 CLI 路径或命令').value).toBe('/bin/lark-bot')
+  expect(text()).toContain('重新验证原连接')
+  expect(text()).not.toContain('机器人 CLI 路径或命令')
 })
 
 
@@ -438,7 +472,7 @@ it('binds multiple groups to one bot and toggles only the selected bot and group
   const original = globalThis.fetch, state = multipleBots(), writes: { bindings: { botId: string; chatId: string; enabled: boolean }[] }[] = []
   vi.stubGlobal('fetch', (url: string, options?: RequestInit) => {
     if (url === '/orchestrator/manager/state') return Promise.resolve(Response.json(state))
-    if (url.endsWith('/members')) return Promise.resolve(Response.json({ users: [] }))
+    if (url.endsWith('/members')) return Promise.resolve(Response.json({ users: [{ member_id: 'ou_alice', name: 'Alice' }] }))
     if (url === '/orchestrator/manager/bindings' && options?.method === 'PUT') { writes.push(JSON.parse(String(options.body))); return Promise.resolve(Response.json(state)) }
     return original(url, options)
   })
@@ -457,17 +491,18 @@ it('adds a verified bot without replacing existing connections and opens the sel
   let state = multipleBots()
   vi.stubGlobal('fetch', (url: string, options?: RequestInit) => {
     if (url === '/orchestrator/manager/state') return Promise.resolve(Response.json(state))
-    if (url === '/orchestrator/manager/bots' && options?.method === 'POST') {
+    if (url.endsWith('/feishu/accounts')) return Promise.resolve(Response.json({ items: [{ profile: 'qa', appId: 'cli_qa', account: '周津津', name: '测试助手' }] }))
+    if (url === '/orchestrator/manager/feishu/connect' && options?.method === 'POST') {
       write(JSON.parse(String(options.body)))
       state = { ...state, revision: 3, bots: [...state.bots!, { ...state.bots![1]!, id: 'bot-c', name: '测试助手', cli: '/bin/lark-c', chats: {} }] }
-      return Promise.resolve(Response.json(state))
+      return Promise.resolve(Response.json({ id: 'bot-c' }))
     }
     return original(url, options)
   })
   await mount(); await click(rail('飞书机器人'))
   expect(all('.dt-bot-card')).toHaveLength(2)
-  await click('添加机器人'); await type(field<HTMLInputElement>('机器人 CLI 路径或命令'), '/bin/lark-c'); await click('检查并连接')
-  expect(write).toHaveBeenCalledWith({ cli: '/bin/lark-c', profile: '', revision: 2 })
+  await click('添加机器人'); await type(field<HTMLSelectElement>('账号与机器人'), 'qa'); await click('验证并连接所选机器人')
+  expect(write).toHaveBeenCalledWith({ appId: 'cli_qa', profile: 'qa', revision: 2 })
   expect(all('.dt-bot-card')).toHaveLength(3)
   const beta = all('.dt-bot-card').find(card => card.textContent?.includes('设备助手'))!
   await click([...beta.querySelectorAll('button')].find(button => button.textContent === '绑定群聊')!)
@@ -475,20 +510,65 @@ it('adds a verified bot without replacing existing connections and opens the sel
   expect(field<HTMLSelectElement>('飞书群').textContent).toContain('设备交付群')
 })
 
-it('edits each bot’s repository grants independently and preserves the other bot grants', async () => {
-  const original = globalThis.fetch, state = multipleBots(), write = vi.fn()
+it('loads bound group members by name and preserves grants belonging to other bots', async () => {
+  const original = globalThis.fetch, state = multipleBots(), write = vi.fn(), reads: string[] = []
+  state.repositories[0]!.allowedFeishu.push('周津津')
   state.repositories[0]!.allowedFeishuByBot = { 'bot-b': ['ou_beta'] }
+  state.bindings.push({ botId: 'bot-b', chatId: 'oc_device', repositoryId: 'repo-a', enabled: true, effectiveAt: '2026-01-01T00:00:00Z' })
   vi.stubGlobal('fetch', (url: string, options?: RequestInit) => {
     if (url === '/orchestrator/manager/state') return Promise.resolve(Response.json(state))
+    if (url.endsWith('/members')) {
+      reads.push(url)
+      return Promise.resolve(Response.json({ users: url.includes('/bot-a/')
+        ? [{ member_id: 'ou_alice', name: 'Alice' }]
+        : [{ member_id: 'ou_beta', name: 'Beta' }, { member_id: 'ou_new', name: '周津津' }] }))
+    }
     if (url === '/orchestrator/manager/repositories/repo-a' && options?.method === 'PUT') { write(JSON.parse(String(options.body))); return Promise.resolve(Response.json(state)) }
     return original(url, options)
   })
+  const checkbox = (label: string) => all('label.dt-check').find(item => item.textContent?.trim() === label)!.querySelector('input')!
   await mount(); await click('仓库设置')
+  expect(field<HTMLSelectElement>('已绑定的群聊').value).toBe('oc_team')
+  expect(checkbox('Alice').checked).toBe(true)
+  expect(checkbox('周津津（无效 ID）').checked).toBe(true)
+  await click(checkbox('周津津（无效 ID）'))
   await type(field<HTMLSelectElement>('授权所属机器人'), 'bot-b')
-  expect(field<HTMLInputElement>('已授权的飞书用户 ID').value).toBe('ou_beta')
-  await type(field<HTMLInputElement>('已授权的飞书用户 ID'), 'ou_beta ou_new')
+  const group = field<HTMLSelectElement>('已绑定的群聊')
+  expect(group.value).toBe('oc_device')
+  expect(group.textContent).not.toContain('设备研发群')
+  expect(checkbox('Beta').checked).toBe(true)
+  await type(field<HTMLInputElement>('搜索群成员'), '周')
+  expect(text()).not.toContain('Beta')
+  await click(checkbox('周津津'))
   await click('保存仓库设置')
+  expect(reads).toEqual(['/orchestrator/manager/bots/bot-a/chats/oc_team/members', '/orchestrator/manager/bots/bot-b/chats/oc_device/members'])
   expect(write).toHaveBeenCalledWith(expect.objectContaining({ allowedFeishu: ['ou_alice'], allowedFeishuByBot: { 'bot-b': ['ou_beta', 'ou_new'] } }))
+})
+
+it('retries member lookup from repository settings after a Feishu permission error', async () => {
+  const original = globalThis.fetch, write = vi.fn()
+  const state = multipleBots()
+  let granted = false
+  vi.stubGlobal('fetch', (url: string, options?: RequestInit) => {
+    if (url.endsWith('/manager/state')) return Promise.resolve(Response.json(state))
+    if (url.endsWith('/members')) return Promise.resolve(granted
+      ? Response.json({ users: [{ member_id: 'ou_alice', name: 'Alice' }] })
+      : Response.json({ code: 99991672, error: 'access denied' }, { status: 400 }))
+    if (options?.method === 'PUT') write(url)
+    return original(url, options)
+  })
+  await mount(); await click('仓库设置')
+  expect(text()).toContain('im:chat.members:read')
+  await type(field<HTMLInputElement>('研发团队'), '新团队')
+  granted = true
+  const approval = document.querySelector<HTMLAnchorElement>('.dt-feishu-permission a')!
+  expect(approval.href).toBe('https://open.feishu.cn/app/cli_a/auth?q=im%3Achat.members%3Aread&op_from=openapi&token_type=tenant')
+  expect(document.querySelector('.dt-feishu-permission img')).toBeTruthy()
+  await act(async () => { window.dispatchEvent(new Event('focus')) })
+  expect(text()).toContain('Alice')
+  expect(text()).not.toContain('im:chat.members:read')
+  expect(field<HTMLInputElement>('研发团队').value).toBe('新团队')
+  expect(write).not.toHaveBeenCalled()
 })
 
 it('offers legacy connection recovery before registering a new bot', async () => {
@@ -505,9 +585,8 @@ it('offers legacy connection recovery before registering a new bot', async () =>
   expect(text()).toContain('原有机器人连接待恢复')
   expect(all('button').find(button => button.textContent === '添加机器人')).toHaveProperty('disabled', true)
   await click('恢复原有连接')
-  expect(field<HTMLInputElement>('机器人 CLI 路径或命令').value).toBe('/bin/original-bot')
-  await type(field<HTMLInputElement>('机器人 CLI 路径或命令'), '/bin/restored-bot'); await click('检查并连接')
-  expect(write).toHaveBeenCalledWith({ cli: '/bin/restored-bot', profile: '', revision: 2 })
+  await click('重新验证原连接')
+  expect(write).toHaveBeenCalledWith({ cli: '/bin/original-bot', profile: '', revision: 2 })
   expect(text()).not.toContain('原有机器人连接待恢复')
   expect(all('.dt-bot-card')).toHaveLength(2)
 })
@@ -533,28 +612,25 @@ it('shows health and queued routes for each bot independently', async () => {
 })
 
 
-it('uses a separate named profile for another bot on the same CLI and protects a profile-only draft', async () => {
+it('limits reconnect choices to profiles for the same app', async () => {
   const original = globalThis.fetch, state = multipleBots(), write = vi.fn()
   state.bots![0]!.profile = 'platform'
   state.bots![1]!.cli = state.bots![0]!.cli
   state.bots![1]!.profile = 'device'
   vi.stubGlobal('fetch', (url: string, options?: RequestInit) => {
     if (url === '/orchestrator/manager/state') return Promise.resolve(Response.json(state))
-    if (url === '/orchestrator/manager/bots/bot-b' && options?.method === 'PUT') { write(JSON.parse(String(options.body))); return Promise.resolve(Response.json(state)) }
+    if (url.endsWith('/feishu/accounts')) return Promise.resolve(Response.json({ items: [{ profile: 'platform', appId: 'cli_a', name: '平台助手' }, { profile: 'device-v2', appId: 'cli_b', name: '设备助手' }] }))
+    if (url.endsWith('/feishu/connect') && options?.method === 'POST') { write(JSON.parse(String(options.body))); return Promise.resolve(Response.json(state)) }
     return original(url, options)
   })
   await mount(); await click(rail('飞书机器人'))
   const beta = all('.dt-bot-card').find(card => card.textContent?.includes('设备助手'))!
   await click([...beta.querySelectorAll('button')].find(button => button.textContent === '修改连接')!)
-  expect(field<HTMLInputElement>('机器人 CLI 路径或命令').value).toBe('/bin/lark-a')
-  expect(field<HTMLInputElement>('CLI 配置档案（Profile）').value).toBe('device')
-  await type(field<HTMLInputElement>('CLI 配置档案（Profile）'), 'device-v2')
-  await click('取消')
-  expect(document.querySelector('[role="dialog"]')?.textContent).toContain('放弃未保存的连接修改')
-  await click('继续编辑')
-  expect(field<HTMLInputElement>('CLI 配置档案（Profile）').value).toBe('device-v2')
-  await click('检查并连接')
-  expect(write).toHaveBeenCalledWith({ cli: '/bin/lark-a', profile: 'device-v2', revision: 2 })
+  const select = field<HTMLSelectElement>('账号与机器人')
+  expect(select.textContent).not.toContain('平台助手')
+  await type(select, 'device-v2')
+  await click('验证并连接所选机器人')
+  expect(write).toHaveBeenCalledWith({ appId: 'cli_b', profile: 'device-v2', revision: 2, connection: 'bot-b' })
   expect(state.bots![0]!.profile).toBe('platform')
 })
 
@@ -591,6 +667,17 @@ it('preserves the selected binding on a member permission failure and retries in
   await click('读取群成员')
   expect(text()).toContain('May')
   expect(text()).not.toContain('im:chat.members:read')
+})
+
+it('opens the selected repository access editor from its inbox, even when no requesters exist', async () => {
+  server.settings = { ...server.settings, policy: { ...server.settings.policy, sources: {
+    feishu: { allowed: [], admission: {} }, github: { allowed: [], admission: {} },
+  } } }
+  await mount()
+  await click(rail('acme/widgets'))
+  await click(zh.actionAddAllowed)
+  expect(field<HTMLInputElement>('GitHub 仓库').value).toBe('acme/widgets')
+  expect(text()).toContain('保存仓库设置')
 })
 
 it('distinguishes history permission failures from live message intake and keeps raw diagnostics', async () => {

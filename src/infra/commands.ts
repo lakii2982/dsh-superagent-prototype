@@ -14,17 +14,28 @@ const TIMEOUT_MS = 90_000
 export class CliError extends Error {
   constructor(message: string, readonly code?: number, readonly exitCode?: number) { super(message) }
 }
+interface LarkFailure { code?: number; message?: string; subtype?: string; missing_scopes?: unknown }
+function larkFailure(error: LarkFailure, exitCode?: number) {
+  const missing = Array.isArray(error.missing_scopes) ? error.missing_scopes.filter((scope): scope is string =>
+    typeof scope === 'string' && /^[a-z][a-z0-9_]*:[a-z0-9_.:]{1,100}$/.test(scope)).slice(0, 12) : []
+  const parts = [error.message || 'Feishu command failed']
+  if (error.subtype === 'missing_scope' || missing.length) parts.push('missing_scope', ...missing)
+  if (error.code) parts.push(`(${error.code})`)
+  return new CliError(parts.join(' '), error.code, exitCode)
+}
 /** Extracts a sanitized error from a failed subprocess without echoing argv, which may contain message text. */
 export function commandError(error: unknown, program = 'command'): Error {
   if (error instanceof Error && error.name === 'AbortError') return error
   const exitCode = error && typeof error === 'object' && 'code' in error && typeof error.code === 'number' ? error.code : undefined
   if (error && typeof error === 'object' && 'stderr' in error && typeof error.stderr === 'string') {
     const stderr = error.stderr.trim()
-    let parsed: { error?: { code?: number; message?: string } } | undefined
+    let parsed: { error?: LarkFailure } | undefined
     try { parsed = JSON.parse(stderr.slice(stderr.indexOf('{'))) as typeof parsed }
     catch { /* Non-JSON CLI diagnostics are retained below. */ }
-    const code = parsed?.error?.code
-    if (parsed?.error?.message) return new CliError(`${parsed.error.message}${code ? ` (${code})` : ''}`, code, exitCode)
+    if (!parsed?.error && 'stdout' in error && typeof error.stdout === 'string') {
+      try { parsed = JSON.parse(error.stdout) as typeof parsed } catch { /* Some commands use plain text. */ }
+    }
+    if (parsed?.error?.message) return larkFailure(parsed.error, exitCode)
     // `gh` exits non-zero on HTTP errors (such as `gh: Not Found (HTTP 404)`) and on `gh: HTTP 304`, which ETag polling relies on.
     if (stderr) return new CliError(stderr.slice(0, 2000), Number(/\bHTTP (\d{3})\b/.exec(stderr)?.[1]) || undefined, exitCode)
   }
@@ -134,9 +145,8 @@ export class Commands {
     if (!bot) throw new Error('The Feishu Source has no working bot CLI')
     const output = await this.run(bot.cli, [...args, '--as', 'bot', '--format', 'json', ...(bot.profile ? [`--profile=${bot.profile}`] : [])], cwd)
       .catch((error: unknown) => { throw membership(error) })
-    const result = JSON.parse(output) as { ok: boolean; data: T; error?: { code?: number; message?: string } }
-    const code = result.error?.code
-    if (!result.ok) throw membership(new CliError(`${result.error?.message ?? 'Feishu command failed'}${code ? ` (${code})` : ''}`, code))
+    const result = JSON.parse(output) as { ok: boolean; data: T; error?: LarkFailure }
+    if (!result.ok) throw membership(larkFailure(result.error ?? {}))
     return result.data
   }
   /** Runs `git` on PATH using the agent's isolated git environment and credential helper. */

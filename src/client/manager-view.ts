@@ -1,5 +1,8 @@
 /** Shared, credential-free manager view contract for the workspace and native plugin settings. */
+import { lacksAppScope } from '../feishu-permission.ts'
 import type { Repository, Binding } from '../manager/store.ts'
+
+export interface DirectoryListing { path: string; parent: string | null; directories: string[]; checkout: boolean; hasMore: boolean }
 
 interface ReadinessItem { state: string; detail?: string; repair?: string }
 type DeliveryReadiness = ReadinessItem & { pending: number; byChat: Record<string, number> }
@@ -14,7 +17,7 @@ export interface RepositoryView extends Omit<Repository, 'token'> {
 }
 export interface ManagerBotView {
   id: string; botId: string; appId: string; brand: 'feishu' | 'lark'; name: string; cli: string; profile?: string
-  enabled: boolean; connected: boolean; legacy?: boolean
+  account?: string; enabled: boolean; connected: boolean; legacy?: boolean
   chats: Record<string, string>; health: Record<string, { state: string; detail?: string }>
 }
 export interface ManagerView {
@@ -55,8 +58,10 @@ export function botHealthView(bot: ManagerBotView, tr: (zh: string, en: string) 
   const issues = Object.entries(bot.health).filter(([, value]) => value.state === 'error').map(([key, value]) => {
     const groupInfo = ['chats', 'groups', 'chatNames', 'chat-names'].includes(key)
     const label = key === 'feishu' ? tr('实时消息接入', 'Live message intake') : key === 'history'
-      ? tr('历史消息补收', 'History recovery') : groupInfo ? tr('群信息读取', 'Group information') : key
-    const limited = /\b230027\b/.test(value.detail ?? '')
+      ? tr('历史消息补收', 'History recovery') : groupInfo ? tr('群信息读取', 'Group information') : key === 'reply' ? tr('回复消息', 'Reply to messages')
+      : key === 'attachment' ? tr('读取消息图片', 'Read message images') : key === 'messageRead' ? tr('读取消息', 'Read messages')
+      : key === 'members' ? tr('读取群成员', 'Read group members') : key
+    const limited = lacksAppScope(value.detail ?? '') || /\b230027\b/.test(value.detail ?? '')
     const summary = limited ? tr('应用权限不足，请检查该机器人应用的相关权限与群访问范围。', 'The app lacks permission for this operation. Check this bot app’s permissions and group access.')
       : key === 'history' ? tr('暂时无法补收历史消息，请检查应用权限和群访问范围。', 'History recovery is unavailable. Check app permissions and group access.')
       : key === 'feishu' ? tr('实时消息接收异常，请检查机器人连接与事件配置。', 'Live message intake needs attention. Check the bot connection and event configuration.')

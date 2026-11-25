@@ -291,6 +291,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | Path | Responsibility |
 | --- | --- |
 | `src/index.ts` | Reads machine settings, starts the Runtime or Manager, and restarts when an account or desktop workspace mode changes |
+| `src/feishu-permission.ts` | Maps verified bot identities and missing application scopes to regional Feishu permission pages. |
 | `src/deployment.ts` | The plugin `Config` and `Machine`; `resolveDeployment` and `resolveFeishuBot` read the repository and the accounts from the Source settings, each CLI run as Executor shells run it; `SETUP_FIELDS` lists the Source fields setup reads. The code names no person, account or organization |
 | `src/setup.ts` | Setup problems: `SetupError`, with a code, the place that fixes it and the English text the log, the main Session and the panel share |
 | `src/policy.ts` | The Policy: the settings schemas by block, the Policy version, the gate and Mandate revalidation |
@@ -408,8 +409,11 @@ Some generic modules still refer directly to GitHub or Feishu:
 `src/sources/github.ts` and `src/sources/feishu.ts` are also the entries of the two Source plugins, built by `tsdown.config.ts` and exported in `package.json` as `./github-watch` and `./feishu-watch`. The bundle's `cordis.patch.yml` inserts the three plugins, with Feishu disabled.
 
 | `src/client/manager.tsx` | Manager mode in the unified panel: the control pages, the manager groups above the selected repository's own areas, and the mode switch |
+| `src/client/feishu-account-picker.tsx` | Discovers configured accounts and bots, resumes Feishu registration and selects verified identities |
 | `src/client/manager-view.ts` | Credential-free repository and manager view contracts shared by the workspace and native plugin settings |
+| `src/manager/branch-rules.ts` | Uses the deployment rules checker during supervisor preflight and managed worker setup |
 | `src/manager/protocol.ts` | Multi-repository management, deterministic Feishu routing and isolated execution |
+| `src/manager/feishu-accounts.ts` | Enumerates CLI profiles and coordinates bounded Feishu app registration and confirmation QR generation |
 | `src/manager/operator-auth.ts` | Validates the protected operator credential file and authenticates manager requests |
 | `src/manager/store.ts` | Multi-repository management, deterministic Feishu routing and isolated execution |
 | `src/manager/instances.ts` | Multi-repository management, deterministic Feishu routing and isolated execution |

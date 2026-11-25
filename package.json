@@ -21,6 +21,7 @@
   },
   "files": [
     "lib",
+    "scripts/lark-bot",
     "cordis.patch.yml",
     "locale/*.json",
     "README.md",

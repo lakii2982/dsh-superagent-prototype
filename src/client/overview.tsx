@@ -26,9 +26,19 @@ function ProblemLine({ problem, onChanged }: { problem: Problem; onChanged: () =
   const worded = (text: string) => <p className="dt-error">{text}</p>
   switch (problem.kind) {
     // A failed Feishu bot check pauses only the Feishu Source; other setup problems halt the entire service.
-    case 'setup': return row(t(problem.place === 'feishu' ? 'problemSetupFeishu' : 'problemSetup'), <p className="dt-error"><SetupMessage
+    case 'setup': {
+      if (problem.code === 'branchRulesMissing' || problem.code === 'branchRulesUnreadable') {
+        const repository = problem.values.repository
+        return row(t('problemSetup'), <p className="dt-error"><SetupMessage problem={problem} /></p>, undefined, undefined, <>
+          {repository && /^[\w.-]+\/[\w.-]+$/.test(repository) && <a className="dt-inline-link" href={`https://github.com/${repository}/settings/rules`}
+            target="_blank" rel="noopener noreferrer">GitHub Rulesets</a>}
+          <CheckSetupButton />
+        </>)
+      }
+      return row(t(problem.place === 'feishu' ? 'problemSetupFeishu' : 'problemSetup'), <p className="dt-error"><SetupMessage
       problem={problem} /></p>,
       setupPage(problem.place), t(`problemSetupFix.${problem.place}`), <CheckSetupButton />)
+    }
     case 'no-source': return row(t('problemNoSource'), undefined, settingsRoute('source'), undefined, go(t('actionOpenSources'),
       settingsRoute('source')))
     case 'no-allowed': return row(t('problemNoAllowed'), undefined, requesterSettings, undefined, go(t('actionAddAllowed'), requesterSettings))

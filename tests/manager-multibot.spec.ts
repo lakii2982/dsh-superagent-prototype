@@ -85,6 +85,21 @@ beforeEach(async () => {
 })
 afterEach(async () => { await manager?.stop(); vi.restoreAllMocks(); rmSync(directory, { recursive: true, force: true }) })
 
+it('generates the permission QR locally for the registered application and exact scope', async () => {
+  const bot = await add('bot-a')
+  const encoder = join(directory, 'lark-cli')
+  writeFileSync(encoder, '#!/bin/sh\n[ "$1" = auth ] && [ "$2" = qrcode ] && [ "$4" = --output ] || exit 1\nprintf %s "$3" > "$5"\n')
+  chmodSync(encoder, 0o755)
+  vi.stubEnv('PATH', `${directory}:${process.env.PATH}`)
+  try {
+    const path = `manager/bots/${bot.id}/permission-qr`
+    const qr = await call(path, { scope: 'im:chat.members:read' })
+    expect(qr.status).toBe(200)
+    const encoded = Buffer.from(qr.data.image.split(',')[1], 'base64').toString()
+    expect(encoded).toBe('https://open.feishu.cn/app/cli_a/auth?q=im%3Achat.members%3Aread&op_from=openapi&token_type=tenant')
+    expect((await call(path, { scope: 'https://example.com' })).status).toBe(400)
+  } finally { vi.unstubAllEnvs() }
+})
 it('connects multiple verified identities and rejects duplicate, stale or changed identities', async () => {
   const a = await add('bot-a'), revision = manager.store.revision()
   expect((await call('manager/bots', { cli: 'bot-a', revision })).status).toBe(400)
@@ -254,4 +269,69 @@ it('serializes overlapping group changes so each bot keeps exactly one live cons
   expect(state.stopped).toEqual([])
   await manager.stop()
   expect(state.stopped).toEqual(['ou_bota'])
+})
+
+it('discovers same-name bots across accounts, verifies the selected app and rejects stale and duplicate selections', async () => {
+  const cli = join(directory, 'lark-cli')
+  writeFileSync(cli, `#!/usr/bin/env node
+const args = process.argv.slice(2)
+console.log(JSON.stringify(args[0] === 'profile' ? [
+  {name:'alpha', appId:'cli_alpha', user:'张三', brand:'feishu', secret:'never expose'},
+  {name:'beta', appId:'cli_beta', user:'李四', brand:'feishu'}
+] : {bot:{app_name:'研发助手'}}))
+`)
+  chmodSync(cli, 0o755)
+  vi.stubEnv('DSH_SUPERAGENT_LARK_CLI', cli)
+  try {
+    const { data } = await call('manager/feishu/accounts')
+    expect(data.items).toEqual([
+      { profile: 'alpha', appId: 'cli_alpha', name: '研发助手', account: '张三', brand: 'feishu' },
+      { profile: 'beta', appId: 'cli_beta', name: '研发助手', account: '李四', brand: 'feishu' },
+    ])
+    const connect = (profile: string, appId: string, connection?: string) => call('manager/feishu/connect',
+      { profile, appId, connection, revision: manager.store.revision() })
+    expect((await connect('beta', 'cli_alpha')).status).toBe(400)
+    const alpha = await connect('alpha', 'cli_alpha')
+    expect(alpha.status).toBe(200)
+    expect((await connect('beta', 'cli_beta', alpha.data.id)).status).toBe(400)
+    expect((await connect('alpha', 'cli_alpha')).status).toBe(400)
+    expect((await connect('beta', 'cli_beta')).status).toBe(200)
+    expect(manager.store.bots().map(bot => [bot.profile, bot.account])).toEqual([['alpha','张三'],['beta','李四']])
+    state.identities.set(manager.store.bots()[0]!.cli + ':alpha', 'changed')
+    expect((await connect('alpha', 'cli_alpha', alpha.data.id)).status).toBe(400)
+  } finally { vi.unstubAllEnvs() }
+})
+
+it('resumes a scoped QR registration, supports cancellation and creates a separate named profile on retry', async () => {
+  const cli = join(directory, 'lark-cli')
+  const finish = join(directory, 'finish')
+  writeFileSync(cli, `#!/usr/bin/env node
+const fs = require('node:fs'), args = process.argv.slice(2)
+if (args[0] === 'auth') fs.writeFileSync(args[4], 'qr')
+else if (args[1] === 'init' && args.includes('--new') && args.includes('--name')) {
+  console.error('https://example.com/private')
+  process.stderr.write('https://open.feishu.cn/page/cli?user_code=')
+  setTimeout(() => console.error('test&from=cli'), 10)
+  setInterval(() => { if (fs.existsSync(${JSON.stringify(finish)})) process.exit(0) }, 25)
+} else process.exit(1)
+`)
+  chmodSync(cli, 0o755)
+  vi.stubEnv('DSH_SUPERAGENT_LARK_CLI', cli)
+  const path = 'manager/feishu/registration'
+  try {
+    const first = await call(path, {})
+    expect(first.data.status).toBe('waiting')
+    expect((await call(path, {})).status).toBe(400)
+    const status = path + '/' + first.data.id
+    await vi.waitFor(async () => expect((await call(status)).data).toMatchObject({
+      status: 'waiting', url: 'https://open.feishu.cn/page/cli?user_code=test&from=cli', image: 'data:image/png;base64,cXI=' }))
+    expect((await call(status, {}, 'DELETE')).status).toBe(200)
+    expect((await call(status)).status).toBe(400)
+    const next = await call(path, {})
+    expect(next.data.profile).not.toBe(first.data.profile)
+    writeFileSync(finish, '')
+    await vi.waitFor(async () => {
+      expect((await call(path + '/' + next.data.id)).data).toEqual({ id: next.data.id, profile: next.data.profile, status: 'ready' })
+    })
+  } finally { vi.unstubAllEnvs() }
 })

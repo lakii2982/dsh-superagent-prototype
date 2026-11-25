@@ -1,6 +1,6 @@
 /** Exercises manager reservations and journal dispatch with in-process authenticated instance fixtures. */
 import { EventEmitter } from 'node:events'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import type { ChildProcess } from 'node:child_process'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
@@ -10,6 +10,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { Config } from '../src/deployment.ts'
 import type { Trigger } from '../src/core/index.ts'
+import * as checkout from '../src/infra/repository.ts'
 import * as instanceRuntime from '../src/manager/instances.ts'
 import { Manager } from '../src/manager/runtime.ts'
 import { ManagerStore, type Repository } from '../src/manager/store.ts'
@@ -102,6 +103,31 @@ afterEach(async () => {
   vi.useRealTimers()
   vi.restoreAllMocks()
   rmSync(directory, { recursive: true, force: true })
+})
+
+it('lists host folders and validates a new local directory before saving an enterprise registration', async () => {
+  setupManager({ enterprisePilot: true })
+  const { repository } = registerInstance(1, 1, true, true)
+  manager.store.save([{ ...repository, directory: '' }], [], manager.store.revision())
+  await manager.start()
+  const root = realpathSync(directory)
+  const path = join(root, '研发 仓库')
+  mkdirSync(path)
+  writeFileSync(join(path, '.git'), 'gitdir: /elsewhere')
+  writeFileSync(join(root, 'file.txt'), 'file')
+  mkdirSync(join(root, '.hidden'))
+  const browse = (folder: string) => request(`directories?path=${encodeURIComponent(folder)}`)
+  expect(await browse(root)).toMatchObject({ status: 200, value: { path: root, directories: ['研发 仓库'], checkout: false } })
+  expect(await browse(path)).toMatchObject({ status: 200, value: { path, parent: root, checkout: true } })
+  expect((await browse('relative')).status).toBe(400)
+  const verify = vi.spyOn(checkout, 'verifyRepository').mockRejectedValueOnce(new Error('The checkout does not match')).mockResolvedValueOnce(path)
+  const revision = manager.store.revision()
+  const update = () => request(`repositories/${repository.id}`, 'PUT', { ...repository, directory: path, revision })
+  expect((await update()).status).toBe(400)
+  expect(manager.store.repositories()[0]?.directory).toBe('')
+  expect((await update()).status).toBe(200)
+  expect(verify).toHaveBeenCalledWith(path, repository.remote, undefined, expect.any(AbortSignal))
+  expect(manager.store.repositories()[0]).toMatchObject({ id: repository.id, directory: path })
 })
 
 it('validates the configured capacity and preserves the legacy default', () => {
